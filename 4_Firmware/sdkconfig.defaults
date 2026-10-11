@@ -1,17 +1,21 @@
 # SOURCE: ticket #138 — le sdkconfig.defaults de la v1 (archivée dans l'atelier, sources/firmware-v1/), repris pour la même carte
 # AUTHOR: engineer
-# DATE: 2026-09-27
-# STATUS: actif — lu par 4_Firmware/build.sh ; le sdkconfig est généré dans 4_Firmware/build, jamais versionné ;
+# DATE: 2026-10-10
+# STATUS: actif — lu par 4_Firmware/build.sh ; le sdkconfig est généré dans 4_Firmware/build/<cible>, jamais versionné ;
 #         ticket #168 : pile de app_main ; ticket #220 : les rappels d'esp_timer en interruption ;
-#         ticket #528 : la panique du chien de garde, l'ISR de l'UART en IRAM
+#         ticket #528 : la panique du chien de garde, l'ISR de l'UART en IRAM ;
+#         ticket #574 : les réglages communs aux deux cibles, ceux d'une cible dans sdkconfig.defaults.<cible>
 #
-# Seeed XIAO ESP32S3 — banc de test monture E
-CONFIG_IDF_TARGET="esp32s3"
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+# Les réglages communs aux deux cibles : la XIAO ESP32-S3 du banc et la carte v1.0 (ESP32-C3). La cible est choisie
+# par build.sh (-DIDF_TARGET) ; ESP-IDF lit ce fichier, puis sdkconfig.defaults.<cible> (sdkconfig.defaults.esp32s3,
+# sdkconfig.defaults.esp32c3), qui porte ce qui ne vaut que pour elle : la taille de la flash, et ce qui en découle.
+# Table de partitions : une application de 1500 Ko, la NVS de la marque (24 Ko) et phy_init (partitions_singleapp_large.csv
+# d'ESP-IDF 5.3.2) ; elle tient dans les 4 Mo du C3 comme dans les 8 Mo de la S3.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
-# Console : USB natif (CDC via USB Serial/JTAG), réservé au protocole (PROTOCOL.md) : la carte ne
-# parle jamais la première. Aucun journal ESP ni bootloader n'y passe (v1, sdkconfig.defaults:8-12).
+# Console : USB natif (CDC via USB Serial/JTAG, que la S3 et le C3 ont tous deux ; GPIO18 et GPIO19 sur le C3),
+# réservé au protocole (PROTOCOL.md) : la carte ne parle jamais la première. Aucun journal ESP ni bootloader n'y passe
+# (v1, sdkconfig.defaults:8-12).
 # La ligne CONFIG_LOG_MAXIMUM_LEVEL_NONE=y de la v1 n'est pas reprise : ESP-IDF 5.3.2 ne connaît pas
 # ce symbole (« unknown kconfig symbol ») ; le maximum y vaut le niveau par défaut
 # (LOG_MAXIMUM_EQUALS_DEFAULT), donc 0. build.sh vérifie les trois niveaux à 0 sur le build.
@@ -19,9 +23,6 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_LOG_DEFAULT_LEVEL_NONE=y
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
-
-# Pas de PSRAM nécessaire ; tout en RAM interne, déterministe.
-CONFIG_SPIRAM=n
 
 # FreeRTOS : tick 1 kHz pour des délais courts propres.
 CONFIG_FREERTOS_HZ=1000
@@ -51,5 +52,7 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 CONFIG_UART_ISR_IN_IRAM=y
 
 # Ticket #220 : l'échéance de 2 ms de la retombée de XDETECT (components/phy/phy.c, drop_timer) est un esp_timer rappelé
-# en interruption (ESP_TIMER_ISR), sans tâche ni file ; ce mode n'existe qu'avec cette option (esp_timer.h).
+# en interruption (ESP_TIMER_ISR), sans tâche ni file ; ce mode n'existe qu'avec cette option (esp_timer.h). L'option
+# ne dépend d'aucune cible (Kconfig d'esp_timer, ESP-IDF 5.3.2) : elle vaut pour le C3 comme pour la S3, et un build où
+# elle manquerait ne compilerait pas phy.c (ESP_TIMER_ISR n'y serait pas déclaré).
 CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y

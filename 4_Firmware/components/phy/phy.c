@@ -3,7 +3,7 @@
  * DATE: 2026-10-04
  * STATUS: actif — compilé par ESP-IDF seul : aucun test hôte ne le joue (seul phy_common.c l'est, dans les deux PHY) ;
  *         ticket #528 : l'ISR de l'UART en IRAM, la tâche abonnée au chien de garde, le compteur des fronts perdus, la
- *         VD refusée arrête la carte
+ *         VD refusée arrête la carte ; ticket #574 : les EN par leur polarité (pins.h), mis en sortie déjà coupés
  *
  * L'UART, les lignes, la VD, les rails et le verrou de XDETECT de la carte ; la réception en flux et la présence
  * viennent de phy_common.c.
@@ -52,6 +52,11 @@
 #define VD_MODE    LEDC_LOW_SPEED_MODE
 #define VD_RES     LEDC_TIMER_13_BIT
 #define VD_LOW_US  60
+
+/* Les niveaux des EN, de la polarité de la carte (pins.h, décision Q6 de l'humain) : toute écriture sur une broche EN
+ * passe par eux, aucune n'emploie de niveau littéral ; le tirage vers « coupé » est posé par en_init. */
+#define EN_ON   (EN_ACTIVE_LOW ? 0u : 1u)
+#define EN_OFF  (EN_ACTIVE_LOW ? 1u : 0u)
 
 #define MUST(x) do { if (!(x)) abort(); } while (0)
 
@@ -138,8 +143,8 @@ static void IRAM_ATTR vd_isr(void *arg)
  * cœur 0 — non mesuré. */
 static void IRAM_ATTR cut(void)
 {
-    gpio_ll_set_level(&GPIO, PIN_EN_LOGIC, 0);
-    gpio_ll_set_level(&GPIO, PIN_EN_MOTOR, 0);
+    gpio_ll_set_level(&GPIO, PIN_EN_LOGIC, EN_OFF);
+    gpio_ll_set_level(&GPIO, PIN_EN_MOTOR, EN_OFF);
     gpio_ll_intr_disable(&GPIO, PIN_BODY_VD);
     gpio_ll_output_disable(&GPIO, PIN_LENS_TXD);
     gpio_ll_output_disable(&GPIO, PIN_BODY_CS);
@@ -439,7 +444,7 @@ bool bsk_phy_rail(bsk_rail_t rail, bool on)
     bool ok;
     portENTER_CRITICAL(&pres_mux);
     ok = !on || pres.present;
-    if (ok) gpio_ll_set_level(&GPIO, rail == BSK_RAIL_LOGIC ? PIN_EN_LOGIC : PIN_EN_MOTOR, on ? 1 : 0);
+    if (ok) gpio_ll_set_level(&GPIO, rail == BSK_RAIL_LOGIC ? PIN_EN_LOGIC : PIN_EN_MOTOR, on ? EN_ON : EN_OFF);
     portEXIT_CRITICAL(&pres_mux);
     return ok;
 }
@@ -460,13 +465,41 @@ bool bsk_phy_lines(bool drive)
     return lock_held();
 }
 
+/* Les EN mis en sortie sans jamais sortir ni être tirés vers « allumé » (ticket #574) : du reset jusqu'à la demande
+ * de la SESSION (bsk_phy_rail), aucune écriture de ce firmware ne va vers « allumé ». Pourquoi c'est vrai, sur les
+ * deux cibles :
+ *   - au reset, la sortie de GPIO7 et GPIO8 du C3 est coupée (DS C3, table 2-1) : R1 et R4 tiennent les /EN hauts,
+ *     rails coupés. Ouvrir une sortie sort ce que contient le registre de sortie du GPIO, que rien ici n'a écrit : sur
+ *     le C3, 0 est « allumé ». D'où le niveau écrit avant que la sortie ne soit ouverte ;
+ *   - gpio_config (ESP-IDF 5.3.2, lu dans ses sources) ouvre la sortie, pose les tirages, puis seulement choisit la
+ *     fonction GPIO de la broche, et n'écrit jamais le niveau. D'où trois temps : gpio_config en mode DISABLE (la
+ *     sortie fermée, le tirage vers « coupé », la fonction GPIO) ; le niveau « coupé » écrit, sortie toujours fermée ;
+ *     la sortie ouverte (gpio_set_direction : l'entrée et le drain ouvert fermés, la sortie ouverte, rien d'autre).
+ *     Ouverte, la broche sort le niveau déjà écrit ;
+ *   - le tirage vers « coupé » (haut sur le C3) va dans le sens de R1 et R4 : il ne les combat pas ;
+ *   - avant bsk_phy_init, rien ne touche les EN : le bootloader et le démarrage d'ESP-IDF 5.3.2 ne nomment ni GPIO7 ni
+ *     GPIO8 du C3 (lu dans leurs sources ; le bootloader ne configure de broches que pour une console UART ou les
+ *     options BOOTLOADER_FACTORY_RESET et BOOTLOADER_APP_TEST, aucune posée), et rien n'est appelé avant bsk_phy_init
+ *     dans app_main (main/main.c). Non vérifié sur la carte.
+ * Ce que la puce fait seule à la mise sous tension n'en relève pas : le créneau bas de 5 ns de GPIO7 (MTDO) est du
+ * silicium, avant tout code, et l'humain l'a jugé sans effet. */
+static void en_init(void)
+{
+    const gpio_config_t en = {
+        .pin_bit_mask = (1ULL << PIN_EN_LOGIC) | (1ULL << PIN_EN_MOTOR),
+        .mode = GPIO_MODE_DISABLE,
+        .pull_up_en = EN_ACTIVE_LOW ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+        .pull_down_en = EN_ACTIVE_LOW ? GPIO_PULLDOWN_DISABLE : GPIO_PULLDOWN_ENABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&en));
+    gpio_set_level(PIN_EN_LOGIC, EN_OFF);
+    gpio_set_level(PIN_EN_MOTOR, EN_OFF);
+    ESP_ERROR_CHECK(gpio_set_direction(PIN_EN_LOGIC, GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_direction(PIN_EN_MOTOR, GPIO_MODE_OUTPUT));
+}
+
 void bsk_phy_init(void)
 {
-    const gpio_config_t out = {
-        .pin_bit_mask = (1ULL << PIN_EN_LOGIC) | (1ULL << PIN_EN_MOTOR),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-    };
     const gpio_config_t lines = {   /* au repos (rest) : TXD n'est pas routée, VD arrêtée */
         .pin_bit_mask = (1ULL << PIN_LENS_TXD) | (1ULL << PIN_BODY_CS) | (1ULL << PIN_BODY_VD),
         .mode = GPIO_MODE_INPUT,
@@ -495,9 +528,7 @@ void bsk_phy_init(void)
 
     /* rien n'est émis : lignes au repos, rails coupés */
     ESP_ERROR_CHECK(gpio_config(&lines));
-    ESP_ERROR_CHECK(gpio_config(&out));
-    gpio_set_level(PIN_EN_LOGIC, 0);
-    gpio_set_level(PIN_EN_MOTOR, 0);
+    en_init();
     ESP_ERROR_CHECK(gpio_config(&detect));
     ESP_ERROR_CHECK(gpio_config(&cs));
 
@@ -538,7 +569,7 @@ void bsk_phy_init(void)
      * par la tâche, 300 ms après */
     ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_LENS_DETECT, detect_isr, NULL));
 
-    /* le cœur 0, comme toutes les tâches (décision de l'humain) : la carte cible est un ESP32-C3, à un seul cœur ; sur
-     * la S3, un cœur réservé à la PHY la testerait dans de meilleures conditions que la cible. */
+    /* le cœur 0, comme toutes les tâches (décision de l'humain) : la carte v1.0 est un ESP32-C3, à un seul cœur (le
+     * cœur 0) ; sur la S3, un cœur réservé à la PHY la testerait dans de meilleures conditions que le C3. */
     MUST(xTaskCreatePinnedToCore(phy_task, "phy", 4096, NULL, 12, NULL, 0) == pdPASS);
 }

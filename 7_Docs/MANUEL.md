@@ -3,11 +3,11 @@
 **Date** : 2026-10-06
 **Dernière révision** : 2026-10-10
 **Statut** : actif — le manuel de la carte, en français : l'ancien `README.md` du dépôt, déplacé tel quel par le ticket #495 quand le README est devenu la vitrine du projet
-**Référencé par** : `README.md` (§ Firmware & software)
+**Référencé par** : `README.md` (§ Documentation)
 **Dérivé de** : `README.md` avant le ticket #495 (révision du 2026-10-06, commit `6fd8349`)
 
-Une petite carte (Seeed XIAO ESP32-S3) se branche entre un PC, en USB, et un objectif à monture Sony E, sur ses
-contacts. Elle joue le rôle du boîtier : elle met l'objectif sous tension (si les interrupteurs de ses rails sont
+Une petite carte (la carte v1.0, à ESP32-C3 ; au banc, une Seeed XIAO ESP32-S3) se branche entre un PC, en USB, et
+un objectif à monture Sony E, sur ses contacts. Elle joue le rôle du boîtier : elle met l'objectif sous tension (si les interrupteurs de ses rails sont
 câblés), fait son initialisation, puis le pilote à la demande — mise au point, ouverture, une position mémorisée
 (« la marque »). Son usage premier est l'astrophotographie : l'objectif devient un focuser pour INDI/Ekos (Linux) ou pour ASCOM (Windows). Cible première :
 **Samyang AF 135 mm F1.8 FE**.
@@ -17,8 +17,34 @@ carte, il est dans **`7_Docs/PROTOCOL.md`**.
 
 ## Matériel
 
-**Aujourd'hui : Seeed XIAO ESP32-S3**, la seule cible pour laquelle le firmware se construit. Le brochage est dans
-`4_Firmware/components/phy/pins.h` :
+Le firmware se construit pour deux cartes. Le brochage de chacune est dans `4_Firmware/components/phy/pins.h`, une
+table par carte.
+
+**La carte v1.0** : un ESP32-C3FH4 nu (4 Mo de flash intégrée), pas une XIAO ; les dossiers de fabrication sont dans
+`1_Board/`. Aucun GPIO n'y reste libre :
+
+| GPIO | Signal | Rôle |
+|---|---|---|
+| 0 | XDETECT | contact de présence de l'objectif, tiré haut par la carte : 0 = présent |
+| 1 | TXD → objectif | UART1, 750 000 bauds |
+| 2 | RXD ← objectif | UART1 |
+| 3 | LENS_CS | entrée, tirée bas par la carte : l'objectif la lève quand il émet |
+| 4 | VD | impulsion basse d'environ 60 µs, 60 Hz |
+| 5 | BODY_CS | sortie, tirée bas par la carte : la carte la lève quand elle émet |
+| 6 | FAULT_MOTOR | défaut du rail moteur, actif à 0 (pas encore lu par le firmware) |
+| 7 | EN_MOTOR | commande du rail moteur 5 V de l'objectif, active à 0 |
+| 8 | EN_LOGIC | commande du rail logique 3,3 V de l'objectif, active à 0 |
+| 9 | FAULT_LOGIC | défaut du rail logique, actif à 0 (pas encore lu par le firmware) |
+| 10 | LED | LED de statut, allumée à l'état haut |
+| 18, 19 | USB | la ligne série (USB Serial/JTAG du C3) |
+| 20, 21 | SCL, SDA | capteur de température et d'humidité SHT40 (pas encore lu par le firmware) |
+
+- Les deux rails de l'objectif sont commutés et limités en courant sur la carte (deux TPS2552), alimentés par l'USB-C :
+  rien d'autre à câbler. Au démarrage, des tirages de la carte les tiennent coupés, et le firmware ne les allume qu'à
+  la demande de la séquence de démarrage de l'objectif.
+- Les contacts de la monture sont dix pointes, P1 à P10.
+
+**La carte de banc : Seeed XIAO ESP32-S3** :
 
 | XIAO | GPIO | Signal | Rôle |
 |---|---|---|---|
@@ -33,38 +59,54 @@ carte, il est dans **`7_Docs/PROTOCOL.md`**.
 | — | 21 | LED utilisateur de la XIAO | LED de statut, allumée à l'état bas |
 | GND | — | GND | masse commune obligatoire |
 
-- Les niveaux de l'objectif sont en 3,3 V : pas d'adaptation.
-- La carte ne fournit pas le courant de l'objectif : EN_LOGIC et EN_MOTOR commandent deux interrupteurs, s'ils sont
+- La XIAO ne fournit pas le courant de l'objectif : EN_LOGIC et EN_MOTOR commandent deux interrupteurs, s'ils sont
   câblés.
+
+Sur les deux cartes :
+
+- Les niveaux de l'objectif sont en 3,3 V : pas d'adaptation.
 - **XDETECT doit être câblé** : la carte ne démarre l'objectif que quand ce contact dit « présent » (tenu 300 ms), et
   elle coupe ses rails et met ses lignes au repos 2 ms après sa retombée, s'il est toujours absent. Tant qu'il ne dit pas « présent », rien n'est émis :
   TXD, BODY_CS et VD sont au repos (entrées, tirage bas), les rails coupés.
-
-**À venir : une carte à base de XIAO ESP32-C3** (un seul cœur, rails de l'objectif commutés). Son brochage n'est pas
-fixé et le firmware ne se construit pas encore pour elle.
 
 ## Le firmware
 
 Le firmware est dans `4_Firmware/` (ESP-IDF 5.3.2, C, aucune dépendance hors ESP-IDF). `v` rend sa version,
 `<majeur>.<mineur>` : celle de `PROJECT_VER`, dans `4_Firmware/CMakeLists.txt`.
 
-### Le récupérer : l'artefact de la CI
+### Le récupérer : les artefacts de la CI
 
-À chaque run, la CI construit le firmware (job `firmware-build`) et publie l'artefact **`firmware`** : l'application
-(`emount_bench2.bin`), `bootloader/bootloader.bin`, `partition_table/partition-table.bin` et `flash_args`. On le
+À chaque run, la CI construit le firmware pour les deux cartes (job `firmware-build`) et publie un artefact par cible :
+**`firmware-esp32c3`** pour la carte v1.0, **`firmware-esp32s3`** pour la XIAO ESP32-S3. Chacun contient l'application
+(`emount_bench2.bin`), `bootloader/bootloader.bin`, `partition_table/partition-table.bin` et `flash_args`. On les
 télécharge depuis la page du run, ou par l'API de la forge (`GET /api/v1/repos/fleet/basilisk/actions/artifacts`, puis
 `…/artifacts/<id>/zip`).
 
 ### Le flasher
 
-Par l'USB de la XIAO, avec esptool (`pip install esptool`), depuis le dossier de l'artefact décompressé :
+Avec esptool (`pip install esptool`), par l'USB de la carte, depuis le dossier de l'artefact de sa cible, décompressé.
+
+La carte v1.0, depuis le dossier de `firmware-esp32c3` :
+
+```sh
+python -m esptool --chip esp32c3 -p PORT -b 460800 --before default_reset --after hard_reset write_flash "@flash_args"
+```
+
+La XIAO ESP32-S3, depuis le dossier de `firmware-esp32s3` :
 
 ```sh
 python -m esptool --chip esp32s3 -p PORT -b 460800 --before default_reset --after hard_reset write_flash "@flash_args"
 ```
 
-`PORT` : `/dev/ttyACM0` sous Linux, `COMx` sous Windows (la XIAO y apparaît comme « Périphérique série USB », sans
-pilote). Si le flash ne démarre pas : maintenir BOOT, appuyer sur RESET, relâcher BOOT, relancer la commande.
+`PORT` : `/dev/ttyACM0` sous Linux, `COMx` sous Windows (la carte y apparaît comme « Périphérique série USB », sans
+pilote).
+
+- **XIAO ESP32-S3** : si le flash ne démarre pas, maintenir BOOT, appuyer sur RESET, relâcher BOOT, relancer la
+  commande.
+- **Carte v1.0** : elle n'a ni bouton BOOT ni bouton RESET, et la broche qui choisit le mode de démarrage (GPIO9) porte
+  FAULT_LOGIC, tirée haut par la carte : aucun mode de téléchargement ne s'y force à la main. Le flash par l'USB
+  n'est pas encore validé au banc sur cette carte, ni sur un C3 vierge ni sur un C3 qui porte déjà le firmware ; aucune
+  procédure de récupération n'est établie.
 
 ### Le construire soi-même
 
@@ -72,11 +114,13 @@ ESP-IDF 5.3.2 chargé :
 
 ```sh
 . "$IDF_PATH/export.sh"
-bash 4_Firmware/build.sh
+bash 4_Firmware/build.sh            # les deux cibles
+bash 4_Firmware/build.sh esp32c3    # la carte v1.0 seule (esp32s3 : la XIAO seule)
 ```
 
-Le build se fait dans `4_Firmware/build` (le `sdkconfig` y est généré, rien de versionné n'est réécrit) ; la commande de
-flash ci-dessus marche depuis ce dossier. La console ESP-IDF est muette : la carte n'écrit rien sur l'USB qui ne soit
+Chaque cible se construit dans son dossier, `4_Firmware/build/esp32c3` et `4_Firmware/build/esp32s3` (le `sdkconfig`
+y est généré, rien de versionné n'est réécrit) ; la commande de flash de la cible, ci-dessus, marche depuis son
+dossier. La console ESP-IDF est muette : la carte n'écrit rien sur l'USB qui ne soit
 pas une réponse.
 
 ## Ce que fait la carte
@@ -133,7 +177,7 @@ envoie, `v e r f m c a`, avec les réponses qu'il attend (`PROTOCOL.md` § 2.1).
 ou Edge** sur ordinateur. Si le navigateur refuse Web Serial sur `file://` : `python3 -m http.server` dans `5_App/`, puis
 `http://localhost:8000/emount-bench.html`.
 
-- **Connecter** : la page envoie `v` jusqu'à une réponse (l'ouverture du port peut redémarrer la XIAO), puis lit l'état ;
+- **Connecter** : la page envoie `v` jusqu'à une réponse (l'ouverture du port peut redémarrer la carte), puis lit l'état ;
   elle relit ensuite la position et le mouvement 5 fois par seconde, le reste une fois par seconde.
 - **Objectif** : identité (`i`), état de la carte (`t`) ; Redémarrer l'objectif (`b`), Alim OFF / ON (`p0` / `p1`).
 - **Focus** : ±10 / ±100 pas, curseur entre les bornes avec la marque, « Aller à », Stop (`q`), Marquer (`js`), Aller à
@@ -224,9 +268,9 @@ CLAUDE.md          l'environnement de travail du dépôt : conventions, commande
 ## Licence
 
 - **Hardware et conception : OCL v1.1** (Open Community Licence, sans module complémentaire, `LICENSE-HARDWARE`,
-  https://github.com/OpenCommunityLicence/OpenCommunityLicence) : `1_Board/`, `2_Hardware/`, `3_3D-Models/`,
-  `7_Docs/` et `9_Assets/`.
-- **Tout le reste : MIT** (`LICENSE`) : `4_Firmware/`, `5_App/`, `.gitea/`, `.github/` et les fichiers de la racine.
+  https://github.com/OpenCommunityLicence/OpenCommunityLicence) : `1_Board/`, `2_Hardware/`, `3_3D-Models/`.
+- **Tout le reste : GPL-3.0** (`LICENSE`) : `4_Firmware/`, `5_App/`, `7_Docs/`, `9_Assets/`, `.gitea/`, `.github/` et
+  les fichiers de la racine.
 
 Exceptions, qui gardent leur licence : `6_Driver/indi/` est sous LGPL 2.1 (`6_Driver/indi/LICENSE`, il dérive du
 driver Pinefeat) ; les datasheets de `0_Datasheets/` et les documents de tiers de `8_References/` restent à leurs

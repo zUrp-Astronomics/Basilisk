@@ -15,8 +15,9 @@ name: CI
 #   - `firmware` : le firmware : ses en-têtes partagés compilés, le faux
 #               Samyang AF 135 compilé, ses tests de comportements et de pannes, son rejeu contre
 #               les traces de l'objectif (4_Firmware/run.sh) ;
-#   - `firmware-build` : le firmware construit par ESP-IDF 5.3.2 pour esp32s3, console
-#               muette vérifiée sur le build (4_Firmware/build.sh).
+#   - `firmware-build` : le firmware construit par ESP-IDF 5.3.2 pour ses deux cibles, esp32s3 (la
+#               XIAO du banc) et esp32c3 (la carte v1.0), console muette vérifiée sur chaque build
+#               (4_Firmware/build.sh).
 #
 # ⚠ LE WORKFLOW S'APPELLE `CI` ET DOIT LE RESTER. Gitea compose le contexte d'un statut ainsi :
 # `<workflow> / <job> (<déclencheur>)` → `CI / test (push)`, `CI / firmware-build (pull_request)`…
@@ -122,10 +123,11 @@ jobs:
         run: bash 6_Driver/indi/build.sh
 
   # ── Firmware, build ESP-IDF ──
-  # 4_Firmware/build.sh : le projet ESP-IDF de 4_Firmware/ (PHY réelle, bench_core, app_main), cible
-  # esp32s3, avec la même récupération du commit que le job `indi` ; il échoue si le build ne porte
-  # pas la console muette (journal et bootloader à 0). À chaque run, PR comprises, il publie
-  # l'artefact `firmware`.
+  # 4_Firmware/build.sh : le projet ESP-IDF de 4_Firmware/ (PHY réelle, bench_core, app_main), pour
+  # ses deux cibles, esp32s3 et esp32c3, chacune dans 4_Firmware/build/<cible>, avec la même
+  # récupération du commit que le job `indi` ; il échoue si un build ne porte pas la console muette
+  # (journal et bootloader à 0). À chaque run, PR comprises, il publie un artefact par cible,
+  # `firmware-esp32s3` et `firmware-esp32c3`.
   firmware-build:
     runs-on: shell
     container: espressif/idf:v5.3.2
@@ -156,7 +158,7 @@ jobs:
           git log -1 --oneline
       # L'image fixe IDF_PATH mais son entrypoint (qui source export.sh) est court-circuité par le
       # runner : on charge l'environnement ESP-IDF nous-mêmes.
-      - name: Build ESP-IDF (firmware)
+      - name: Build ESP-IDF (firmware, esp32s3 et esp32c3)
         run: |
           . "$IDF_PATH/export.sh" > /dev/null
           bash 4_Firmware/build.sh
@@ -170,12 +172,21 @@ jobs:
           tar -xJf "$f" -C /usr/local --strip-components=1
       - uses: actions/upload-artifact@v4
         with:
-          name: firmware
+          name: firmware-esp32s3
           path: |
-            4_Firmware/build/*.bin
-            4_Firmware/build/bootloader/bootloader.bin
-            4_Firmware/build/partition_table/partition-table.bin
-            4_Firmware/build/flash_args
+            4_Firmware/build/esp32s3/*.bin
+            4_Firmware/build/esp32s3/bootloader/bootloader.bin
+            4_Firmware/build/esp32s3/partition_table/partition-table.bin
+            4_Firmware/build/esp32s3/flash_args
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32c3
+          path: |
+            4_Firmware/build/esp32c3/*.bin
+            4_Firmware/build/esp32c3/bootloader/bootloader.bin
+            4_Firmware/build/esp32c3/partition_table/partition-table.bin
+            4_Firmware/build/esp32c3/flash_args
           if-no-files-found: error
 
   # ── Firmware ──

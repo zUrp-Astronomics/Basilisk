@@ -1,21 +1,26 @@
 /* SOURCE: composant led — le PWM de la LED de statut sur la carte
  * AUTHOR: engineer
- * DATE: 2026-10-04
- * STATUS: actif — la carte seule (LEDC d'ESP-IDF 5.3.2) ; joué par aucun test hôte : le rendu sur la XIAO n'est pas vérifié
+ * DATE: 2026-10-10
+ * STATUS: actif — la carte seule (LEDC d'ESP-IDF 5.3.2) ; joué par aucun test hôte : le rendu sur la XIAO ESP32-S3 et sur
+ *         la carte v1.0 (ESP32-C3) n'est pas vérifié ; ticket #574 : la cible esp32c3
  *
- * Le rendu de l'intensité de bsk_led_eval sur la LED de la XIAO, par le LEDC. */
+ * Le rendu de l'intensité de bsk_led_eval sur la LED de la carte (celle de la XIAO, LED1 et LED2 de la carte v1.0), par
+ * le LEDC. */
 
 /* Pièges :
  *   - le timer et le canal LEDC sont distincts de ceux de la VD (LEDC_TIMER_0, LEDC_CHANNEL_0, phy.c), même mode basse
- *     vitesse : le timer de la VD peut être reconfiguré à chaque session (bsk_phy_vd) sans toucher la LED ;
+ *     vitesse, le seul du C3 (4 timers sur les deux cibles ; 6 canaux sur le C3, 8 sur la S3) : le timer de la VD peut
+ *     être reconfiguré à chaque session (bsk_phy_vd) sans toucher la LED ;
  *   - 14 bits à 2 kHz (32,8 MHz, sous les 80 MHz de l'APB) : un pas de 0,006 % du rapport cyclique, pour un plafond
- *     faible (à 1 %, la respiration de 10 à 50 % va de 16 à 82 pas) ;
+ *     faible (à 1 %, la respiration de 10 à 50 % va de 16 à 82 pas). 14 bits est la résolution maximale des timers du
+ *     LEDC sur les deux cibles (SOC_LEDC_TIMER_BIT_WIDTH, ESP-IDF 5.3.2) ;
  *   - le sens de la broche (pins.h) est porté par le LEDC (output_invert), pas par le calcul : un rapport cyclique nul est
  *     la LED éteinte ;
- *   - sur le S3, les timers basse vitesse partagent une seule source ; LEDC_AUTO_CLK prend l'APB en premier, qui sert la
- *     LED (diviseur 625) comme la VD à 60 Hz (41666) : pas de conflit. Les diviseurs du LEDC sont à l'échelle de 256
- *     (8 bits de fraction) : 625 vaut 2,44, 41666 vaut 162,76. Lu dans les sources d'ESP-IDF 5.3.2, non vérifié sur la
- *     carte ;
+ *   - sur la S3 comme sur le C3, les timers basse vitesse partagent une seule source ; LEDC_AUTO_CLK prend l'APB (80 MHz
+ *     sur les deux) en premier (LEDC_LL_GLOBAL_CLOCKS, le même sur les deux), qui sert la LED (diviseur 625) comme la VD
+ *     à 60 Hz en 13 bits (41666) : pas de conflit. Les diviseurs du LEDC sont à l'échelle de 256 (8 bits de fraction sur
+ *     les deux) : 625 vaut 2,44, 41666 vaut 162,76, sous le plafond du registre de diviseur (18 bits, 1023,99) des deux.
+ *     Lu dans les sources d'ESP-IDF 5.3.2, non vérifié sur la carte ;
  *   - un LEDC qui refuse sa configuration laisse la LED éteinte, sans rien d'autre : la LED ne décide rien. */
 #include "driver/gpio.h"
 #include "driver/ledc.h"

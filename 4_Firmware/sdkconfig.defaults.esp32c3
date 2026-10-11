@@ -1,0 +1,13 @@
+# SOURCE: ticket #574 — les réglages propres au C3 de la carte v1.0 (plans/carte-v1.0.md de l'atelier, § 1)
+# AUTHOR: engineer
+# DATE: 2026-10-10
+# STATUS: actif — lu par ESP-IDF après sdkconfig.defaults quand la cible est esp32c3 (4_Firmware/build.sh)
+#
+# Carte Basilisk v1.0 : ESP32-C3FH4, 4 Mo de flash intégrée. Le C3 n'a pas de PSRAM (l'option SPIRAM n'existe pas
+# pour lui) ; un seul cœur, et toutes les tâches sont déjà épinglées sur le cœur 0.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Aucun quartz de 32 kHz n'est monté : GPIO0 et GPIO1, ses broches, portent XDETECT et TXD (components/phy/pins.h).
+# L'horloge RTC reste l'oscillateur RC interne, le défaut d'ESP-IDF 5.3.2 pour le C3, écrit ici pour qu'un changement
+# de défaut ne la déplace pas sur ces broches.
+CONFIG_RTC_CLK_SRC_INT_RC=y

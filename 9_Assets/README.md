@@ -1,8 +1,19 @@
 # 9_Assets
 
-**Date** : 2026-10-06
-**Dernière révision** : 2026-10-06
-**Statut** : actif — porte la fiche (`zurp.yml`) et l'affiche (`basilisk.webp`) lues par le site zUrp, et les images du README
-**Référencé par** : `README.md` (images), `7_Docs/MANUEL.md` (§ Arborescence)
+The showcase of Basilisk: what the [zUrp Astronomics website](https://zurp-astronomics.github.io/basilisk/) and this repository's
+README display. It belongs to the zUrp Astronomics organisation, which keeps it consistent across
+all its products.
 
-Les ressources pour l'extérieur, les images du `README.md` (`Basilisk-Board.png`, `Basilisk-Board-top.png`, `Basilisk-Board-bot.png`), et la vitrine lue par le site, la fiche `zurp.yml` et l'affiche `basilisk.webp`.
+| File | What it is | Shown on |
+|---|---|---|
+| `zurp.yml` | the product sheet: name, tagline, slogan, section, status, description, accent colour | the website, the organisation README |
+| `basilisk.webp` | the poster, 1254 × 1254 | the website, the README header |
+| `basilisk-board.webp` | main board v1.0, 3D view | the README |
+| `basilisk-board-top.webp` | main board v1.0, top | the README |
+| `basilisk-board-bot.webp` | main board v1.0, bottom | the README |
+
+Images here are WebP copies sized for display. Their full-size originals stay where they are produced: `1_Board/Basilisk-v1.0_2-view_3D.png`, `1_Board/Basilisk-v1.0_2-view_top.png`, `1_Board/Basilisk-v1.0_2-view_bot.png`.
+
+The sheet is read and checked by the website at each build: its format is described in
+[`content/README.md`](https://github.com/zUrp-Astronomics/zurp-astronomics.github.io/blob/main/content/README.md)
+of the website's repository.

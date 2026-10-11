@@ -32,4 +32,4 @@ Sony FE 24-105 mm F4 G OSS or a Samyang AF 135 F1.8 FE, published as they were e
 
 ## Licence
 
-This folder follows the licences of the repository: see § Licences of the root `README.md`.
+This folder follows the licences of the repository: see § License of the root `README.md`.

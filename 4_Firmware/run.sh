@@ -3,10 +3,12 @@
 # AUTHOR: engineer
 # DATE: 2026-09-26
 # STATUS: actif — la même commande en local et en CI : `bash 4_Firmware/run.sh` ; sources et chemins d'en-têtes lus
-#         dans sim/test/programmes.sh, comme mutants.sh ; ticket #539 : la passe sous ASan et UBSan (étape 5)
+#         dans sim/test/programmes.sh, comme mutants.sh ; ticket #539 : la passe sous ASan et UBSan (étape 5) ;
+#         ticket #574 : la table de broches du C3 compilée, la cible sans table est l'ESP32
 #
 # 1. chaque en-tête partagé de 4_Firmware/include compile seul, inclus deux fois ; la table de broches
-#    (components/phy/pins.h) compile pour la cible esp32s3, et une cible sans table échoue avec son message ;
+#    (components/phy/pins.h) compile pour les cibles esp32s3 et esp32c3, et une cible sans table échoue avec son
+#    message ;
 # 2. le faux 135 et ses tests compilent sans avertissement (-Werror) ;
 # 3. test_lens135 : les comportements de la référence et les pannes, dans les deux sens ;
 #    test_lens_std : le faux objectif standard (Tamron F051, sim/lens_std.c) piloté directement, sans PHY simulée ;
@@ -57,11 +59,13 @@ done
 echo "== broches : une table par cible ESP-IDF (components/phy/pins.h), une cible sans table ne compile pas"
 mkdir -p "$SORTIE/cible"
 printf '#include "pins.h"\ntypedef int broches_t;\n' > "$SORTIE/cible/broches.c"
-printf '#define CONFIG_IDF_TARGET_ESP32S3 1\n' > "$SORTIE/cible/sdkconfig.h"
-gcc "${CFLAGS[@]}" -fsyntax-only -I"$SORTIE/cible" "$SORTIE/cible/broches.c"
-echo "   cible esp32s3 : sa table compile"
+for cible in ESP32S3 ESP32C3; do
+    printf '#define CONFIG_IDF_TARGET_%s 1\n' "$cible" > "$SORTIE/cible/sdkconfig.h"
+    gcc "${CFLAGS[@]}" -fsyntax-only -I"$SORTIE/cible" "$SORTIE/cible/broches.c"
+    echo "   cible ${cible,,} : sa table compile"
+done
 attendu="aucune table de broches pour cette cible ESP-IDF : ajouter la sienne dans components/phy/pins.h"
-for cible in CONFIG_IDF_TARGET_ESP32C3 ""; do
+for cible in CONFIG_IDF_TARGET_ESP32 ""; do
     printf '%s\n' "${cible:+#define $cible 1}" > "$SORTIE/cible/sdkconfig.h"
     if gcc "${CFLAGS[@]}" -fsyntax-only -I"$SORTIE/cible" "$SORTIE/cible/broches.c" 2> "$SORTIE/cible/cc.log"; then
         echo "   ÉCHEC : une cible sans table (${cible:-aucune cible}) compile"

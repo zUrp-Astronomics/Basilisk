@@ -3,7 +3,7 @@
 **Date** : 2026-09-24
 **Dernière révision** : 2026-10-08
 **Statut** : actif — driver 1.0
-**Référencé par** : `README.md` (§ Firmware & software), `7_Docs/MANUEL.md`, `6_Driver/indi/CMakeLists.txt`, `6_Driver/indi/UPSTREAM.md`, job `indi` de `.gitea/workflows/ci.yml`
+**Référencé par** : `README.md` (§ Software), `7_Docs/MANUEL.md`, `6_Driver/indi/CMakeLists.txt`, `6_Driver/indi/UPSTREAM.md`, job `indi` de `.gitea/workflows/ci.yml`
 
 Focuser INDI (Ekos) pour la carte Basilisk et un objectif E-mount. C'est le driver Pinefeat d'origine
 (`pinefeat_cef` du cœur d'INDI) avec un lot « étendu » par-dessus. Les défauts du code d'origine sont notés
