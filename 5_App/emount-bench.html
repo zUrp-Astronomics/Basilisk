@@ -360,7 +360,7 @@ function send(cmd, quiet, gen){
   });
 }
 /* Resynchronisation : la carte traite les lignes dans l'ordre, donc quand elle a repondu sa version
- * (« 1.0 ») a un `v` envoye APRES la commande expiree, toute reponse tardive de celle-ci est deja
+ * (« 0.9 ») a un `v` envoye APRES la commande expiree, toute reponse tardive de celle-ci est deja
  * passee (et a ete ignoree par la forme « x.y » attendue). On exige ensuite 100 ms de silence (PROTOCOL.md § 6) :
  * sans ligne de reponse ; les lignes de journal « * » ne le rompent pas (sous LOG ON/ALL, jusqu'a
  * 30 par seconde, il n'arriverait jamais). Pas de plafond : la
@@ -456,7 +456,7 @@ async function connect(){
     await port.open({baudRate:115200});
     const gen=++connGen;
     writer=port.writable.getWriter(); reader=port.readable.getReader();
-    /* Deux `v` au plus. L'ouverture du port peut redemarrer la XIAO : un `v` envoye pendant son
+    /* Deux `v` au plus. L'ouverture du port peut redemarrer la carte : un `v` envoye pendant son
      * demarrage est perdu. Le second passe par la resynchronisation que son echeance impose
      * (PROTOCOL.md § 6 : jusqu'a 3 `v` de 3 s, puis 100 ms de silence), et ne part pas sans elle : une carte
      * muette se voit en 4 echeances de `v`, 12 s, et la page se deconnecte.
@@ -470,7 +470,7 @@ async function connect(){
     if(v===null){ addLine('err','[app] carte muette : aucune réponse à « v » en 12 s — déconnexion'); await disconnect(); return; }
     $('connDot').classList.add('on'); setText('connTxt','connecté');
     /* `v` est la version du firmware de la carte ; la cause de son dernier redemarrage est dans DEBUG
-     * (labo), lue une fois : un redemarrage de la XIAO fait tomber le port. */
+     * (labo), lue une fois : un redemarrage de la carte fait tomber le port. */
     L.ver=v; addLine('ev','[app] carte : firmware '+v);
     const dbg=parseKV(await ask('DEBUG',true)); if(gen!==connGen) return; L.reset=dbg.reset||null;
     await refreshAll(true); if(gen!==connGen) return;

@@ -4,7 +4,7 @@
  * STATUS: actif — joué par 4_Firmware/run.sh (job `firmware` de la CI)
  *
  * Des lignes de PROTOCOL.md jouées à travers HOTE, SESSION, MOUVEMENT et le faux 135 : les lettres, le journal, le
- * repli Moonlite, CUSTOM.
+ * repli Moonlite, CUSTOM, les FAULT des rails.
  *
  * Tout est le vrai code : la couche HOTE (components/host/host.c), le journal, SESSION, TRANSACTION, bench_core,
  * au-dessus de la PHY simulée et du faux 135 inchangés (sim/phy_sim.c, sim/lens135.c). Le banc fait ce que fait
@@ -141,7 +141,7 @@ static void bench(void)
     bsk_session_init(&P);
     bsk_journal_init(phy_sim_now);
     bsk_journal_set(false, false);
-    bsk_host_init("1.0", "poweron");
+    bsk_host_init("0.9", "poweron");
     d2_due = 0;
     run_to(T0);
 }
@@ -193,7 +193,7 @@ static void t_boot(void)
 {
     printf("démarrage : v, t (present, boot_state, last_op), r (les bornes du faux 135), i\n");
     bench();
-    ASK("v", "1.0");
+    ASK("v", "0.9");
     T_HAS("present=0");
     T_HAS("boot_state=off");
     T_HAS("last_op=-:ok");
@@ -209,7 +209,7 @@ static void t_boot(void)
     ASK("c", "er busy boot");                        /* comme f<n> */
     ASK("e", "y");
     run_for(3600 * MS);
-    ASK("v", "1.0");
+    ASK("v", "0.9");
     T_HAS("present=1");
     T_HAS("boot_state=ready");
     T_HAS("last_op=boot:ok");
@@ -666,6 +666,65 @@ static void t_custom(void)
     CUSTOM("CUSTOM READ", "er nolens");
 }
 
+/* Les FAULT des rails (PROTOCOL.md § 3, `* rail` et `DEBUG`), à travers la PHY simulée (fault_edge, comme la carte), la
+ * SESSION, le journal et HOTE, le faux 135 en READY. Une ligne par changement, l'état commandé du rail à son instant ;
+ * une activation finie avant d'être lue, comptée ; sous le plafond de 30 lignes par seconde, une rafale dont les lignes
+ * de trop sont comptées dans `dropped`, les compteurs exacts. Rien d'autre ne change : `t` est le même, la session reste
+ * où elle est. Les instants et les comptes sont écrits à la main : READY à 5000 ms (T0, puis 4 s), une seconde et demie
+ * de silence sous LOG ON avant chaque série. */
+static void t_rail_fault(void)
+{
+    char t0[BSK_HOST_REPLY_MAX];
+    uint32_t d0;
+    long i;
+    printf("FAULT des rails : * rail au journal, rail allumé ou coupé, une activation brève, une rafale ; DEBUG ; t inchangé\n");
+    mounted();
+    ASK("LOG ON", "ok log=1 all=0");
+    run_for(1500 * MS);                              /* 6500 ms */
+    jdrain();
+    snprintf(t0, sizeof t0, "%s", ask("t"));
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, true);        /* rail allumé : tenu 20 ms */
+    run_for(20 * MS);
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, false);
+    run_for(20 * MS);
+    phy_sim_rail_fault(BSK_RAIL_LOGIC, false);       /* relu inactif : une activation finie avant d'être lue */
+    run_for(20 * MS);                                /* 6560 ms */
+    jdrain();
+    CHECK(n_jl == 4 && !strcmp(JL[0], "* rail 6500 motor fault cmd=on") && !strcmp(JL[1], "* rail 6520 motor ok cmd=on") &&
+              !strcmp(JL[2], "* rail 6540 logic fault cmd=on") && !strcmp(JL[3], "* rail 6540 logic ok cmd=on"),
+          "rails allumés : quatre lignes, l'activation brève en deux au même instant (%zu : « %s »…)", n_jl, n_jl ? JL[0] : "");
+    CHECK(!strcmp(ask("t"), t0), "t inchangé : « %s »", R);
+    D_HAS("fault_motor=1");
+    D_HAS("fault_logic=1");
+
+    ASK("p0", "ok");                                 /* OFF, rails coupés */
+    run_for(100 * MS);                               /* 6660 ms */
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, true);
+    run_for(10 * MS);
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, false);
+    run_for(1500 * MS);                              /* 8170 ms */
+    jdrain();
+    CHECK(jfind("* rail 6660 motor fault cmd=off", NULL) >= 0 && jfind("* rail 6670 motor ok cmd=off", NULL) >= 0 &&
+              jfind("* rail ", " cmd=on") < 0,
+          "rails coupés (p0) : l'activation et la retombée, cmd=off");
+    T_HAS("boot_state=off");
+
+    d0 = bsk_journal_dropped();
+    for (unsigned k = 0; k < 40; k++) {              /* 40 activations brèves, une toutes les 10 ms : 80 lignes en 400 ms */
+        phy_sim_rail_fault(BSK_RAIL_MOTOR, false);
+        run_for(10 * MS);
+    }
+    jdrain();
+    for (i = 0; i < (long)n_jl && !strncmp(JL[i], "* rail ", 7); i++) continue;
+    CHECK(n_jl == 30 && i == 30 && !strcmp(JL[0], "* rail 8170 motor fault cmd=off") &&
+              !strcmp(JL[29], "* rail 8310 motor ok cmd=off"),
+          "une rafale : les 30 premières lignes, celles des 15 premières activations (%zu)", n_jl);
+    CHECK(bsk_journal_dropped() - d0 == 50, "les 50 autres comptées dans dropped (%lu)", (unsigned long)(bsk_journal_dropped() - d0));
+    D_HAS("fault_motor=42");                         /* 1 + 1 + 40 */
+    D_HAS("fault_logic=1");
+    ASK("LOG OFF", "ok log=0 all=0");
+}
+
 int main(void)
 {
     signal(SIGALRM, too_long);
@@ -682,6 +741,7 @@ int main(void)
     t_restore();
     t_moonlite();
     t_custom();
+    t_rail_fault();
     printf("HOTE contre le faux 135 : %d vérifications, %d échec(s)\n", checks, fails);
     return fails ? 1 : 0;
 }

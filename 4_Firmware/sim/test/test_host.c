@@ -10,7 +10,8 @@
  * Ce fichier implémente bsk_session_status, bsk_session_command et bsk_session_ack, et ce que `DEBUG` lit : le compteur de
  * refus de bench_core (bsk_bench_refused, la valeur que le test pose : REFUSED), les compteurs du temps réel
  * (bsk_session_debug, ceux que le test pose : DBG) et les marges de pile des tâches (bsk_host_stacks, celles que le test
- * pose : STACKS). L'instantané est celui que le
+ * pose : STACKS), et la mesure du capteur de la carte (bsk_sensor_read, celle que le test pose : SENSOR). L'instantané est
+ * celui que le
  * test pose (ST) ; une commande déposée est notée (CMDS) et reçoit l'accusé que le test a prévu (RULE, comme la
  * session : ACK_ACCEPTED, et ACK_COMPLETED tout de suite pour ce qui finit dans l'appel) ; les accusés finaux
  * et les changements d'état d'une session qui avance sont posés par le test (push, ST), puis lus par
@@ -29,6 +30,7 @@
 #include "bsk_host.h"
 #include "bsk_journal.h"
 #include "bsk_led.h"
+#include "bsk_sensor.h"
 #include "bsk_session.h"
 
 static int checks, fails;
@@ -86,6 +88,11 @@ void bsk_session_debug(bsk_session_debug_t *d) { *d = DBG; }
 static bsk_host_stacks_t STACKS;
 void bsk_host_stacks(bsk_host_stacks_t *s) { *s = STACKS; }
 
+/* La mesure du capteur de la carte, telle que bsk_sensor_read la rend (bsk_sensor.h) ; inconnue (NONE) à chaque fresh,
+ * comme avant la première lecture. */
+static bsk_sensor_t SENSOR;
+void bsk_sensor_read(bsk_sensor_t *v) { *v = SENSOR; }
+
 void bsk_session_command(const bsk_cmd_t *c)
 {
     if (n_cmds < sizeof CMDS / sizeof CMDS[0]) CMDS[n_cmds] = *c;
@@ -126,7 +133,7 @@ static bool replied;
 /* La version que la carte donne à bsk_host_init (PROJECT_VER, par esp_app_get_description), lue dans
  * CMakeLists.txt (second argument), sa seule source ; `v` la rend. L'attendu, lui, est écrit à la main : V. */
 static char VERSION[40];
-#define V "1.0"
+#define V "0.9"
 
 static bool load_version(const char *path)
 {
@@ -184,6 +191,7 @@ static void fresh(void)
     RULE = E_OK;
     STOP_END = E_OK;
     n_extra = 0;
+    SENSOR = (bsk_sensor_t){.st = BSK_SENSOR_NONE};
     bsk_journal_set(false, false);
     bsk_host_init(VERSION, "poweron");
 }
@@ -588,16 +596,16 @@ static const struct {
     {"v", V, V, V, V},
     {"DEBUG", "ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 "
      "tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-     "stack_journal=0",
+     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0",
      "ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 "
      "tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-     "stack_journal=0",
+     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0",
      "ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 "
      "tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-     "stack_journal=0",
+     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0",
      "ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 "
      "tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-     "stack_journal=0"},
+     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0"},
     {"s3", "ok", "ok", "ok", "ok"},
     {"cm", "er nocap", "er nocap", "er nocap", "er nocap"},
     {"l", "er nocap focal", "er nocap focal", "er nocap focal", "er nocap focal"},
@@ -611,6 +619,8 @@ static const struct {
     {"pm1", "er nocap", "er nocap", "er nocap", "er nocap"},
     {"g", "-", "-", "-", "-"},                       /* une lecture pure, dans tout état */
     {"gx", "er nocap", "er nocap", "er nocap", "er nocap"},
+    {"z", "-", "-", "-", "-"},                       /* le capteur de la carte, dans tout état ; inconnu ici */
+    {"zx", "er nocap", "er nocap", "er nocap", "er nocap"},
 };
 static const uint8_t SEQ_STATES[] = {SESSION_POWERING, SESSION_IDENTIFYING, SESSION_HOMING, SESSION_RESTORING, SESSION_RECOVERING};
 
@@ -940,16 +950,18 @@ static void t_line_t(void)
 }
 
 /* Les compteurs du temps réel de `DEBUG`, tous à zéro (bsk_session_debug), puis les marges de pile, à zéro
- * (bsk_host_stacks). */
+ * (bsk_host_stacks), puis les FAULT des rails, à zéro (bsk_session_debug). */
 #define ZERO " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0" STK0
-#define STK0 " stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 stack_journal=0"
+#define STK0 " stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 stack_journal=0" FLT0
+#define FLT0 " fault_motor=0 fault_logic=0" SNS0
+#define SNS0 " stack_sensor=0"
 
 /* `DEBUG` : le diagnostic, hors de `t`, une ligne `ok clé=valeur…`, dans tout état (t_states), rien déposé. */
 static void t_debug(void)
 {
     size_t n0;
-    printf("DEBUG : reset, dropped, move_rc, refused, les compteurs du temps réel, les marges de pile ; v rend la version "
-           "donnée à bsk_host_init\n");
+    printf("DEBUG : reset, dropped, move_rc, refused, les compteurs du temps réel, les marges de pile, les FAULT des "
+           "rails, la pile du capteur ; v rend la version donnée à bsk_host_init\n");
     ready135();
     n0 = n_cmds;
     ASK("DEBUG", "ok reset=poweron dropped=0 move_rc=- refused=0" ZERO);
@@ -969,7 +981,20 @@ static void t_debug(void)
     STACKS = (bsk_host_stacks_t){.session = 2100, .phy = 1300, .usb_rx = 2900, .store = 700, .journal = 4294967295u};
     ASK("DEBUG", "ok reset=poweron dropped=2 move_rc=- refused=0" " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 "
                  "tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=2100 stack_phy=1300 stack_usb_rx=2900 stack_store=700 "
-                 "stack_journal=4294967295");
+                 "stack_journal=4294967295" FLT0);
+    STACKS = (bsk_host_stacks_t){0};
+    /* les FAULT des rails, en fin de ligne, après les marges (PROTOCOL.md § 3), chacun à sa clé : deux valeurs
+     * distinctes, l'une à 2^32 − 1 */
+    DBG = (bsk_session_debug_t){.fault_motor = 3, .fault_logic = 4294967295u};
+    ASK("DEBUG", "ok reset=poweron dropped=2 move_rc=- refused=0" " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 "
+                 "tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
+                 "stack_journal=0 fault_motor=3 fault_logic=4294967295" SNS0);
+    DBG = (bsk_session_debug_t){0};
+    /* la marge de pile du capteur, en fin de ligne, après les FAULT (PROTOCOL.md § 3) */
+    STACKS = (bsk_host_stacks_t){.sensor = 4294967295u};
+    ASK("DEBUG", "ok reset=poweron dropped=2 move_rc=- refused=0" " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 "
+                 "tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
+                 "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=4294967295");
     STACKS = (bsk_host_stacks_t){0};
     ASK("DEBUG ", "er nocap");                       /* une ligne reconnue exactement */
     ASK("DEBUG ALL", "er nocap");
@@ -1475,6 +1500,125 @@ static void t_no_position(void)
     WIRE(":GP", "4000#");
 }
 
+/* ─────────────────────────── le capteur de la carte : `z`, `:GT#`, `* sht40` ─────────────────────────── */
+
+/* L'horloge du journal pendant t_sensor (bsk_journal_init) : l'instant des lignes `* sht40`. */
+static uint64_t NOW_US;
+static uint64_t now_clock(void) { return NOW_US; }
+
+/* La ligne suivante du journal, sans fin de ligne ; "" s'il n'y en a plus. */
+static const char *jnext(void)
+{
+    static char b[640];
+    uint8_t g;
+    size_t n = bsk_journal_take(b, sizeof b - 1, &g);
+    b[n] = 0;
+    return b;
+}
+
+#define JNEXT(want) do { const char *l_ = jnext(); CHECK(!strcmp(l_, want), "journal : « %s », attendu « %s »", l_, want); } while (0)
+
+/* PROTOCOL.md § 2 (`z`), § 4 (`:GT#`), § 3 (`* sht40`) ; [D120] : une mesure inconnue n'est jamais un nombre, sauf le
+ * 0000# de `:GT#`, que Moonlite impose (décision de l'humain). Les demi-degrés de `:GT#` sont ceux du driver moonlite de
+ * libindi (int16_t lu en hexadécimal, divisé par 2), arrondis au plus proche, calculés à la main. */
+static void t_sensor(void)
+{
+    static const bsk_sensor_st_t UNKNOWN[] = {BSK_SENSOR_NONE, BSK_SENSOR_NACK, BSK_SENSOR_CRC, BSK_SENSOR_BUS, BSK_SENSOR_STALE};
+    static const uint8_t STATES[] = {SESSION_OFF, SESSION_POWERING, SESSION_RECOVERING, SESSION_FAULT};
+    char t_none[BSK_HOST_REPLY_MAX];
+    size_t n0;
+    printf("le capteur : z (°C %%RH, ou -), :GT# (demi-degrés, 0000# inconnue), dans tout état ; * sht40 ; t inchangé\n");
+    ready135();
+    n0 = n_cmds;
+    ASK("z", "-");                                  /* aucune lecture encore */
+    WIRE(":GT", "0000#");
+    snprintf(t_none, sizeof t_none, "%s", ask("t"));
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 2137, 4802};
+    ASK("z", "21.37 48.02");
+    WIRE(":GT", "002B#");                           /* 21,37 °C : 42,74 demi-degrés -> 43 */
+    CHECK(!strcmp(ask("t"), t_none), "t ne dit rien du capteur : « %s »", R);
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -2312, 381};
+    ASK("z", "-23.12 3.81");
+    WIRE(":GT", "FFD2#");                           /* -23,12 °C : -46,24 -> -46, 0xFFD2 ; le driver lit -23,0 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -50, 0};
+    ASK("z", "-0.50 0.00");
+    WIRE(":GT", "FFFF#");                           /* -0,50 °C : -1 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 25, 10000};
+    ASK("z", "0.25 100.00");
+    WIRE(":GT", "0001#");                           /* 0,25 °C : 0,5 -> 1 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 24, 1};
+    ASK("z", "0.24 0.01");
+    WIRE(":GT", "0000#");                           /* 0,24 °C : 0,48 -> 0, que Moonlite ne distingue pas de l'inconnue */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -25, 999};
+    ASK("z", "-0.25 9.99");
+    WIRE(":GT", "FFFF#");                           /* -0,25 °C : -0,5 -> -1 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -24, 1000};
+    ASK("z", "-0.24 10.00");
+    WIRE(":GT", "0000#");                           /* -0,24 °C : -0,48 -> 0 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 13000, 5000};
+    ASK("z", "130.00 50.00");
+    WIRE(":GT", "0104#");                           /* 130 °C, le haut de l'échelle (DS § 4.5) : 260 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -4500, 5000};
+    WIRE(":GT", "FFA6#");                           /* -45 °C, le bas : -90, 0xFFA6 */
+    for (size_t i = 0; i < sizeof UNKNOWN / sizeof UNKNOWN[0]; i++) {
+        SENSOR = (bsk_sensor_t){UNKNOWN[i], 2137, 4802};   /* des nombres que la couche HOTE ne doit pas lire */
+        ASK("z", "-");
+        WIRE(":GT", "0000#");
+    }
+    for (size_t i = 0; i < sizeof STATES; i++) {
+        fresh();
+        state(STATES[i]);
+        SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 2137, 4802};
+        CHECK(is("z", "21.37 48.02"), "z en %s : « %s »", bsk_state_name(STATES[i]), R);
+        CHECK(!strcmp(wire(":GT"), "002B#"), ":GT# en %s : « %s »", bsk_state_name(STATES[i]), W);
+    }
+    for (const char *const *l = (const char *const[]){"zz", "z1", "z ", "zx", NULL}; *l; l++) ASK(*l, "er nocap");
+    CHECK(n_cmds == n0, "z et :GT# : rien déposé (%zu)", n_cmds - n0);
+
+    printf("  * sht40 : à chaque changement, connue ou non, avec la raison ; rien sans changement, ni avant une lecture réussie\n");
+    bsk_journal_init(now_clock);
+    fresh();
+    NOW_US = 123456789;
+    ASK("LOG ON", "ok log=1 all=0");
+    while (*jnext()) {}
+    step();
+    JNEXT("");                                      /* inconnue depuis le démarrage : pas un changement */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 2137, 4802};
+    step();
+    JNEXT("* sht40 123456 ok");
+    step();
+    SENSOR.t_c = 2140;                              /* une autre valeur, toujours connue */
+    step();
+    JNEXT("");
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_NACK, 0, 0};
+    step();
+    JNEXT("* sht40 123456 lost why=nack");
+    SENSOR.st = BSK_SENSOR_CRC;                     /* toujours inconnue, pour une autre raison */
+    step();
+    JNEXT("");
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 2137, 4802};
+    step();
+    SENSOR.st = BSK_SENSOR_CRC;
+    step();
+    SENSOR.st = BSK_SENSOR_OK;
+    step();
+    SENSOR.st = BSK_SENSOR_BUS;
+    step();
+    SENSOR.st = BSK_SENSOR_OK;
+    NOW_US = 130000000;
+    step();
+    SENSOR.st = BSK_SENSOR_STALE;
+    step();
+    JNEXT("* sht40 123456 ok");
+    JNEXT("* sht40 123456 lost why=crc");
+    JNEXT("* sht40 123456 ok");
+    JNEXT("* sht40 123456 lost why=bus");
+    JNEXT("* sht40 130000 ok");
+    JNEXT("* sht40 130000 lost why=stale");
+    JNEXT("");
+    bsk_journal_init(NULL);
+}
+
 /* ─────────────────────────── la page (expectFor de la page de banc) ─────────────────────────── */
 
 typedef struct { char key[8]; char re[160]; } pat_t;
@@ -1635,6 +1779,7 @@ int main(int argc, char **argv)
     t_custom();
     t_moonlite();
     t_no_position();
+    t_sensor();
     t_page(argv[1]);
     printf("couche HOTE, session scriptée : %d vérifications, %d échec(s)\n", checks, fails);
     return fails ? 1 : 0;

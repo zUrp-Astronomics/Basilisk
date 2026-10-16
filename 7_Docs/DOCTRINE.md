@@ -1,7 +1,7 @@
 # Doctrine
 
 **Date** : 2026-09-21
-**Dernière révision** : 2026-10-08
+**Dernière révision** : 2026-10-11 (ticket #594 : `sensor` dans la liste des composants aux avertissements fatals) ; 2026-10-08
 **Statut** : actif — gouverne les arbitrages ; la doctrine est celle de la session web, les passages
 qui décrivaient un état daté en ont été retirés
 **Référencé par** : `CLAUDE.md` (§ Doctrine, § Conventions), `7_Docs/MANUEL.md` (§ Arborescence)
@@ -150,8 +150,8 @@ Ce que la doctrine donne, ici, concrètement.
   firmware est un contrat implicite avec tous les fichiers.
 - **Le compilateur est embauché, et ce qu'il signale arrête le build.** C'est le relecteur le
   moins cher du monde, et un avertissement que personne ne relit ne protège de rien. Sur PC, les
-  suites hôte compilent ce qu'elles jouent en `-Werror`. Sur la cible, les cinq composants que
-  seul ESP-IDF compile (`phy`, `store`, `led`, `host`, `main`) ajoutent `-Wextra -Wconversion
+  suites hôte compilent ce qu'elles jouent en `-Werror`. Sur la cible, les six composants que
+  seul ESP-IDF compile (`phy`, `store`, `led`, `host`, `sensor`, `main`) ajoutent `-Wextra -Wconversion
   -Wshadow` à ce que pose ESP-IDF (`-Wall -Werror=all -Wextra`), fatals sur nos sources
   (`-Werror=extra -Werror=conversion -Werror=shadow`, dans leur `CMakeLists.txt`). Une seule
   exception, nommée à l'include : `hal/gpio_ll.h` d'ESP-IDF dans `components/phy/phy.c`, sous

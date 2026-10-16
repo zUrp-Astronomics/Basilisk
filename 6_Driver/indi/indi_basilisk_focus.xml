@@ -3,7 +3,7 @@
    <devGroup group="Focusers">
       <device label="Basilisk E-mount Lens" manufacturer="zUrp Astronomics">
          <driver name="Basilisk E-mount Lens">indi_basilisk_focus</driver>
-         <version>1.0</version>
+         <version>0.9</version>
       </device>
    </devGroup>
 </driversList>

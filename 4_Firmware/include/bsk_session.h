@@ -83,6 +83,8 @@ typedef struct {
     uint32_t tx_timeout;     /*   ses échéances de 100 ms atteintes */
     uint32_t pair_late;      /* TRANSACTION : les paires jetées, une de leurs trames plus de 2 ms après son échéance */
     uint32_t pair_late_us;   /*   le plus grand retard constaté en les jetant, en µs (bsk_txn_late) */
+    uint32_t fault_motor;    /* PHY : les activations du FAULT du rail moteur (bsk_phy_stats) */
+    uint32_t fault_logic;    /*   et du rail logique */
 } bsk_session_debug_t;
 
 void bsk_session_debug(bsk_session_debug_t *d);

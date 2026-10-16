@@ -81,6 +81,14 @@ void bsk_journal_xdetect(bool present, uint64_t t_us);
 /* Un rebond de XDETECT rendu par la PHY (BSK_PHY_BOUNCE), à son instant. */
 void bsk_journal_xdetect_bounce(uint64_t t_us);
 
+/* Un FAULT de rail rendu par la PHY (BSK_PHY_FAULT), à son instant : activé ou retombé, et le rail commandé allumé ou
+ * non à cet instant. */
+void bsk_journal_rail_fault(bsk_rail_t rail, bool active, bool on, uint64_t t_us);
+
+/* La mesure du capteur de la carte devenue connue (why : NULL) ou inconnue (why : le jeton, `nack`, `crc`, `bus`,
+ * `stale`), à l'instant où la carte le constate (PROTOCOL.md § 3, `* sht40`). */
+void bsk_journal_sht40(const char *why);
+
 /* Le message de type `type` renvoyé, son `n`-ième envoi, à cause de `why` ; puis, s'il n'aboutit pas,
  * l'abandon. */
 void bsk_journal_resend(uint8_t type, uint8_t n, bsk_err_t why);

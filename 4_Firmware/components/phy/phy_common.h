@@ -1,11 +1,11 @@
 /* SOURCE: spec de l'atelier § 1 (R1) et § 2 — le code commun aux deux PHY
  * AUTHOR: engineer
  * DATE: 2026-10-03
- * STATUS: actif — C pur, sans ESP-IDF : compilé pour la carte et par les tests hôte
+ * STATUS: actif — C pur, sans ESP-IDF : compilé pour la carte et par les tests hôte ; ticket #590 : fault_edge
  *
- * Le codec de trame (7_Docs/E-Mount/protocol.md § 3), la réception en flux et la présence de D2 avec son verrou,
- * communs à la PHY de la carte (phy.c) et à la PHY simulée : les deux jugent ce qu'elles reçoivent de la même façon, la
- * frontière R1 est la même pour la carte et pour le simulateur. */
+ * Le codec de trame (7_Docs/E-Mount/protocol.md § 3), la réception en flux, la présence de D2 avec son verrou et la
+ * lecture des FAULT des rails, communs à la PHY de la carte (phy.c) et à la PHY simulée : les deux jugent ce qu'elles
+ * reçoivent de la même façon, la frontière R1 est la même pour la carte et pour le simulateur. */
 #ifndef PHY_COMMON_H
 #define PHY_COMMON_H
 
@@ -176,5 +176,42 @@ uint64_t pres_deadline(const pres_t *p);
  * premier événement de la file, UINT64_MAX si elle est vide) : `e` rempli en BSK_PHY_PRESENCE, à son instant, et le
  * changement oublié. false : rien à rendre avant `before`, `e` intact. */
 bool pres_next(pres_t *p, uint64_t before, bsk_phy_event_t *e);
+
+/* ─────────────────────────── les FAULT des rails ───────────────────────────
+ * Le FAULT# d'un TPS2552 (bsk_phy.h, BSK_PHY_FAULT) ne mémorise rien. Chaque front est pris par une interruption sur les
+ * deux fronts, qui relit le niveau ; elle ne sait pas quel front l'a déclenchée, seulement qu'il y en a eu au moins un
+ * depuis sa dernière prise (le statut d'un front est retenu jusqu'à elle). Le niveau relu, comparé au dernier connu,
+ * donne la parité des fronts survenus depuis :
+ *   - différent, un nombre impair : inactif → actif, une activation ; actif → inactif, une retombée ;
+ *   - égal, un nombre pair, au moins deux : inactif → inactif, une activation finie avant d'être lue (FAULT_PULSE) ;
+ *     actif → actif, une retombée puis une nouvelle activation (FAULT_REON).
+ * Chaque prise compte donc une activation, sauf une retombée seule. Plus de deux fronts entre deux prises (des
+ * activations plus courtes que la prise de l'interruption, quelques microsecondes) en comptent une : le filtre du
+ * commutateur (5 ms au moins en surintensité) et ses cycles thermiques (le temps de refroidir de 10 °C) sont bien plus
+ * lents. Le compte n'est tenu qu'ici, pas par la file des événements : il est exact même quand un événement est perdu.
+ * Sur la carte, fault_edge tourne dans l'interruption, en IRAM : en ligne, forcée, comme pres_edge ; sous pres_mux de
+ * phy.c (l'état commandé du rail y est lu avec lui). */
+typedef struct {
+    bool     active;    /* le dernier niveau connu : true, FAULT# à 0 */
+    uint32_t n;         /* les activations depuis le démarrage */
+} fault_t;              /* à zéro : inactif (le tirage haut), aucune activation */
+
+typedef enum {
+    FAULT_ON,           /* activé */
+    FAULT_OFF,          /* retombé */
+    FAULT_PULSE,        /* activé puis retombé, avant la prise */
+    FAULT_REON,         /* retombé puis activé de nouveau, avant la prise */
+} fault_ev_t;
+
+/* Une prise de l'interruption ; `active` : le niveau relu (true, FAULT# à 0). */
+static inline __attribute__((always_inline)) fault_ev_t fault_edge(fault_t *f, bool active)
+{
+    bool was = f->active;
+    f->active = active;
+    if (was && !active) return FAULT_OFF;
+    f->n++;
+    if (was) return FAULT_REON;
+    return active ? FAULT_ON : FAULT_PULSE;
+}
 
 #endif

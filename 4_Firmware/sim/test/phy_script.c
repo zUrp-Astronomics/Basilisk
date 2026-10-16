@@ -1,7 +1,7 @@
 /* SOURCE: include/bsk_phy.h ; 7_Docs/E-Mount/protocol.md § 2 (la poignée de main)
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — lié à sim/test/test_session_script.c
+ * STATUS: actif — lié à sim/test/test_session_script.c ; ticket #590 : ps_rail_fault
  * Le répondeur minimal derrière bsk_phy.h (voir phy_script.h) : bsk_phy_rail, bsk_phy_lines et bsk_phy_vd rendent true. */
 #include "phy_script.h"
 
@@ -25,6 +25,8 @@ static struct {
     bool            body_up;      /* poignée de main : BODY_CS vue haute */
     uint64_t        cs_low_at;    /* instant où cette LENS_CS retombe ; UINT64_MAX tant qu'elle est haute */
     bool            level;        /* LENS_CS telle que la PHY la lit (bsk_phy_lens_cs) : le dernier niveau remis */
+    bool            rail[2];      /* la dernière commande de chaque rail (bsk_phy_rail), indexée par bsk_rail_t */
+    uint32_t        faults[2];    /* les activations injectées (ps_rail_fault) */
 } p;
 
 static void push(const bsk_phy_event_t *e)
@@ -124,6 +126,16 @@ void ps_error(bsk_err_t err)
     push(&e);
 }
 
+void ps_rail_fault(bsk_rail_t rail, bool active)
+{
+    bsk_phy_event_t e = {.kind = BSK_PHY_FAULT, .t_us = p.now};
+    e.u.fault.rail = rail;
+    e.u.fault.active = active;
+    e.u.fault.on = p.rail[rail];
+    if (active) p.faults[rail]++;
+    push(&e);
+}
+
 /* ─────────────────────────── bsk_phy.h ─────────────────────────── */
 
 bsk_err_t bsk_phy_send(const bsk_frame_t *f)
@@ -199,6 +211,7 @@ bool bsk_phy_rail(bsk_rail_t rail, bool on)
 {
     ps_act_t a = {.kind = PS_RAIL, .t = p.now, .on = on, .rail = rail};
     note(&a);
+    p.rail[rail] = on;
     return true;
 }
 
@@ -212,5 +225,10 @@ bool bsk_phy_poll(bsk_phy_event_t *ev)
     return true;
 }
 
-/* Les compteurs de la carte (bsk_phy.h) : zéro ici, ni file bornée de la carte ni UART. */
-void bsk_phy_stats(bsk_phy_stats_t *st) { memset(st, 0, sizeof *st); }
+/* Les compteurs de la carte (bsk_phy.h) : zéro ici, ni file bornée de la carte ni UART ; les FAULT injectés. */
+void bsk_phy_stats(bsk_phy_stats_t *st)
+{
+    memset(st, 0, sizeof *st);
+    st->fault_motor = p.faults[BSK_RAIL_MOTOR];
+    st->fault_logic = p.faults[BSK_RAIL_LOGIC];
+}

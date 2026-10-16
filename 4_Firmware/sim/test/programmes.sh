@@ -1,7 +1,8 @@
 # SOURCE: la liste des programmes de test du firmware et de leurs sources, en un seul endroit
 # AUTHOR: engineer
 # DATE: 2026-09-27
-# STATUS: actif — sourcé par run.sh (à la racine de 4_Firmware/) et par sim/test/mutants.sh ; ticket #528 : sim/stacks_sim.c
+# STATUS: actif — sourcé par run.sh (à la racine de 4_Firmware/) et par sim/test/mutants.sh ; ticket #528 : sim/stacks_sim.c ;
+#         ticket #594 : test_sht40, l'en-tête privé du capteur (components/sensor)
 #
 # run.sh compile les programmes depuis le dépôt, mutants.sh depuis une copie mutée de 4_Firmware/ :
 # les deux lisent ici la même liste, sous la racine qu'on leur donne. Un programme ajouté ici est
@@ -12,8 +13,9 @@
 # test_session135, test_std et test_host135 sont liés avec --wrap : ils notent ce que la session fait sur le fil sans
 # toucher à la PHY simulée (sim/test/test_session135.c, sim/test/test_std.c, sim/test/test_host135.c). Tout programme
 # qui compile la couche HOTE (components/host/host.c) compile aussi components/led/led.c (`k`, le plafond de la LED)
-# et est lié avec -lm (l'ouverture : log2, pow), et reçoit les marges de pile de `DEBUG` (bsk_host_stacks, bsk_host.h) :
-# test_host pose les siennes, les autres compilent sim/stacks_sim.c.
+# et est lié avec -lm (l'ouverture : log2, pow), et reçoit les marges de pile de `DEBUG` (bsk_host_stacks, bsk_host.h)
+# et la mesure du capteur de la carte (bsk_sensor_read, bsk_sensor.h) : test_host pose les siennes, les autres
+# compilent sim/stacks_sim.c et sim/sensor_none.c (le capteur avant sa première lecture).
 programme_sources() {
     local r=$1
     local sim=("$r/components/phy/phy_common.c" "$r/sim/frame.c" "$r/sim/sources135.c" "$r/sim/lens135.c"
@@ -27,17 +29,19 @@ programme_sources() {
         test_bench_core) SOURCES=("$r/components/bench_core/bench_core.c" "$r/sim/test/$2.c") ;;
         test_lens_std) SOURCES=("$r/sim/lens_std.c" "$r/sim/test/$2.c") ;;
         test_led) SOURCES=("$r/components/led/led.c" "$r/sim/test/$2.c") ;;
+        test_sht40) SOURCES=("$r/components/sensor/sht40.c" "$r/sim/sht40_sim.c" "$r/sim/test/$2.c") ;;
         test_journal) SOURCES=("$r/components/journal/journal.c" "$r/components/phy/phy_common.c" "$r/sim/test/jdecode.c" "$r/sim/test/$2.c") ;;
         test_host) SOURCES=("$r/components/host/host.c" "$r/components/host/lens_names.c" "$r/components/led/led.c" "$r/components/journal/journal.c"
                             "$r/components/phy/phy_common.c" "$r/sim/test/$2.c")
             LIENS=(-lm) ;;
         test_host135)
             SOURCES=("${session[@]}" "$r/sim/lens135.c" "$r/sim/lens_sim_135.c" "$r/sim/phy_sim.c" "$r/components/host/host.c"
-                     "$r/components/host/lens_names.c" "$r/components/led/led.c" "$r/sim/stacks_sim.c" "$r/sim/test/$2.c")
+                     "$r/components/host/lens_names.c" "$r/components/led/led.c" "$r/sim/stacks_sim.c" "$r/sim/sensor_none.c"
+                     "$r/sim/test/$2.c")
             LIENS=(-Wl,--wrap=bsk_phy_send -lm) ;;
         test_session_script)
             SOURCES=("${session[@]}" "$r/components/host/host.c" "$r/components/host/lens_names.c" "$r/components/led/led.c" "$r/sim/test/phy_script.c"
-                     "$r/sim/stacks_sim.c" "$r/sim/test/$2.c")
+                     "$r/sim/stacks_sim.c" "$r/sim/sensor_none.c" "$r/sim/test/$2.c")
             LIENS=(-lm) ;;
         test_session135)
             SOURCES=("${session[@]}" "$r/sim/lens135.c" "$r/sim/lens_sim_135.c" "$r/sim/phy_sim.c" "$r/sim/test/jdecode.c" "$r/sim/test/$2.c")
@@ -45,7 +49,7 @@ programme_sources() {
         test_std)
             SOURCES=("${session[@]}" "$r/sim/lens_std.c" "$r/sim/lens_sim_std.c" "$r/sim/phy_sim.c" "$r/components/host/host.c"
                      "$r/components/host/lens_names.c" "$r/components/led/led.c" "$r/sim/test/jdecode.c" "$r/sim/stacks_sim.c"
-                     "$r/sim/test/$2.c")
+                     "$r/sim/sensor_none.c" "$r/sim/test/$2.c")
             LIENS=(-Wl,--wrap=bsk_phy_send,--wrap=bsk_phy_poll -lm) ;;
         *) return 1 ;;
     esac
@@ -66,5 +70,5 @@ programme_args() {
 
 # programme_includes <racine firmware> : remplit INCLUDES.
 programme_includes() {
-    INCLUDES=(-I"$1/include" -I"$1/sim" -I"$1/components/phy")
+    INCLUDES=(-I"$1/include" -I"$1/sim" -I"$1/components/phy" -I"$1/components/sensor")
 }

@@ -61,20 +61,26 @@ ASCOM drivers work with it unchanged. First target lens: the **Samyang AF 135 mm
 
 <p align="center"><img src="9_Assets/basilisk-board-top.webp" alt="Main board, top" width="300"> <img src="9_Assets/basilisk-board-bot.webp" alt="Main board, bottom" width="300"></p>
 
+<p align="center"><img src="9_Assets/basilisk-enclosure.webp" alt="Basilisk enclosure v1.0b, CAD render: the E-mount ring with its pogo-pin contacts and the USB-C port" width="600"></p>
+
 The v1.0 board goes to its first production run; it is not validated yet — don't order it until it
 is. Its manufacturing files are in `1_Board/`, the printable case in `3_3D-Models/`, its CAD sources
 (STEP) in `2_Hardware/`.
 
 ## Software
 
-- **Firmware** — `4_Firmware/`: ESP-IDF, no other dependency. Built for two targets: the ESP32-C3 of the
-  v1.0 board (not yet validated on it), and a Seeed XIAO ESP32-S3 used as a bench board.
+- **Firmware** — `4_Firmware/`: ESP-IDF, no other dependency. Built for the ESP32-C3 of the v1.0 board
+  (not yet validated on it).
 - **Bench page** — `5_App/`: a single HTML page that drives the board from Chrome or Edge over Web
   Serial. Nothing to install.
 - **tool_station** — `5_App/tool_station/`: reads and sets the M1/M2 custom switch of the Samyang
   AF 135, without Samyang's tool.
 - **INDI driver** — `6_Driver/indi/`: `indi_basilisk_focus`, a focuser for Ekos. The stock Pinefeat
   drivers work too.
+
+## Flash
+
+Install it from your browser on the [product page](https://zurp-astronomics.github.io/basilisk/) (Firefox, Chrome or Edge).
 
 ## Build
 
@@ -96,7 +102,7 @@ microcontroller, 0402 passives and tiny exposed-pad power parts.
 
 ## Status & roadmap
 
-- **v0.9** — test release, firmware running on a Seeed XIAO ESP32-S3.
+- **v0.9** — the firmware of the v1.0 board, under test until the board is validated.
 - **v1.0** — the ESP32-C3 board, once it is validated on the bench.
 
 ## Credits

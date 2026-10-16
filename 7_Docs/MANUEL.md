@@ -1,14 +1,17 @@
 # emount-bench — une carte pour piloter un objectif Sony E depuis un PC
 
 **Date** : 2026-10-06
-**Dernière révision** : 2026-10-10
+**Dernière révision** : 2026-10-12 (ticket #617 : une version publiée, depuis la page produit du site et sa release GitHub) ;
+2026-10-11 (ticket #606 : la carte v1.0 seule, la XIAO de banc retirée ; la version 0.9) ;
+2026-10-11 (ticket #602 : le firmware livré sous le nom `basilisk_FW`, l'image unique, les
+scripts de flash) ; 2026-10-11 (ticket #594 : le capteur SHT40 lu et rapporté, `z`, `:GT#`, le driver INDI ; la table du
+§ Matériel dit ce que le firmware lit) ; 2026-10-11 (ticket #590 : les FAULT des rails dans `DEBUG`) ; 2026-10-10
 **Statut** : actif — le manuel de la carte, en français : l'ancien `README.md` du dépôt, déplacé tel quel par le ticket #495 quand le README est devenu la vitrine du projet
 **Référencé par** : `README.md` (§ Documentation)
 **Dérivé de** : `README.md` avant le ticket #495 (révision du 2026-10-06, commit `6fd8349`)
 
-Une petite carte (la carte v1.0, à ESP32-C3 ; au banc, une Seeed XIAO ESP32-S3) se branche entre un PC, en USB, et
-un objectif à monture Sony E, sur ses contacts. Elle joue le rôle du boîtier : elle met l'objectif sous tension (si les interrupteurs de ses rails sont
-câblés), fait son initialisation, puis le pilote à la demande — mise au point, ouverture, une position mémorisée
+Une petite carte (la carte v1.0, à ESP32-C3) se branche entre un PC, en USB, et un objectif à monture Sony E, sur ses
+contacts. Elle joue le rôle du boîtier : elle met l'objectif sous tension, fait son initialisation, puis le pilote à la demande — mise au point, ouverture, une position mémorisée
 (« la marque »). Son usage premier est l'astrophotographie : l'objectif devient un focuser pour INDI/Ekos (Linux) ou pour ASCOM (Windows). Cible première :
 **Samyang AF 135 mm F1.8 FE**.
 
@@ -17,10 +20,9 @@ carte, il est dans **`7_Docs/PROTOCOL.md`**.
 
 ## Matériel
 
-Le firmware se construit pour deux cartes. Le brochage de chacune est dans `4_Firmware/components/phy/pins.h`, une
-table par carte.
+Le firmware se construit pour la carte v1.0, seule. Son brochage est dans `4_Firmware/components/phy/pins.h`.
 
-**La carte v1.0** : un ESP32-C3FH4 nu (4 Mo de flash intégrée), pas une XIAO ; les dossiers de fabrication sont dans
+**La carte v1.0** : un ESP32-C3FH4 nu (4 Mo de flash intégrée) ; les dossiers de fabrication sont dans
 `1_Board/`. Aucun GPIO n'y reste libre :
 
 | GPIO | Signal | Rôle |
@@ -31,38 +33,20 @@ table par carte.
 | 3 | LENS_CS | entrée, tirée bas par la carte : l'objectif la lève quand il émet |
 | 4 | VD | impulsion basse d'environ 60 µs, 60 Hz |
 | 5 | BODY_CS | sortie, tirée bas par la carte : la carte la lève quand elle émet |
-| 6 | FAULT_MOTOR | défaut du rail moteur, actif à 0 (pas encore lu par le firmware) |
+| 6 | FAULT_MOTOR | défaut du rail moteur, actif à 0 : lu par le firmware, compté et journalisé (`DEBUG`, `* rail`) |
 | 7 | EN_MOTOR | commande du rail moteur 5 V de l'objectif, active à 0 |
 | 8 | EN_LOGIC | commande du rail logique 3,3 V de l'objectif, active à 0 |
-| 9 | FAULT_LOGIC | défaut du rail logique, actif à 0 (pas encore lu par le firmware) |
+| 9 | FAULT_LOGIC | défaut du rail logique, actif à 0 : lu par le firmware, compté et journalisé (`DEBUG`, `* rail`) |
 | 10 | LED | LED de statut, allumée à l'état haut |
 | 18, 19 | USB | la ligne série (USB Serial/JTAG du C3) |
-| 20, 21 | SCL, SDA | capteur de température et d'humidité SHT40 (pas encore lu par le firmware) |
+| 20, 21 | SCL, SDA | capteur de température et d'humidité SHT40 : lu par le firmware une fois par seconde (`z`, `:GT#`) |
 
 - Les deux rails de l'objectif sont commutés et limités en courant sur la carte (deux TPS2552), alimentés par l'USB-C :
   rien d'autre à câbler. Au démarrage, des tirages de la carte les tiennent coupés, et le firmware ne les allume qu'à
   la demande de la séquence de démarrage de l'objectif.
 - Les contacts de la monture sont dix pointes, P1 à P10.
 
-**La carte de banc : Seeed XIAO ESP32-S3** :
-
-| XIAO | GPIO | Signal | Rôle |
-|---|---|---|---|
-| D0 | 1 | EN_LOGIC | commande du rail logique de l'objectif, active à 1 (optionnel) |
-| D1 | 2 | EN_MOTOR | commande du rail moteur de l'objectif, active à 1 (optionnel) |
-| D2 | 3 | XDETECT | contact de présence de l'objectif, tirage haut : 0 = présent |
-| D3 | 4 | VD | impulsion basse d'environ 60 µs, 60 Hz |
-| D7 | 44 | LENS_CS | entrée, tirage bas : l'objectif la lève quand il émet |
-| D8 | 7 | TXD → objectif | UART1, 750 000 bauds |
-| D9 | 8 | RXD ← objectif | UART1 |
-| D10 | 9 | BODY_CS | sortie : la carte la lève quand elle émet |
-| — | 21 | LED utilisateur de la XIAO | LED de statut, allumée à l'état bas |
-| GND | — | GND | masse commune obligatoire |
-
-- La XIAO ne fournit pas le courant de l'objectif : EN_LOGIC et EN_MOTOR commandent deux interrupteurs, s'ils sont
-  câblés.
-
-Sur les deux cartes :
+Et encore :
 
 - Les niveaux de l'objectif sont en 3,3 V : pas d'adaptation.
 - **XDETECT doit être câblé** : la carte ne démarre l'objectif que quand ce contact dit « présent » (tenu 300 ms), et
@@ -76,33 +60,35 @@ Le firmware est dans `4_Firmware/` (ESP-IDF 5.3.2, C, aucune dépendance hors ES
 
 ### Le récupérer : les artefacts de la CI
 
-À chaque run, la CI construit le firmware pour les deux cartes (job `firmware-build`) et publie un artefact par cible :
-**`firmware-esp32c3`** pour la carte v1.0, **`firmware-esp32s3`** pour la XIAO ESP32-S3. Chacun contient l'application
-(`emount_bench2.bin`), `bootloader/bootloader.bin`, `partition_table/partition-table.bin` et `flash_args`. On les
-télécharge depuis la page du run, ou par l'API de la forge (`GET /api/v1/repos/fleet/basilisk/actions/artifacts`, puis
+À chaque run, la CI construit le firmware de la carte v1.0 (job `firmware-build`) et publie un artefact,
+**`firmware-esp32c3`**. Les fichiers portent la version et la cible, par exemple en 0.9 : l'application
+`basilisk_FW-v0.9-esp32c3.bin`, son bootloader (`…-bootloader.bin`) et sa table de partitions
+(`…-partition-table.bin`), `flash_args` qui les place, l'image unique `basilisk_FW-v0.9-esp32c3-full.bin`, et les scripts `flash.sh` et `flash.cmd`. On les télécharge
+depuis la page du run, ou par l'API de la forge (`GET /api/v1/repos/fleet/basilisk/actions/artifacts`, puis
 `…/artifacts/<id>/zip`).
+
+Une version publiée s'installe depuis la page produit du site, `https://zurp-astronomics.github.io/basilisk/` ; sa
+release GitHub porte `basilisk_<tag>_esp32c3.bin` (l'image unique, à écrire en `0x0`) et `manifest.json`.
 
 ### Le flasher
 
-Avec esptool (`pip install esptool`), par l'USB de la carte, depuis le dossier de l'artefact de sa cible, décompressé.
+Par l'USB de la carte, avec esptool (`pip install esptool`, ou l'exécutable autonome d'Espressif), depuis le dossier
+de l'artefact, décompressé. Trois voies :
 
-La carte v1.0, depuis le dossier de `firmware-esp32c3` :
+- **Le script** : `sh flash.sh [PORT]` (Linux, macOS), `flash.cmd [PORT]` (Windows). Il écrit les fichiers séparés
+  de `flash_args`, rien d'autre : la marque, en NVS, est gardée. Sans `PORT`, esptool cherche la carte.
+- **L'image unique** `…-full.bin`, à écrire en `0x0` (esptool, ou un flasheur web : esptool-js, ESP Web Tools) :
+  l'installation complète, sur une puce vierge ou qui a porté autre chose. Elle remplit la NVS de `0xFF` : **la
+  marque est remise à zéro**.
+- **esptool à la main**, ce que fait le script :
 
 ```sh
-python -m esptool --chip esp32c3 -p PORT -b 460800 --before default_reset --after hard_reset write_flash "@flash_args"
-```
-
-La XIAO ESP32-S3, depuis le dossier de `firmware-esp32s3` :
-
-```sh
-python -m esptool --chip esp32s3 -p PORT -b 460800 --before default_reset --after hard_reset write_flash "@flash_args"
+python -m esptool --chip esp32c3 -p PORT -b 460800 write_flash "@flash_args"
 ```
 
 `PORT` : `/dev/ttyACM0` sous Linux, `COMx` sous Windows (la carte y apparaît comme « Périphérique série USB », sans
 pilote).
 
-- **XIAO ESP32-S3** : si le flash ne démarre pas, maintenir BOOT, appuyer sur RESET, relâcher BOOT, relancer la
-  commande.
 - **Carte v1.0** : elle n'a ni bouton BOOT ni bouton RESET, et la broche qui choisit le mode de démarrage (GPIO9) porte
   FAULT_LOGIC, tirée haut par la carte : aucun mode de téléchargement ne s'y force à la main. Le flash par l'USB
   n'est pas encore validé au banc sur cette carte, ni sur un C3 vierge ni sur un C3 qui porte déjà le firmware ; aucune
@@ -114,13 +100,12 @@ ESP-IDF 5.3.2 chargé :
 
 ```sh
 . "$IDF_PATH/export.sh"
-bash 4_Firmware/build.sh            # les deux cibles
-bash 4_Firmware/build.sh esp32c3    # la carte v1.0 seule (esp32s3 : la XIAO seule)
+bash 4_Firmware/build.sh
 ```
 
-Chaque cible se construit dans son dossier, `4_Firmware/build/esp32c3` et `4_Firmware/build/esp32s3` (le `sdkconfig`
-y est généré, rien de versionné n'est réécrit) ; la commande de flash de la cible, ci-dessus, marche depuis son
-dossier. La console ESP-IDF est muette : la carte n'écrit rien sur l'USB qui ne soit
+Le firmware se construit dans `4_Firmware/build/esp32c3` (le `sdkconfig` y est généré, rien de versionné n'est
+réécrit) ; l'artefact est dans `4_Firmware/build/esp32c3/artefact/`, et la commande de flash, ci-dessus, marche depuis
+ce dossier. La console ESP-IDF est muette : la carte n'écrit rien sur l'USB qui ne soit
 pas une réponse.
 
 ## Ce que fait la carte
@@ -144,8 +129,15 @@ pas une réponse.
   respiration en `ready`, un motif de mouvement pendant un déplacement, des séries d'éclats en `fault`, dont le nombre
   dit la cause. Les motifs et leurs valeurs sont en tête de `4_Firmware/components/led/led.c`. `k` lit son
   intensité maximale, `k<n>` la règle (0 à 100 %, `k0` l'éteint) ; elle revient à 100 % à chaque démarrage de la carte.
+- **La température et l'humidité** : la carte v1.0 lit son capteur SHT40 une fois par seconde ; `z` rend la température
+  en °C et l'humidité relative en %RH (`21.37 48.02`), ou `-` quand elles sont inconnues (pas encore lues, capteur
+  muet, lecture fausse, bus bloqué, dernière lecture de plus de 3 s), jamais un nombre. La carte n'en fait
+  rien d'autre : elle ne compense pas la mise au point, c'est Ekos qui décide. Le capteur est sur la carte, contre
+  l'arrière de l'objectif : ce qu'il mesure de l'air dépend du boîtier.
 - **`DEBUG`** donne une ligne de diagnostic : la cause du dernier redémarrage de la carte, les lignes du journal perdues,
-  le résultat du dernier déplacement. **`LOG ON`**, **`LOG ALL`**, **`LOG OFF`** ouvrent et ferment le journal (lignes
+  le résultat du dernier déplacement ; combien de fois la protection de chaque rail de l'objectif
+  s'est déclenchée (`fault_motor`, `fault_logic`, une ligne `* rail` au journal à chaque fois) — la carte le dit et ne
+  coupe rien. **`LOG ON`**, **`LOG ALL`**, **`LOG OFF`** ouvrent et ferment le journal (lignes
   `* …`) ; `LOG ALL` y ajoute chaque trame échangée avec l'objectif.
 
 Les lettres servies, leurs réponses et leurs erreurs exactes sont dans `7_Docs/PROTOCOL.md`. Une lettre ou une commande en
@@ -154,17 +146,20 @@ majuscules que la carte ne sert pas répond `er nocap`.
 ## S'en servir avec INDI / Ekos
 
 **Le driver du dépôt, `6_Driver/indi/`** (« Basilisk E-mount Lens », `indi_basilisk_focus`) : le driver Pinefeat
-d'INDI, avec en plus l'ouverture relue, l'arrêt, la marque, la LED de statut, le redémarrage de l'objectif et son nom. Sa compilation, son
-installation et ses propriétés : `6_Driver/indi/README.md`.
+d'INDI, avec en plus l'ouverture relue, l'arrêt, la marque, la LED de statut, le redémarrage de l'objectif et son nom,
+et, sur la carte v1.0, la température (`FOCUS_TEMPERATURE`, celle qu'Ekos lit pour refocaliser sur un écart de
+température) et l'humidité, publiées seulement quand la carte les connaît. Sa compilation, son installation et ses
+propriétés : `6_Driver/indi/README.md`.
 
 **Le driver Pinefeat d'origine** (`indi_pinefeat_cef_focus`, livré avec INDI) : la carte le sert aussi, sur la position,
 le mouvement et l'ouverture, sans rien configurer sur la carte ; la distance y reste inconnue (`d` rend `-`). Il ne lit les
-bornes (`r`) que si le mineur de `v` est au moins 3 : avec la version actuelle de la carte (`1.0`), il ne les lit pas.
+bornes (`r`) que si le mineur de `v` est au moins 3 : avec la version actuelle de la carte (`0.9`), il les lit.
 
 Dans les deux cas : le port série de la carte (la vitesse est sans effet, c'est un port USB).
 
 Un logiciel qui ne connaît que le protocole Moonlite peut aussi piloter la mise au point (`:GP#`, `:FG#`…,
-`PROTOCOL.md` § 4).
+`PROTOCOL.md` § 4) et lire la température (`:GT#`), qui y vaut 0 °C tant que la carte ne la connaît pas : Moonlite n'a
+pas de forme pour « inconnue ».
 
 ## S'en servir avec ASCOM (Windows)
 
@@ -249,7 +244,8 @@ README.md          la vitrine du projet, en anglais
 CLAUDE.md          l'environnement de travail du dépôt : conventions, commandes, pièges (pour qui le modifie)
 0_Datasheets/      les datasheets des composants de la carte
 1_Board/           la carte v1.0 : schéma, vues, modèle 3D (le STEP, zippé), Gerbers, BoM, placement (son README)
-2_Hardware/        le boîtier : STEP du dessus et du dessous ; la nomenclature de la quincaillerie (vide)
+2_Hardware/        le boîtier : STEP du dessus, du dessous et de la pièce USB ; son rendu (PNG) ; la nomenclature de la
+                   quincaillerie (vide)
 3_3D-Models/       le boîtier à imprimer (3MF)
 4_Firmware/        le firmware (ESP-IDF) ; sim/, les faux objectifs et les tests ; traces/, les traces du 135 ; run.sh,
                    build.sh ; gen_lens_names.py, le générateur de la table des noms d'objectifs

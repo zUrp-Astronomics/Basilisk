@@ -1,33 +1,36 @@
 # indi_basilisk_focus — driver INDI pour la carte Basilisk
 
 **Date** : 2026-09-24
-**Dernière révision** : 2026-10-08
-**Statut** : actif — driver 1.0
+**Dernière révision** : 2026-10-11 (ticket #606 : driver 0.9, comme la carte ; la XIAO de banc retirée) ; 2026-10-11 (ticket #600 : les bornes de `r` et `CALIBRATE` contre notre carte, `ext=1`) ; 2026-10-11 (ticket #594 : la température et l'humidité de la carte, `z`) ; 2026-10-08
+**Statut** : actif — driver 0.9
 **Référencé par** : `README.md` (§ Software), `7_Docs/MANUEL.md`, `6_Driver/indi/CMakeLists.txt`, `6_Driver/indi/UPSTREAM.md`, job `indi` de `.gitea/workflows/ci.yml`
 
 Focuser INDI (Ekos) pour la carte Basilisk et un objectif E-mount. C'est le driver Pinefeat d'origine
 (`pinefeat_cef` du cœur d'INDI) avec un lot « étendu » par-dessus. Les défauts du code d'origine sont notés
 dans [`UPSTREAM.md`](UPSTREAM.md). Sur décision de l'humain, notre fourche en corrige une partie : la réponse
 de 15 caractères (2026-10-04), puis les points R9 de l'audit statique du 2026-10-06 (2026-10-07, plan de
-robustesse de l'atelier) ; les autres restent tels quels. `UPSTREAM.md` dit lesquels.
+robustesse de l'atelier), puis, contre notre carte seulement (`ext=1`), les bornes de `r` (L09-03, 2026-10-11) ; les
+autres restent tels quels. `UPSTREAM.md` dit lesquels.
 
 ## Base : le driver Pinefeat d'origine
 
 `pinefeat_cef.h` et `pinefeat_cef.cpp` sont les fichiers d'`indilib/indi`,
 `drivers/focuser/pinefeat_cef.{h,cpp}`, au commit `1dd9b34f24df6fd74ed45be17823fc937e192b47`. Leurs
-propriétés, leurs noms et leur comportement sur `v f r e a d s c` sont repris tels quels :
+propriétés, leurs noms et leur comportement sur `v f r e a d s c` sont repris tels quels, sauf, contre notre carte
+(`ext=1`), les bornes de `r` et `CALIBRATE` (« Les bornes de `r` », plus bas) :
 `FIRMWARE_VERSION`, `FOCUS_DISTANCE`, `CALIBRATE`, `ABS_APERTURE`, `REL_APERTURE`, `RANGE_APERTURE`,
 et les propriétés standard des focusers INDI (position absolue et relative, `FOCUS_MAX`, vitesse).
-`CALIBRATE` est celui d'origine : la carte répond `ok` à `c` sans rien envoyer à l'objectif, le driver relit `r`. La
+Sans `ext=1`, `CALIBRATE` est celui d'origine : il envoie `c`, passe la position absolue et `FOCUS_MAX` à `Busy`, et
+le maximum de `r` n'entre dans `FOCUS_MAX` qu'à la relecture qui suit (`UPSTREAM.md`, L09-03). La
 carte ne connaît pas la distance de mise au point : `FOCUS_DISTANCE` affiche sa réponse à `d`, `-`.
 
 Les écarts au comportement d'origine :
 
 - **`r` est toujours lu.** L'amont ne le lit que si le mineur de `v` est au moins 3 ; ce contrôle est
   retiré.
-- **Garde-fou de version.** À la connexion, le majeur de `v` doit égaler celui du driver (1). Sinon
+- **Garde-fou de version.** À la connexion, le majeur de `v` doit égaler celui du driver (0). Sinon
   la connexion est refusée, avec les deux versions dans le message
-  (`Board firmware 2.0 does not match driver 1.0: …`).
+  (`Board firmware 1.0 does not match driver 0.9: …`).
 - **La réponse à `v` est jugée sur sa forme** (audit R5). L'ouverture du port peut redémarrer la carte, et
   les lignes de sa ROM (`ESP-ROM:…`, `SPIWP:0xee`…) arriver après l'envoi de `v`. Une ligne qui n'a pas la
   forme `<maj>.<min>` n'est pas la réponse : elle est sautée, comme une ligne `* …`, jusqu'à la réponse ou
@@ -71,6 +74,7 @@ client écrit une de ses propriétés par son nom.
 | LED de statut | `k` `k<n>` | `LED_BRIGHTNESS` (`LEVEL`, 0 à 100 %, onglet Options) | la carte ne la garde pas : rangée dans la config INDI et renvoyée à chaque connexion ; la valeur affichée est celle que `k` relit |
 | fin d'un déplacement | `g` | la position absolue (et relative, pour un déplacement relatif) | lue quand `e` répond `n` après un déplacement lancé par le driver (absolu, relatif, `jg`), puis pendant la fenêtre de l'arrêt (ci-dessous) |
 | redémarrer l'objectif | `b` | `LENS_REBOOT` (`REBOOT`) | le dernier recours |
+| température et humidité de la carte | `z` | `FOCUS_TEMPERATURE` (`TEMPERATURE`, °C, lecture) ; `FOCUS_HUMIDITY` (`HUMIDITY`, %RH, lecture) | relues chaque seconde à l'arrêt ; **définies seulement tant que la carte les connaît** (ci-dessous). Avec une carte dont le firmware ne sert pas `z` (`er nocap`, plus envoyée de la connexion), ni l'une ni l'autre n'existe |
 | onglet « Lens » | `i` `w` `n` | `LENS_INFO` (`LENS_NAME`, `LENS_FIRMWARE`, `LENS_MODULE`, lecture) | relu chaque seconde à l'arrêt ; une réponse `er …` laisse son champ vide (ci-dessous). Une lettre qui répond `er nocap` n'est pas servie, dans tout état (`PROTOCOL.md` § 2) : elle n'est plus envoyée de la connexion. Le firmware actuel de la carte ne sert ni `w` ni `n` : chacune part une fois par connexion, `LENS_FIRMWARE` et `LENS_MODULE` sont vides |
 
 Le protocole est celui de `PROTOCOL.md`.
@@ -96,13 +100,54 @@ déplacement lancé dans la fenêtre l'arrête aussi.
 
 **Tout `Busy` posé par le lot étendu se termine**, quand `e` répond `n` : un déplacement par `g` (ci-dessus),
 `b` par `f` (`Ok` s'il rend une position, `Alert` sinon). Un objectif retiré ou en `FAULT` (`e` à `n`, `f`
-en erreur) donne donc `Alert`, jamais un `Busy` sans fin. Le `Busy` de `CALIBRATE` est celui de l'amont
-(`UPSTREAM.md`).
+en erreur) donne donc `Alert`, jamais un `Busy` sans fin. `CALIBRATE` n'en pose aucun contre notre carte (ci-dessous) ;
+sans `ext=1`, son `Busy` est celui de l'amont (`UPSTREAM.md`).
+
+**Les bornes de `r` sont la plage de la position.** Contre notre carte, ce sont celles que l'objectif publie
+(`PROTOCOL.md`, ligne `r`) : rien n'est mesuré, il n'y a rien à calibrer (décision de l'humain, ticket #600). Le driver
+lit les deux nombres de `r` et pose, à la connexion et à chaque lecture réussie (une fois par seconde à l'arrêt, après
+`f`), la plage de la position absolue et celle de `FOCUS_MAX` sur `<min>..<max>`, et la valeur de `FOCUS_MAX` sur
+`<max>` ; il ne les envoie aux clients que si elles ont changé, et le journal le dit (`Lens focus range 13873-30738.`).
+Une cible hors de la plage, absolue ou relative, est refusée par `INDI::Focuser` avant d'atteindre la carte (`Requested
+position out of bound…`, libindi 1.9.9). Un nouvel objectif apporte ses bornes à la première lecture réussie ; une
+lecture qui échoue (objectif retiré, `nc`) ne change rien : les dernières bornes connues restent. Chaque connexion
+repart de la plage d'origine, 0 à 32767, jusqu'à sa première lecture. Un `FOCUS_MAX` écrit par un client, dont
+`INDI::Focuser` fait une plage depuis 0, est remis aux bornes de `r` à la lecture suivante. **`CALIBRATE` rend ces
+bornes** : il relit `r` et les pose, sans `Busy`, sans envoyer `c` (la carte y répond `ok` sans rien faire), sans rien
+déplacer ; `Ok`, ou `Alert` si `r` échoue, les bornes connues gardées. Contre un adaptateur Pinefeat (sans `ext=1`),
+dont `r` porte une plage calibrée, rien de cela : les bornes et `CALIBRATE` sont ceux de l'amont (`UPSTREAM.md`,
+L09-03).
+
+Joué une fois, hors de la CI (2026-10-11, un essai du ticket #600 sur le runner, non gardé dans le dépôt) : sous
+`indiserver` (libindi 1.9.9), contre une fausse carte sur un pty. Avec `ext=1` : la plage 13873..30738 posée à la
+connexion ; un goto à 5000 et un déplacement relatif au-delà du maximum refusés, sans qu'aucun `f` parte ; `CALIBRATE`
+sans `c` ni déplacement, `FOCUS_MAX` sur le maximum de `r`, pas sur la position ; l'objectif retiré (`nc`), les bornes
+gardées et `CALIBRATE` en `Alert` ; un nouvel objectif (1000-9000) appliqué à la lecture suivante ; un `FOCUS_MAX` écrit
+par le client, remis à la lecture suivante ; reconnecté à une carte sans `ext=1`, la plage 0..32767. Sans `ext=1` : les
+états d'`ABS_FOCUS_POSITION`, `FOCUS_MAX` et `CALIBRATE` et les commandes envoyées, étape par étape, identiques à ceux
+du driver d'avant. Le même essai a compilé et lié le driver contre libindi 2.2.5, construite depuis ses sources.
 
 **Une erreur n'est pas une valeur.** Dans `FOCUS_MARK` et `LENS_INFO`, une réponse `er …` laisse son
 champ vide. L'état de la propriété : `Alert` si une lettre est refusée pour l'instant (`er nolens`,
 `er busy boot`, `er fault` : la valeur existe, elle ne se lit pas) ; sinon `Ok` si un champ porte une
 valeur ; sinon `Idle` (`er nocap` : la carte ne la sert pas, comme `w` et `n` aujourd'hui).
+
+**La température et l'humidité ne sont jamais publiées inconnues.** `FOCUS_TEMPERATURE`, élément `TEMPERATURE`, en °C,
+en lecture seule, est la propriété de convention que lit Ekos, pour refocaliser sur un écart de température (« Refocus
+if ΔT° > ») et pour l'Adaptive Focus ; il prend toute valeur publiée telle quelle, sans regarder l'état de la propriété.
+`FOCUS_HUMIDITY` (`HUMIDITY`, %RH, lecture seule) est propre à ce driver : INDI n'a pas de convention pour l'humidité
+d'un focuser ; elle n'est qu'affichée. Les deux viennent de la même réponse de `z` (`21.37 48.02`) : la carte rend `-`
+quand elle ne les connaît pas (pas encore lues, capteur muet, lecture fausse, bus bloqué, dernière lecture de plus de
+3 s ; `PROTOCOL.md` § 2). Le driver ne publie donc les deux propriétés que tant que la carte rend deux nombres : il les
+définit à la première valeur, les met à jour ensuite, et les **supprime** dès que la carte rend `-`, ne répond pas, ou
+répond autre chose ; un client ne voit alors aucun nombre, plutôt qu'un nombre ancien qu'Ekos prendrait pour frais. Le
+journal du driver le dit (`Board temperature and humidity known.` / `… unknown: not published.`). Le driver ne calcule
+rien (pas de point de rosée) et ne compense rien.
+
+Joué une fois, hors de la CI (2026-10-11, un essai du ticket #594 sur le runner, non gardé dans le dépôt) : sous
+`indiserver` (libindi 1.9.9), contre une fausse carte sur un pty dont `z` change : `21.37 48.02` → les deux propriétés
+lues par `indi_getprop` (21,37 et 48,02) ; `-` → les deux absentes ; `-3.05 87.50` → de nouveau là ; `er nocap` →
+absentes, et `z` n'est plus envoyée.
 
 ## Compilation
 

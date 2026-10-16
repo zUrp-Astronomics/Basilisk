@@ -11,8 +11,9 @@ all its products.
 | `basilisk-board.webp` | main board v1.0, 3D view | the README |
 | `basilisk-board-top.webp` | main board v1.0, top | the README |
 | `basilisk-board-bot.webp` | main board v1.0, bottom | the README |
+| `basilisk-enclosure.webp` | enclosure v1.0b, CAD render | the README |
 
-Images here are WebP copies sized for display. Their full-size originals stay where they are produced: `1_Board/Basilisk-v1.0_2-view_3D.png`, `1_Board/Basilisk-v1.0_2-view_top.png`, `1_Board/Basilisk-v1.0_2-view_bot.png`.
+Images here are WebP copies sized for display. Their full-size originals stay where they are produced: `1_Board/Basilisk-v1.0_2-view_3D.png`, `1_Board/Basilisk-v1.0_2-view_top.png`, `1_Board/Basilisk-v1.0_2-view_bot.png`, `2_Hardware/Basilisk_v1.0b_enclosure.png`.
 
 The sheet is read and checked by the website at each build: its format is described in
 [`content/README.md`](https://github.com/zUrp-Astronomics/zurp-astronomics.github.io/blob/main/content/README.md)

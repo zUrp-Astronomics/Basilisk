@@ -1,9 +1,10 @@
 /* SOURCE: spec de l'atelier § 1 (R1) et § 2 — la frontière PHY
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — déclarations seulement ; la carte (components/phy/phy.c) et la PHY simulée l'implémentent
+ * STATUS: actif — déclarations seulement ; la carte (components/phy/phy.c) et la PHY simulée l'implémentent ; ticket
+ *         #590 : les FAULT des rails (BSK_PHY_FAULT, fault_motor et fault_logic) ; ticket #606 : la carte v1.0 seule
  *
- * La frontière PHY : les trames, les lignes de la monture, les rails et le verrou de XDETECT. */
+ * La frontière PHY : les trames, les lignes de la monture, les rails, leurs FAULT et le verrou de XDETECT. */
 #ifndef BSK_PHY_H
 #define BSK_PHY_H
 
@@ -52,6 +53,27 @@
  * l'instant de la coupure, et un refus ne lui apprend rien que cet événement ne lui dise, rendu au plus tard au
  * bsk_phy_poll suivant. */
 
+/* Les deux rails de l'objectif, commandés par la carte (bsk_phy_rail), et leur FAULT (BSK_PHY_FAULT). */
+typedef enum {
+    BSK_RAIL_LOGIC,   /* D0, EN_LOGIC */
+    BSK_RAIL_MOTOR,   /* D1, EN_MOTOR */
+} bsk_rail_t;
+
+/* Les FAULT des rails (pins.h). Chaque rail passe par un commutateur TPS2552 dont la sortie FAULT# (drain ouvert,
+ * active à 0, tirée haut sur la carte) signale une surintensité tenue plus de 5 à 10 ms, une surchauffe (tout de suite, sans filtre) ou une tension inverse. Le commutateur se protège seul
+ * (limitation en 2 µs, cycles thermiques) et ne mémorise rien : FAULT# retombe dès que le défaut cesse, et une surchauffe
+ * peut ne durer qu'un cycle. La PHY le lit et le dit, rien de plus (décision Q1 de l'humain) : elle ne coupe rien, et la
+ * SESSION n'en fait que le journal.
+ *   - Toute activation est comptée, même brève : chaque front de FAULT# est pris par une interruption, qui relit le
+ *     niveau et en déduit ce qui s'est passé depuis le dernier connu (fault_edge, phy_common.h) ; le compte est tenu là
+ *     où le front est vu, hors de toute file (bsk_phy_stats) ;
+ *   - chaque changement remonte en BSK_PHY_FAULT, à l'instant de l'interruption, avec l'état commandé du rail à cet
+ *     instant (allumé par bsk_phy_rail, coupé par bsk_phy_rail ou par le verrou de XDETECT). Une activation finie avant
+ *     d'être lue en donne deux au même instant, l'activation puis la retombée ; une retombée suivie d'une nouvelle
+ *     activation, la retombée puis l'activation. Ces événements passent par la file : une file débordée les perd (le
+ *     plus ancien jeté), le compte, non ;
+ *   - un FAULT# déjà actif au démarrage de la PHY est une activation, rail coupé. */
+
 /* Trame la plus longue que PHY accepte, en-tête et fin compris. Le 135 rejette toute trame dont l'octet haut de
  * longueur n'est pas nul (7_Docs/E-Mount/samyang.md § 2.6), et toutes les réponses aux types de la liste blanche
  * tiennent dans cette borne : la plus longue est celle du 0x08, 202 octets de message. Une trame reçue plus longue est
@@ -93,6 +115,7 @@ typedef enum {
                        * (objectif absent, ce front même) ; insertion, tenue 300 ms. Jamais perdu (bsk_phy_poll) */
     BSK_PHY_BOUNCE,   /* un rebond de D2, revenu présent à l'échéance d'une retombée. Pour le journal seul : l'état de
                        * présence n'a pas changé. Il passe par la file : une file débordée le perd (le plus ancien jeté) */
+    BSK_PHY_FAULT,    /* le FAULT d'un rail activé ou retombé. Pour le journal seul ; il passe par la file */
 } bsk_phy_event_kind_t;
 
 typedef struct {
@@ -106,6 +129,11 @@ typedef struct {
         };
         bool        level;        /* BSK_PHY_LENS_CS : niveau atteint (true = haut) */
         bool        present;      /* BSK_PHY_PRESENCE : true = objectif présent (D2 à la masse) */
+        struct {                  /* BSK_PHY_FAULT */
+            bsk_rail_t rail;
+            bool       active;    /* true : activé (FAULT# à 0) ; false : retombé */
+            bool       on;        /* le rail commandé allumé à cet instant */
+        } fault;
     } u;
 } bsk_phy_event_t;
 
@@ -148,11 +176,6 @@ bool bsk_phy_poll(bsk_phy_event_t *ev);
  * false : le verrou de XDETECT est posé et `on` est vrai, le rail reste coupé ; true sinon. Couper passe toujours. Le
  * verrou est lu et le rail allumé sous la même section critique que les interruptions de XDETECT (le front,
  * l'échéance) : aucune coupure ne tombe entre les deux. */
-typedef enum {
-    BSK_RAIL_LOGIC,   /* D0, EN_LOGIC */
-    BSK_RAIL_MOTOR,   /* D1, EN_MOTOR */
-} bsk_rail_t;
-
 bool bsk_phy_rail(bsk_rail_t rail, bool on);
 
 /* TXD et BODY_CS, les lignes que la carte émet vers l'objectif hors de la VD.
@@ -173,13 +196,17 @@ bool bsk_phy_lines(bool drive);
  * carte.
  *   - evq_drop : les événements jetés parce que la file était pleine (le plus ancien, au profit du nouveau) ;
  *   - tx_wait_us, tx_timeout : la plus longue attente de fin d'émission de bsk_phy_send, en µs, sur la pile de
- *     son appelant, et les échéances de 100 ms de cette attente atteintes.
- * La carte seulement : les PHY de test (sim/phy_sim.c, sim/test/phy_script.c) rendent zéro. Une file simulée qui
- * déborde prouverait le simulateur, pas la carte. Lu sur la tâche de SESSION. */
+ *     son appelant, et les échéances de 100 ms de cette attente atteintes ;
+ *   - fault_motor, fault_logic : les activations du FAULT de chaque rail, comptées par la PHY où elle voit le front.
+ * Les PHY de test (sim/phy_sim.c, sim/test/phy_script.c) rendent zéro pour les trois premiers : une file simulée qui
+ * déborde prouverait le simulateur, pas la carte. Elles comptent les FAULT qu'on leur fait lever, comme la carte. Lu sur
+ * la tâche de SESSION. */
 typedef struct {
     uint32_t evq_drop;
     uint32_t tx_wait_us;
     uint32_t tx_timeout;
+    uint32_t fault_motor;
+    uint32_t fault_logic;
 } bsk_phy_stats_t;
 
 void bsk_phy_stats(bsk_phy_stats_t *st);

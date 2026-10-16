@@ -5331,6 +5331,107 @@ static void t_pair_late(void)
     CHECK(d.pair_late == 0 && d.pair_late_us == 0, "le démarrage de la carte (bsk_session_init) : à zéro");
 }
 
+/* ─────────────────────────── les FAULT des rails : le journal seul ───────────────────────────
+ * La décision Q1 de l'humain : la carte lit FAULT et le dit (une ligne de journal par changement, deux compteurs dans
+ * DEBUG), la session n'en fait rien. Deux démarrages du 135 scripté, joués aux mêmes pas, l'un sans FAULT, l'autre avec
+ * des FAULT levés rails coupés (OFF), pendant POWERING (les deux rails allumés : logique à T0, moteur 50 ms après), en
+ * READY : ce que la carte fait sur le fil (trames, BODY_CS, rails, VD, lignes) et ses états sont les mêmes, instant
+ * pour instant — la séquence des trames exceptée, dont le compteur court depuis le début du programme, pas depuis le
+ * démarrage. Les lignes `* rail` et les compteurs attendus sont écrits à la main. */
+static ps_act_t fault_ref[PS_LOG_CAP];
+static size_t n_fault_ref;
+static chg_t fault_chg[512];
+static size_t n_fault_chg;
+
+static bool same_act(const ps_act_t *a, const ps_act_t *b)
+{
+    if (a->kind != b->kind || a->t != b->t) return false;
+    switch (a->kind) {
+    case PS_SEND:
+        return a->frame.cls == b->frame.cls && a->frame.len == b->frame.len && !memcmp(a->frame.msg, b->frame.msg, a->frame.len);
+    case PS_RAIL:
+        return a->rail == b->rail && a->on == b->on;
+    case PS_VD:
+        return a->hz == b->hz;
+    default:
+        return a->on == b->on;
+    }
+}
+
+/* Le démarrage, aux mêmes pas avec ou sans FAULT ; les lignes `* rail` du journal dans `rl` (au plus 8, chacune de
+ * moins de 80 octets), leur nombre rendu. */
+static size_t fault_boot(bool faults, char rl[8][80])
+{
+    char b[400];
+    uint8_t g;
+    size_t n, k = 0;
+    boot();
+    lens_135();
+    bsk_journal_init(ps_now);
+    bsk_journal_set(false, false);
+    bsk_journal_set(true, false);
+    if (faults) {                                  /* OFF, rails jamais allumés : une activation brève, puis une retombée */
+        ps_rail_fault(BSK_RAIL_LOGIC, true);
+        ps_rail_fault(BSK_RAIL_LOGIC, false);
+    }
+    ps_presence(true);
+    run_for(70 * MS);                              /* POWERING, les deux rails allumés */
+    if (faults) ps_rail_fault(BSK_RAIL_MOTOR, true);
+    run_for(30 * MS);
+    if (faults) ps_rail_fault(BSK_RAIL_MOTOR, false);
+    run_for(2900 * MS);                            /* READY */
+    if (faults) {
+        ps_rail_fault(BSK_RAIL_MOTOR, true);
+        ps_rail_fault(BSK_RAIL_MOTOR, false);
+    }
+    run_for(1000 * MS);
+    while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
+        b[n] = 0;
+        if (g != bsk_journal_gen() || strncmp(b, "* rail ", 7)) continue;
+        if (k < 8 && n < sizeof rl[k]) memcpy(rl[k], b, n + 1);
+        k++;
+    }
+    bsk_journal_set(false, false);
+    return k;
+}
+
+static void t_rail_fault_ignored(void)
+{
+    char rl[8][80], R[BSK_HOST_REPLY_MAX];
+    size_t k, i, diff = 0;
+    printf("FAULT des rails : au journal et dans DEBUG, rien d'autre ; la session fait la même chose sans eux\n");
+    (void)fault_boot(false, rl);
+    n_fault_ref = g_ps_n < PS_LOG_CAP ? g_ps_n : PS_LOG_CAP;
+    memcpy(fault_ref, g_ps_log, n_fault_ref * sizeof fault_ref[0]);
+    n_fault_chg = n_chg;
+    memcpy(fault_chg, chg, n_chg * sizeof chg[0]);
+    CHECK(status().session_state == SESSION_READY, "sans FAULT : READY");
+
+    k = fault_boot(true, rl);
+    CHECK(g_ps_n == n_fault_ref, "avec FAULT : autant d'actions sur le fil (%zu, %zu sans)", g_ps_n, n_fault_ref);
+    for (i = 0; i < n_fault_ref && i < g_ps_n; i++) diff += !same_act(&g_ps_log[i], &fault_ref[i]);
+    CHECK(diff == 0, "avec FAULT : chaque action sur le fil identique, au même instant (%zu différentes)", diff);
+    CHECK(n_chg == n_fault_chg && !memcmp(chg, fault_chg, n_chg * sizeof chg[0]),
+          "avec FAULT : les mêmes états, aux mêmes instants");
+    CHECK(status().session_state == SESSION_READY && status().last_error == E_OK, "avec FAULT : READY, sans erreur");
+    CHECK(k == 6, "six lignes `* rail` (%zu)", k);
+    if (k == 6) {
+        CHECK(!strcmp(rl[0], "* rail 1000 logic fault cmd=off") && !strcmp(rl[1], "* rail 1000 logic ok cmd=off"),
+              "OFF : l'activation et la retombée, rail coupé : « %s », « %s »", rl[0], rl[1]);
+        CHECK(!strcmp(rl[2], "* rail 1070 motor fault cmd=on") && !strcmp(rl[3], "* rail 1100 motor ok cmd=on"),
+              "POWERING : rail allumé : « %s », « %s »", rl[2], rl[3]);
+        CHECK(!strcmp(rl[4], "* rail 4000 motor fault cmd=on") && !strcmp(rl[5], "* rail 4000 motor ok cmd=on"),
+              "READY : « %s », « %s »", rl[4], rl[5]);
+    }
+    bsk_host_init("2.0.0-dev", "poweron");
+    if (!bsk_host_line("DEBUG", R, sizeof R)) R[0] = 0;
+    {
+        static const char tail[] = " fault_motor=2 fault_logic=1 stack_sensor=0";   /* puis la pile du capteur, sans lui */
+        CHECK(strlen(R) > sizeof tail - 1 && !strcmp(R + strlen(R) - (sizeof tail - 1), tail),
+              "DEBUG : deux activations du rail moteur, une du rail logique, avant la pile du capteur : « %s »", R);
+    }
+}
+
 int main(void)
 {
     signal(SIGALRM, too_long);
@@ -5452,6 +5553,7 @@ int main(void)
     t_ev_back();
     t_pair_late();
     t_step_bound();
+    t_rail_fault_ignored();
     printf("session scriptée : %d vérifications, %d échec(s)\n", checks, fails);
     return fails ? 1 : 0;
 }

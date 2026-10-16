@@ -9,7 +9,9 @@
     board major-version guard and a 15-character reply terminated, over indilib/indi 1dd9b34f24df6fd74ed45be17823fc937e192b47
     drivers/focuser/pinefeat_cef.{h,cpp}, changed 2026-10-04; `a` read whole, the version reply judged by its form,
     `nc` compared whole, unsigned moves, replies shown without their line end, the state read once a second,
-    `w` and `n` asked once a connection, changed 2026-10-08
+    `w` and `n` asked once a connection, changed 2026-10-08; the board's temperature and relative humidity (`z`),
+    changed 2026-10-11; the bounds of `r` applied and CALIBRATE answered by them against the board (ext=1), changed
+    2026-10-11; driver version 0.9, with the board's, changed 2026-10-11
     Copyright (C) 2026 zUrp Astronomics
 
     This library is free software; you can redistribute it and/or
@@ -41,9 +43,9 @@
 #include <thread>
 #include <unistd.h>
 
-// Driver 1.0. Its major must equal the board's (`v`).
-#define DRIVER_MAJOR 1
-#define DRIVER_MINOR 0
+// Driver 0.9. Its major must equal the board's (`v`).
+#define DRIVER_MAJOR 0
+#define DRIVER_MINOR 9
 
 // The board's reply, without the line end that tty_nread_section keeps
 static std::string chomp(const char * res)
@@ -96,17 +98,16 @@ bool PinefeatCEF::initProperties()
     FocusSpeedNP[0].setStep(1);
     FocusSpeedNP[0].setValue(1);
 
-    FocusMaxPosNP[0].setMinMax(0, 32767);
     FocusMaxPosNP[0].setStep(1);
-    FocusMaxPosNP[0].setValue(0);
 
     FocusRelPosNP[0].setMinMax(0, 32767);
     FocusRelPosNP[0].setStep(1);
     FocusRelPosNP[0].setValue(0);
 
-    FocusAbsPosNP[0].setMinMax(0, 32767);
     FocusAbsPosNP[0].setStep(1);
     FocusAbsPosNP[0].setValue(0);
+
+    resetLimits();
 
     CalibrateSP[0].fill("CALIBRATE", "Calibrate", ISS_OFF);
     CalibrateSP.fill(m_defaultDevice->getDeviceName(), "CALIBRATE", "Calibrate", MAIN_CONTROL_TAB, IP_RW, ISR_ATMOST1, 60,
@@ -151,6 +152,13 @@ bool PinefeatCEF::initProperties()
     LensTP[2].fill("LENS_MODULE", "Module", nullptr);
     LensTP.fill(getDeviceName(), "LENS_INFO", "Lens", "Lens", IP_RO, 0, IPS_IDLE);
 
+    // The range is the sensor's (SHT40 datasheet § 4.5: -45 to 130 °C, the humidity bounded to 0-100 %RH by the board)
+    TemperatureNP[0].fill("TEMPERATURE", "Celsius", "%6.2f", -45, 130, 0, 0);
+    TemperatureNP.fill(getDeviceName(), "FOCUS_TEMPERATURE", "Temperature", MAIN_CONTROL_TAB, IP_RO, 0, IPS_OK);
+
+    HumidityNP[0].fill("HUMIDITY", "%RH", "%6.2f", 0, 100, 0, 0);
+    HumidityNP.fill(getDeviceName(), "FOCUS_HUMIDITY", "Humidity", MAIN_CONTROL_TAB, IP_RO, 0, IPS_OK);
+
     serialConnection->setDefaultBaudRate(Connection::Serial::B_115200);
 
     setDefaultPollingPeriod(50);
@@ -171,11 +179,14 @@ bool PinefeatCEF::updateProperties()
         defineProperty(ApertureAbsNP);
         defineProperty(ApertureRelNP);
 
-        int32_t pos, max;
+        int32_t pos, min, max;
         std::string dist, aper;
-        if (readFocusPosition(pos)
-                && (max = pos, 1)
-                && readFocusMaxPosition(max)
+        bool limitsRead = readFocusPosition(pos)
+                          && (max = pos, 1)
+                          && readFocusMaxPosition(min, max);
+        if (ext && limitsRead)
+            applyLimits(min, max);
+        if (limitsRead
                 && readFocusDistance(dist)
                 && readApertureRange(aper))
         {
@@ -215,6 +226,7 @@ bool PinefeatCEF::updateProperties()
             deleteProperty(RebootSP);
             deleteProperty(LensTP);
             deleteProperty(LedNP);
+            climateProperties(false);
         }
     }
 
@@ -282,8 +294,14 @@ bool PinefeatCEF::Handshake()
             uint32_t cap = FOCUSER_CAN_ABS_MOVE | FOCUSER_CAN_REL_MOVE | FOCUSER_HAS_VARIABLE_SPEED;
             FI::SetCapability(ext ? cap | FOCUSER_CAN_ABORT : cap);
 
+            // The range before any bounds of `r`, in this connection too: a past one's lens is not this one, and a
+            // Pinefeat controller gets upstream's
+            if (limitsApplied)
+                resetLimits();
+
             tracked = relMove = rebooting = stopWatch = false;
             std::fill(std::begin(lensNocap), std::end(lensNocap), false);
+            climateNocap = false;
             if (ext)
             {
                 LOG_INFO("Extended set enabled (ext=1).");
@@ -339,21 +357,56 @@ bool PinefeatCEF::readFocusPosition(int32_t &pos)
     return true;
 }
 
-bool PinefeatCEF::readFocusMaxPosition(int32_t &pos)
+// `r`, `<min>-<max>`: both bounds. Read as upstream's `%*d-%d`, which took the high one alone: the same replies are
+// refused (upstream's rc <= 0 is this rc < 2), the low one is only used against the board (applyLimits)
+bool PinefeatCEF::readFocusMaxPosition(int32_t &min, int32_t &max)
 {
     char res[CEF_RES] = {0};
 
     if (!sendCommand("r\n", res))
         return false;
 
-    int rc = sscanf(res, "%*d-%d", &pos);
-    if (rc <= 0)
+    int rc = sscanf(res, "%d-%d", &min, &max);
+    if (rc < 2)
     {
         LOGF_ERROR("Can't read max focus position: %s.", ERR_NC(res));
         return false;
     }
 
     return true;
+}
+
+// ext=1: the bounds of `r` are the lens's own (PROTOCOL.md, line `r`: published by the lens, nothing measured), and the
+// range of the absolute position and of FOCUS_MAX, whose value is the high bound: a client is not offered a position the
+// board refuses (`er range limits`). Set at each read of `r` that succeeds, sent to the clients only when they changed:
+// a new lens, or a FOCUS_MAX written by a client or the config, which INDI::Focuser turns into an absolute range from 0.
+// A read that fails changes nothing: the last known bounds stay (no lens, and the board refuses a goto anyway).
+void PinefeatCEF::applyLimits(int32_t min, int32_t max)
+{
+    limitsApplied = true;
+    if (FocusAbsPosNP[0].getMin() == min && FocusAbsPosNP[0].getMax() == max
+            && FocusMaxPosNP[0].getMin() == min && FocusMaxPosNP[0].getMax() == max
+            && FocusMaxPosNP[0].getValue() == max)
+        return;
+
+    FocusAbsPosNP[0].setMinMax(min, max);
+    FocusAbsPosNP.updateMinMax();
+
+    FocusMaxPosNP[0].setMinMax(min, max);
+    FocusMaxPosNP[0].setValue(max);
+    FocusMaxPosNP.setState(IPS_OK);
+    FocusMaxPosNP.updateMinMax();
+
+    LOGF_INFO("Lens focus range %d-%d.", min, max);
+}
+
+// initProperties' range of the absolute position and of FOCUS_MAX, upstream's: the one before any bounds of `r`
+void PinefeatCEF::resetLimits()
+{
+    FocusMaxPosNP[0].setMinMax(0, 32767);
+    FocusMaxPosNP[0].setValue(0);
+    FocusAbsPosNP[0].setMinMax(0, 32767);
+    limitsApplied = false;
 }
 
 bool PinefeatCEF::readFocusDistance(std::string &result)
@@ -542,6 +595,61 @@ void PinefeatCEF::readExtended(bool now)
     }
     LensTP.setState(state);
     LensTP.apply();
+
+    readClimate();
+}
+
+// `z` (PROTOCOL.md § 2): `<°C> <%RH>` while the board knows them, `-` while it doesn't (no reading yet, the sensor
+// silent, a bad checksum, the bus stuck, a reading too old; no sensor on this board). Ekos takes any value published
+// on FOCUS_TEMPERATURE as it comes, whatever the property's state (plans/sht40.md § 2.1 of the workshop): an unknown
+// value is therefore never published, not even as an old number in an Alert state. Both properties exist only while
+// the board reports a value: defined when one comes, deleted when it is unknown or unread; a client sees no number
+// rather than a stale one. Nothing is computed from them (no dew point) and nothing is compensated.
+void PinefeatCEF::readClimate()
+{
+    if (climateNocap)
+        return;
+
+    char res[EXT_BUF] = {0};
+    double t, rh;
+    bool known = sendCommand("z\n", res, EXT_BUF - 1) && sscanf(res, "%lf %lf", &t, &rh) == 2;
+    climateNocap = chomp(res).compare(0, 8, "er nocap") == 0;
+
+    if (!known)
+    {
+        climateProperties(false);
+        return;
+    }
+
+    TemperatureNP[0].setValue(t);
+    HumidityNP[0].setValue(rh);
+    if (climateDefined)
+    {
+        TemperatureNP.apply();
+        HumidityNP.apply();
+    }
+    else
+        climateProperties(true);
+}
+
+// TemperatureNP and HumidityNP defined (their values set before) or deleted, each change once
+void PinefeatCEF::climateProperties(bool define)
+{
+    if (define == climateDefined)
+        return;
+    climateDefined = define;
+    if (define)
+    {
+        defineProperty(TemperatureNP);
+        defineProperty(HumidityNP);
+        LOG_INFO("Board temperature and humidity known.");
+    }
+    else
+    {
+        deleteProperty(TemperatureNP);
+        deleteProperty(HumidityNP);
+        LOG_INFO("Board temperature and humidity unknown: not published.");
+    }
 }
 
 // A reply of the extended set, as a field: an `er …` is never shown as a value, the field is empty.
@@ -584,6 +692,20 @@ bool PinefeatCEF::ISNewSwitch(const char * dev, const char * name, ISState * sta
         if (CalibrateSP.isNameMatch(name))
         {
             CalibrateSP.reset();
+
+            // ext=1: nothing to calibrate, the bounds of `r` are the lens's own (PROTOCOL.md, line `c`: the board's
+            // `ok` does nothing). CALIBRATE answers them: `r` read again and applied (applyLimits), `c` not sent,
+            // nothing moves, the position never taken as a bound. `r` failing (no lens): Alert, the known bounds stay.
+            if (ext)
+            {
+                int32_t min, max;
+                bool read = readFocusMaxPosition(min, max);
+                if (read)
+                    applyLimits(min, max);
+                CalibrateSP.setState(read ? IPS_OK : IPS_ALERT);
+                CalibrateSP.apply();
+                return true;
+            }
 
             if (calibrate())
             {
@@ -864,12 +986,15 @@ void PinefeatCEF::TimerHit()
 
     if (elapsed >= 1 && isNotMoving())
     {
-        int32_t pos, max;
+        int32_t pos, min, max;
         std::string dist, aper;
         bool positionRead = readFocusPosition(pos);
-        bool read = positionRead
+        bool limitsRead = positionRead
                 && (max = pos, 1)
-                && readFocusMaxPosition(max)
+                && readFocusMaxPosition(min, max);
+        if (ext && limitsRead)
+            applyLimits(min, max);
+        bool read = limitsRead
                 && readFocusDistance(dist)
                 && readApertureRange(aper);
 

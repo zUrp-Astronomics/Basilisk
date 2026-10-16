@@ -1,7 +1,8 @@
 /* SOURCE: PROTOCOL.md ; spec de l'atelier § 4.5 — la couche HOTE (bsk_host.h)
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte
+ * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte ; ticket #594 : le capteur de la carte (`z`,
+ *         `:GT#`, la ligne `* sht40`, stack_sensor de DEBUG)
  *
  * La couche HOTE : la table de traduction de la spec, § 4.5.1 à § 4.5.6, lettre par lettre ; PROTOCOL.md donne la
  * forme exacte des lignes. */
@@ -17,6 +18,7 @@
 #include "bsk_contract.h"
 #include "bsk_journal.h"
 #include "bsk_led.h"
+#include "bsk_sensor.h"
 #include "bsk_session.h"
 #include "lens_names.h"
 
@@ -44,6 +46,8 @@ static struct {
     bool         cu_done;      /* ... reçu (cu_ack), la réponse pas encore rendue (bsk_host_later) */
     uint32_t     cu_seq;
     bsk_ack_t    cu_ack;
+    bool         sht_known;    /* la mesure du capteur connue au dernier bsk_host_observe : la ligne `* sht40` à chaque
+                                  changement */
 } h;
 
 const char BSK_HOST_LATER[] = "";   /* comparé par adresse (bsk_host.h), jamais écrit */
@@ -124,7 +128,33 @@ static void observe_(uint32_t want, bsk_ack_t *first)
         snprintf(h.last_op, sizeof h.last_op, "boot:er:\"%s\"", bsk_err_token(st.last_error));
 }
 
-void bsk_host_observe(void) { observe_(0, NULL); }
+/* Le jeton de `* sht40 … lost why=` : ce qui a rendu la mesure inconnue. */
+static const char *sensor_why(bsk_sensor_st_t st)
+{
+    switch (st) {
+    case BSK_SENSOR_NACK: return "nack";
+    case BSK_SENSOR_CRC: return "crc";
+    case BSK_SENSOR_BUS: return "bus";
+    default: return "stale";                        /* BSK_SENSOR_STALE ; NONE ne suit jamais une mesure connue */
+    }
+}
+
+/* La mesure du capteur, connue ou non : chaque changement au journal (PROTOCOL.md § 3, `* sht40`), à l'instant où la
+ * carte le constate. Rien tant qu'aucune lecture n'a réussi. */
+static void observe_sensor(void)
+{
+    bsk_sensor_t v;
+    bsk_sensor_read(&v);
+    if ((v.st == BSK_SENSOR_OK) == h.sht_known) return;
+    h.sht_known = v.st == BSK_SENSOR_OK;
+    bsk_journal_sht40(h.sht_known ? NULL : sensor_why(v.st));
+}
+
+void bsk_host_observe(void)
+{
+    observe_(0, NULL);
+    observe_sensor();
+}
 
 /* ─────────────────────────── dépôt et refus ─────────────────────────── */
 
@@ -439,6 +469,24 @@ static void line_t(const bsk_status_t *st, char *out, size_t cap)
              h.last_op, tri(st->mf), tri(st->oss), ring_role(st->ring));
 }
 
+/* `z` (PROTOCOL.md § 2) : la température et l'humidité relative du capteur de la carte, en centièmes écrits avec deux
+ * décimales, `<°C> <%RH>` (le signe de la température à part : -0.50), ou `-` quand elles sont inconnues
+ * (bsk_sensor.h) : jamais un nombre. L'humidité est bornée à 0..100 %RH (bsk_sensor.h). Dans tout état, objectif ou
+ * non. */
+static void climate(char *out, size_t cap)
+{
+    bsk_sensor_t v;
+    long t;
+    bsk_sensor_read(&v);
+    if (v.st != BSK_SENSOR_OK) {
+        put(out, cap, "-");
+        return;
+    }
+    t = v.t_c < 0 ? -(long)v.t_c : (long)v.t_c;
+    snprintf(out, cap, "%s%ld.%02ld %ld.%02ld", v.t_c < 0 ? "-" : "", t / 100, t % 100, (long)v.rh_c / 100,
+             (long)v.rh_c % 100);
+}
+
 static void letter(const char *l, const bsk_status_t *st, char *out, size_t cap)
 {
     bool ready = is_ready(st);
@@ -535,6 +583,10 @@ static void letter(const char *l, const bsk_status_t *st, char *out, size_t cap)
     case 'j':                                             /* la marque */
         mark_line(l, st, out, cap);
         return;
+    case 'z':                                             /* le capteur de la carte, dans tout état */
+        if (l[1]) break;
+        climate(out, cap);
+        return;
     default:
         break;
     }
@@ -554,7 +606,9 @@ static bool word(const char *w, size_t n, const char *ref)
 /* `DEBUG` : le diagnostic, hors de `t`, sur une ligne : la cause du dernier redémarrage de la carte, les
  * lignes du journal perdues, le résultat du dernier déplacement fini, les trames refusées par bench_core, puis ce que la
  * carte compte du temps réel (bsk_session_debug), dans l'ordre de bsk_session_debug_t, puis les marges de pile des
- * tâches (bsk_host_stacks), dans l'ordre de bsk_host_stacks_t. */
+ * tâches (bsk_host_stacks), dans l'ordre de bsk_host_stacks_t, puis les activations des FAULT des rails
+ * (bsk_session_debug), puis la marge de pile de la tâche du capteur (bsk_host_stacks), en fin de ligne : les clés d'avant
+ * gardent leur place. */
 static void debug(char *out, size_t cap)
 {
     bsk_session_debug_t d;
@@ -564,12 +618,14 @@ static void debug(char *out, size_t cap)
     snprintf(out, cap,
              "ok reset=%s dropped=%lu move_rc=%s refused=%lu evq_drop=%lu ev_back=%lu ev_back_us=%lu tx_wait_us=%lu "
              "tx_timeout=%lu pair_late=%lu pair_late_us=%lu "
-             "stack_session=%lu stack_phy=%lu stack_usb_rx=%lu stack_store=%lu stack_journal=%lu",
+             "stack_session=%lu stack_phy=%lu stack_usb_rx=%lu stack_store=%lu stack_journal=%lu fault_motor=%lu "
+             "fault_logic=%lu stack_sensor=%lu",
              h.reset, (unsigned long)bsk_journal_dropped(), h.move_rc, (unsigned long)bsk_bench_refused(),
              (unsigned long)d.evq_drop, (unsigned long)d.ev_back, (unsigned long)d.ev_back_us, (unsigned long)d.tx_wait_us,
              (unsigned long)d.tx_timeout, (unsigned long)d.pair_late, (unsigned long)d.pair_late_us,
              (unsigned long)k.session, (unsigned long)k.phy, (unsigned long)k.usb_rx, (unsigned long)k.store,
-             (unsigned long)k.journal);
+             (unsigned long)k.journal, (unsigned long)d.fault_motor, (unsigned long)d.fault_logic,
+             (unsigned long)k.sensor);
 }
 
 /* `CUSTOM READ`, `CUSTOM WRITE <haut><bas>` (PROTOCOL.md § 3.1) : la configuration du commutateur Custom du
@@ -648,6 +704,17 @@ static bool labo(const char *l, char *out, size_t cap)
 /* Octets exacts : le driver lit jusqu'au '#'. */
 static void hex4(char *out, size_t cap, int32_t v) { snprintf(out, cap, "%04X#", (unsigned)(v & 0xFFFF)); }
 
+/* `:GT#` : la température du capteur en demi-degrés, arrondie au plus proche, que hex4 rend en hexadécimal signé sur
+ * 16 bits ; 0 quand elle est inconnue (bsk_sensor.h) : Moonlite n'a pas de forme pour « inconnue » (décision de
+ * l'humain, [D120]). Le format est celui que lit le driver `moonlite` de libindi (PROTOCOL.md § 4). */
+static int32_t moon_temperature(void)
+{
+    bsk_sensor_t v;
+    bsk_sensor_read(&v);
+    if (v.st != BSK_SENSOR_OK) return 0;
+    return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 25) / 50;
+}
+
 /* La position valide (READY, un 0x06 valide) ; sinon, en READY comme hors READY, la dernière position gardée ; 0 sans
  * elle. */
 static int32_t moon_position(const bsk_status_t *st)
@@ -669,7 +736,7 @@ static const char *moonlite(const char *cmd, char *out, size_t cap)
         return "";
     }
     if (!strcmp(cmd, "GV")) { put(out, cap, "10"); return ""; }      /* 2 chiffres, sans '#' : c'est ainsi que le driver le lit */
-    if (!strcmp(cmd, "GT")) { put(out, cap, "0000#"); return ""; }   /* température : 0 */
+    if (!strcmp(cmd, "GT")) { hex4(out, cap, moon_temperature()); return ""; }   /* 0000# inconnue */
     if (!strcmp(cmd, "GC")) { put(out, cap, "00#"); return ""; }     /* coefficient */
     if (!strcmp(cmd, "GD")) { put(out, cap, "02#"); return ""; }     /* vitesse */
     if (!strcmp(cmd, "GH")) { put(out, cap, "00#"); return ""; }     /* pas entier */

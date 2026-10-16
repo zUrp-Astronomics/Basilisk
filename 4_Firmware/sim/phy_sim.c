@@ -1,9 +1,9 @@
 /* SOURCE: spec de l'atelier § 2 et § 11 — la frontière PHY simulée (voir phy_sim.h)
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — compilé par 4_Firmware/run.sh dans les bancs qui jouent le fil
- * Le fil entre la carte et le faux objectif (lens_sim.h), la réception et la présence de la carte (rx_t, pres_t de
- * components/phy/phy_common.c), les lignes et les rails notés (phy_sim_wires), les fautes injectées. */
+ * STATUS: actif — compilé par 4_Firmware/run.sh dans les bancs qui jouent le fil ; ticket #590 : les FAULT des rails
+ * Le fil entre la carte et le faux objectif (lens_sim.h), la réception, la présence et les FAULT de la carte (rx_t,
+ * pres_t, fault_t de components/phy/phy_common.c), les lignes et les rails notés (phy_sim_wires), les fautes injectées. */
 #include "phy_sim.h"
 
 #include <string.h>
@@ -35,6 +35,7 @@ static struct {
     bool       lens_cs;
     bool       d2_pin;          /* niveau de D2 : true = présent */
     pres_t     pres;            /* la présence et le verrou, comme la carte */
+    fault_t    rail_fault[2];   /* les FAULT des rails, comme la carte, indexés par bsk_rail_t */
     phy_sim_wires_t w;          /* noté, sans effet sur le fil (phy_sim.h) */
 } g;
 
@@ -282,6 +283,21 @@ void phy_sim_d2(bool present)
     d2_report();
 }
 
+/* L'interruption de FAULT# de la carte (fault_isr de components/phy/phy.c) : le ou les changements, au même instant. */
+void phy_sim_rail_fault(bsk_rail_t rail, bool active)
+{
+    bsk_phy_event_t e = {.kind = BSK_PHY_FAULT, .t_us = g.now};
+    fault_ev_t k = fault_edge(&g.rail_fault[rail], active);
+    e.u.fault.rail = rail;
+    e.u.fault.on = g.w.rail[rail];
+    e.u.fault.active = k != FAULT_OFF && k != FAULT_REON;
+    push_event(&e);
+    if (k == FAULT_PULSE || k == FAULT_REON) {
+        e.u.fault.active = !e.u.fault.active;
+        push_event(&e);
+    }
+}
+
 void phy_sim_mounted(void)
 {
     g.d2_pin = true;
@@ -363,5 +379,11 @@ bool bsk_phy_poll(bsk_phy_event_t *ev)
     return true;
 }
 
-/* Les compteurs de la carte (bsk_phy.h) : zéro ici, ni file bornée de la carte ni UART. */
-void bsk_phy_stats(bsk_phy_stats_t *st) { memset(st, 0, sizeof *st); }
+/* Les compteurs de la carte (bsk_phy.h) : zéro ici, ni file bornée de la carte ni UART ; les FAULT, comptés comme sur la
+ * carte. */
+void bsk_phy_stats(bsk_phy_stats_t *st)
+{
+    memset(st, 0, sizeof *st);
+    st->fault_motor = g.rail_fault[BSK_RAIL_MOTOR].n;
+    st->fault_logic = g.rail_fault[BSK_RAIL_LOGIC].n;
+}

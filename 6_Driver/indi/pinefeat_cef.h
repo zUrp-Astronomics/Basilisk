@@ -8,7 +8,9 @@
     Basilisk E-mount lens controller: extended set (when `t` reports ext=1),
     board major-version guard and a 15-character reply terminated, over indilib/indi 1dd9b34f24df6fd74ed45be17823fc937e192b47
     drivers/focuser/pinefeat_cef.{h,cpp}, changed 2026-10-04; the reply's form given to sendCommand, the letters
-    not served remembered, the base properties seen without a cast under libindi 1.9.9, changed 2026-10-08
+    not served remembered, the base properties seen without a cast under libindi 1.9.9, changed 2026-10-08; the
+    board's temperature and relative humidity (`z`), changed 2026-10-11; the bounds of `r` applied and CALIBRATE
+    answered by them against the board (ext=1), changed 2026-10-11
     Copyright (C) 2026 zUrp Astronomics
 
     This library is free software; you can redistribute it and/or
@@ -56,7 +58,9 @@ class PinefeatCEF : public INDI::Focuser
     private:
         void updateProperties(const int32_t pos, const int32_t max, const std::string dist, const std::string aper);
         bool readFocusPosition(int32_t &pos);
-        bool readFocusMaxPosition(int32_t &pos);
+        bool readFocusMaxPosition(int32_t &min, int32_t &max);
+        void applyLimits(int32_t min, int32_t max);
+        void resetLimits();
         bool readFocusDistance(std::string &result);
         bool readApertureRange(std::string &result);
         bool readFirmwareVersion();
@@ -68,6 +72,8 @@ class PinefeatCEF : public INDI::Focuser
         bool setApertureRel(double value);
         bool calibrate();
         void readExtended(bool now);
+        void readClimate();
+        void climateProperties(bool define);
         void readLed(IPState state);
         std::string readMoveResult();
         IPState moveEnd(bool positionRead);
@@ -108,6 +114,8 @@ class PinefeatCEF : public INDI::Focuser
         INDI::PropertyNumber LedNP {1};         // `k`
         INDI::PropertySwitch RebootSP {1};      // `b`
         INDI::PropertyText LensTP {3};          // `i` `w` `n`
+        INDI::PropertyNumber TemperatureNP {1}; // `z`: FOCUS_TEMPERATURE, the convention Ekos reads
+        INDI::PropertyNumber HumidityNP {1};    // `z`: this driver's own
 
         // CEF Buffer Size
         static const uint8_t CEF_BUF { 16 };
@@ -130,6 +138,10 @@ class PinefeatCEF : public INDI::Focuser
         int firmwareMajor {-1};
         bool ext {false};
 
+        // ext=1: the bounds of `r` are the range of the absolute position and of FOCUS_MAX (applyLimits); set since
+        // the last resetLimits, put back to initProperties' range at the next connection
+        bool limitsApplied {false};
+
         // Extended set: a BUSY it set, ended in TimerHit once `e` answers n
         bool tracked {false};       // a move the driver launched (absolute, relative, `jg`): its end is read by `g`
         bool relMove {false};       // that move was relative: FocusRelPosNP takes its end too
@@ -137,6 +149,11 @@ class PinefeatCEF : public INDI::Focuser
 
         // `i` `w` `n` of LensTP that answered `er nocap` in this connection: not served, not asked again
         bool lensNocap[3] {};
+
+        // `z`: TemperatureNP and HumidityNP are defined only while the board reports a value (readClimate);
+        // `er nocap` (a board without `z`), not asked again in this connection
+        bool climateDefined {false};
+        bool climateNocap {false};
 
         // After `stall` or `aborted`, `g` is read again until stopWatchEnd: the stop may turn `unconfirmed`
         bool stopWatch {false};
@@ -155,6 +172,8 @@ class PinefeatCEF : public INDI::Focuser
             void setStep(double step) { n.step = step; }
             void setValue(double value) { n.value = value; }
             double getValue() const { return n.value; }
+            double getMin() const { return n.min; }
+            double getMax() const { return n.max; }
             const char * getName() const { return n.name; }
         };
         struct NumberView
@@ -167,6 +186,7 @@ class PinefeatCEF : public INDI::Focuser
             void setState(IPState s) { p.s = s; }
             IPState getState() const { return p.s; }
             void apply() const { IDSetNumber(&p, nullptr); }
+            void updateMinMax() { IUUpdateMinMax(&p); }
             const char * getName() const { return p.name; }
         };
         NumberView FocusSpeedNP { INDI::FocuserInterface::FocusSpeedNP };

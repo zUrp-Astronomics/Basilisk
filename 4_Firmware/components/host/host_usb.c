@@ -2,7 +2,7 @@
  * AUTHOR: engineer
  * DATE: 2026-10-04
  * STATUS: actif — ESP-IDF seulement : aucun test hôte ne le compile ; ticket #528 : les créations des tâches vérifiées,
- *         les marges de pile pour DEBUG (bsk_host_stacks), le chien de garde
+ *         les marges de pile pour DEBUG (bsk_host_stacks), le chien de garde ; ticket #594 : la pile du capteur
  *
  * L'USB série-JTAG de la carte : cadre les lignes, les passe à la couche HOTE, écrit les réponses et le journal. */
 #include "bsk_host.h"
@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 
 #include "bsk_journal.h"
+#include "bsk_sensor.h"
 
 /* Trois tâches se partagent l'USB, et une seule touche à la session :
  *   - la tâche USB (`usb_rx`) lit les octets, cadre les lignes et écrit les réponses, rien d'autre : elle dépose chaque
@@ -192,7 +193,8 @@ void bsk_host_usb_init(void)
 /* bsk_host.h, sur la tâche de SESSION : la sienne par NULL ; celles de la PHY et du magasin par leur nom, celui de leur
  * création (components/phy/phy.c, components/store/store.c), sans élargir leurs en-têtes, que les PHY et le magasin
  * simulés implémentent aussi. Créées avant la boucle de app_main, qui seule appelle ceci : un nom introuvable est un
- * renommage oublié ici, un bug, qui arrête la carte (MUST). ESP-IDF compte la pile en octets, pas en mots. */
+ * renommage oublié ici, un bug, qui arrête la carte (MUST). ESP-IDF compte la pile en octets, pas en mots. Celle du
+ * capteur par bsk_sensor_stack : elle n'existe que sur une carte qui a le capteur. */
 void bsk_host_stacks(bsk_host_stacks_t *s)
 {
     TaskHandle_t phy = xTaskGetHandle("phy"), store = xTaskGetHandle("store");
@@ -202,6 +204,7 @@ void bsk_host_stacks(bsk_host_stacks_t *s)
     s->usb_rx = (uint32_t)uxTaskGetStackHighWaterMark(rx_handle);
     s->store = (uint32_t)uxTaskGetStackHighWaterMark(store);
     s->journal = (uint32_t)uxTaskGetStackHighWaterMark(journal_handle);
+    s->sensor = bsk_sensor_stack();
 }
 
 /* Une ligne prise dont la réponse attend l'objectif (BSK_HOST_LATER) est redemandée à chaque tour, après

@@ -1792,8 +1792,8 @@ static void t_ring_af(void)
 #define MINUTE_US  (60000u * MS)
 #define DRAIN_US   (20u * MS)       /* la tâche du journal de la carte : 20 ms quand l'anneau est vide */
 #define WRITE_US   (500u * MS)      /* la tâche du journal : une ligne attend l'USB 500 ms au plus */
-/* Le lien USB Serial/JTAG de l'ESP32-S3 et de l'ESP32-C3 : USB 2.0 pleine vitesse (12 Mbit/s), CDC-ACM, des paquets de
- * 64 octets en bloc (manuels de référence technique ESP32-S3 et ESP32-C3, chapitre « USB Serial/JTAG Controller »).
+/* Le lien USB Serial/JTAG de l'ESP32-C3 : USB 2.0 pleine vitesse (12 Mbit/s), CDC-ACM, des paquets de 64 octets en bloc
+ * (manuel de référence technique ESP32-C3, chapitre « USB Serial/JTAG Controller »).
  * Le plancher retenu : un paquet de 64 octets par trame USB de 1 ms, 64 000 octets par seconde — le débit du lien si
  * l'hôte ne le lit qu'une fois par trame USB ; en bloc, la norme en permet jusqu'à 19 par trame (USB 2.0, § 5.8.4). */
 #define USB_FLOOR_BPS 64000u

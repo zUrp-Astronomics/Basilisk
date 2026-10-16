@@ -54,7 +54,7 @@ en 5).
 
 | Lettre | Requête | Réponse (série `f r e a d s c` = Pinefeat, figée) | Erreurs |
 |---|---|---|---|
-| `v` | version du firmware de la carte : `<maj>.<min>`, sans suffixe (décision de l'humain) : `PROJECT_VER` de `4_Firmware/CMakeLists.txt`, sa seule source, rendue telle quelle, dans tout état, objectif ou non. Hors du jeu figé : le driver INDI `pinefeat_cef` d'origine ne lit les bornes (`r`) que si le mineur est au moins 3 ; sous un mineur 3, il ne les lit plus, et c'est accepté. Le driver ASCOM Pinefeat ne fait que journaliser `v` | `1.0` | — |
+| `v` | version du firmware de la carte : `<maj>.<min>`, sans suffixe (décision de l'humain) : `PROJECT_VER` de `4_Firmware/CMakeLists.txt`, sa seule source, rendue telle quelle, dans tout état, objectif ou non. Hors du jeu figé : le driver INDI `pinefeat_cef` d'origine ne lit les bornes (`r`) que si le mineur est au moins 3 : il les lit à `0.9` ; sous un mineur 3, il ne les lirait plus, et c'est accepté. Le driver ASCOM Pinefeat ne fait que journaliser `v` | `0.9` | — |
 | `f` | position, en `ready` quand elle est valide (un `0x06` valide, ligne `r`) ; sans elle — `ready` atteint sans aucun `0x06`, ou leur flux arrêté (§ 7) —, `er link pos`, jamais une valeur | `16384` · `nc` | `er link pos` (aucun `0x06` valide), `er busy boot`, `er fault` |
 | `f<n>` | aller à (absolu, pas) | `ok` | `er busy` (une commande en vol), `er busy boot`, `er fault`, `er range 65535` / `er range num`, `er range limits` (cible hors des bornes de la ligne `r`, celles que l'objectif publie dans son `0x06` resserrées de 5 pas, ou aucun `0x06` valide, ligne `r` ; refusée avant émission), `nc` |
 | `f+n` / `f-n` | relatif (calcul en 64 bits) | `ok` | idem, `er range 65535` si le résultat sort de 0..65535 (depuis la position lue, rien n'est émis) ; `er range limits` s'il sort des bornes (ligne `r`) |
@@ -81,6 +81,7 @@ en 5).
 | `p` / `pl0` / `pl1` / `pm0` / `pm1` | alimentations, un rail : non servies | `er nocap`, dans tout état | — |
 | `p0` / `p1` | couper / rétablir les alimentations de l'objectif ; `p0` **maintient** l'alim coupée (aucun démarrage tant que `p1` ou `b` n'est pas passé, `t` → `power_off=1`) ; `p1`, dans tout état | `ok` (sans effet sur des rails non câblés) | `er busy boot` (`p0` pendant un démarrage), `er busy` (une commande en vol) |
 | `b` | redémarrer l'objectif (oubli, alim, séquence complète ; asynchrone, `e`=`y` pendant) | `ok` | `er busy …` |
+| `z` | le **capteur de la carte** (la carte v1.0 : un SHT40, `4_Firmware/components/sensor/`) : la température de l'air en °C et son humidité relative en %RH, deux nombres à deux décimales séparés d'une espace, l'humidité bornée à 0-100 (la datasheet du capteur, § 4.5). **`-` quand elles sont inconnues, jamais un nombre** : avant la première lecture réussie ; quand la dernière lecture a échoué (le capteur muet, une somme de contrôle fausse, le bus bloqué que la carte n'a pas pu libérer) ; quand la dernière lecture réussie a plus de 3 s. La carte lit le capteur une fois par seconde, sans sa chauffe intégrée ; une lecture ratée est refaite une fois après le retour du bus au repos, puis la mesure est inconnue jusqu'à la suivante qui réussit. Elle n'en fait rien d'autre : aucune compensation (Ekos décide de l'usage de la température, décision de l'humain). Dans tout état, objectif ou non ; rien n'est envoyé à l'objectif ; `z` suivi d'autre chose, une ligne inconnue (`er nocap`). Hors du jeu Pinefeat : aucun de ses deux drivers ne l'envoie | `21.37 48.02` · `-3.05 87.50` · `-` | — (répond dans tout état) |
 | `t` | état de la carte, une ligne `clé=valeur` | voir §5 | — |
 
 Un driver ne connaît pas une lettre → il ne l'envoie pas. Une carte Pinefeat ne connaît pas
@@ -119,7 +120,7 @@ repris). Ce qu'il envoie, ce qu'il attend, ce que la carte rend en `READY` (hors
 
 | Il envoie | Il attend | La carte rend |
 |---|---|---|
-| `v`, à la connexion | une chaîne, journalisée | la version du firmware de la carte (`1.0`) |
+| `v`, à la connexion | une chaîne, journalisée | la version du firmware de la carte (`0.9`) |
 | `e` | `y` exact = en mouvement, sinon arrêté | `y` / `n` |
 | `r` | découpée sur `-`, l'entier du dernier morceau = le pas maximal | `<min>-<max>` (`13723-30988`) |
 | `f` | `int.Parse` de la réponse = la position | un entier seul (`16384`) |
@@ -136,7 +137,7 @@ Il n'envoie ni `Halt` (non implémenté) ni rien pour la compensation en tempér
 | Commande | Rôle | Réponse |
 |---|---|---|
 | `LOG ON\|ALL\|OFF` | journal, en lignes `* …` (ci-dessous) bornées à 30 par seconde : les transitions, les séquences et les trames non périodiques ; `ALL` ajoute les périodiques (0x02, 0x03/0x04, 0x05/0x06). Les événements passent par un anneau de 8 Ko vidé en tâche de fond : jamais de tâche bloquée par l'USB ; anneau plein = lignes perdues, comptées dans `dropped` (`DEBUG`) — normal en `ALL`. Sous `ALL`, chaque trame, hors du plafond, en différence (« `LOG ALL` », ci-dessous). Mots insensibles à la casse ; tout autre argument : `er range LOG ON\|ALL\|OFF` | `ok log=1 all=0` |
-| `DEBUG` | le diagnostic de la carte, sur une ligne, dans tout état, rien envoyé à l'objectif ; la ligne exacte, sans argument (`DEBUG …` : `er nocap`). `reset` : la cause du dernier redémarrage de la carte (`poweron`, `sw`, `panic`, `int_wdt`, `task_wdt`, `wdt`, `brownout`, `usb`, `jtag`, `unknown`) — `task_wdt` : le chien de garde des tâches a redémarré la carte, parce qu'une tâche qu'il surveille (la session, la réception de l'objectif, le magasin de la marque, ou, affamée, la tâche de repos du système) ne l'a pas nourri pendant 10 s ; une carte figée redémarre au lieu de se taire, objectif coupé et repris comme à la mise sous tension ; `panic` : la carte s'est arrêtée sur une erreur qu'elle ne doit jamais rencontrer (une assertion, comme une VD que la carte ne sait pas produire, ou une tâche qui ne peut pas être créée), puis a redémarré ; `dropped` : les lignes du journal perdues depuis ce redémarrage (l'anneau plein, une écriture ratée sur l'USB, le plafond de 30 lignes par seconde) ; `move_rc` : le résultat du dernier déplacement fini demandé par l'hôte (`f<n>`, `f±n`, `m<n>`, `jg`, `:FG#`) ou par l'appui court du bouton du fût — `ok`, le jeton de l'échec (`stall`, `aborted` par `q`, `timeout`…), `-` aucun, ou oublié quand la session a quitté `ready` ; le retour à la marque d'un démarrage n'y compte pas ; `refused` : les trames refusées par `bench_core` depuis ce redémarrage (rien n'en est émis ; chacune est aussi au journal, `* refused`, ci-dessous). Puis la mesure du temps réel de la carte, depuis ce redémarrage, un outil de diagnostic au banc (aucun driver ne la lit) ; compter n'y change rien : `evq_drop` les événements de la réception (trames, erreurs, fronts de LENS_CS et de VD, rebonds de XDETECT) jetés parce que leur file était pleine, le plus ancien au profit du nouveau ; `ev_back` les événements que la session a reçus datés avant le précédent, `ev_back_us` le plus grand de ces écarts, en µs ; `tx_wait_us` la plus longue attente de fin d'émission d'une trame vers l'objectif, en µs, `tx_timeout` celles qui ont atteint leur échéance de 100 ms ; `pair_late` les paires `0x03`/`0x04` jetées parce qu'une de leurs trames n'a pas pu partir dans sa fenêtre, 2 ms au plus après son échéance (VD + 8,6 ms, VD + 10,1 ms ; § 6), `pair_late_us` le plus grand retard constaté en les jetant, en µs. Puis la marge de pile de chaque tâche de la carte : la plus petite place restée libre sur sa pile depuis ce redémarrage, en octets (`stack_session` la session et cette ligne, `stack_phy` la réception de l'objectif, `stack_usb_rx` la lecture de l'USB, `stack_store` le magasin de la marque, `stack_journal` le journal) ; une marge proche de 0 annonce un débordement de pile, qui redémarre la carte (`reset=panic`) | `ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=<n> stack_phy=<n> stack_usb_rx=<n> stack_store=<n> stack_journal=<n>` (les marges, mesurées par la carte) |
+| `DEBUG` | le diagnostic de la carte, sur une ligne, dans tout état, rien envoyé à l'objectif ; la ligne exacte, sans argument (`DEBUG …` : `er nocap`). `reset` : la cause du dernier redémarrage de la carte (`poweron`, `sw`, `panic`, `int_wdt`, `task_wdt`, `wdt`, `brownout`, `usb`, `jtag`, `unknown`) — `task_wdt` : le chien de garde des tâches a redémarré la carte, parce qu'une tâche qu'il surveille (la session, la réception de l'objectif, le magasin de la marque, ou, affamée, la tâche de repos du système) ne l'a pas nourri pendant 10 s ; une carte figée redémarre au lieu de se taire, objectif coupé et repris comme à la mise sous tension ; `panic` : la carte s'est arrêtée sur une erreur qu'elle ne doit jamais rencontrer (une assertion, comme une VD que la carte ne sait pas produire, ou une tâche qui ne peut pas être créée), puis a redémarré ; `dropped` : les lignes du journal perdues depuis ce redémarrage (l'anneau plein, une écriture ratée sur l'USB, le plafond de 30 lignes par seconde) ; `move_rc` : le résultat du dernier déplacement fini demandé par l'hôte (`f<n>`, `f±n`, `m<n>`, `jg`, `:FG#`) ou par l'appui court du bouton du fût — `ok`, le jeton de l'échec (`stall`, `aborted` par `q`, `timeout`…), `-` aucun, ou oublié quand la session a quitté `ready` ; le retour à la marque d'un démarrage n'y compte pas ; `refused` : les trames refusées par `bench_core` depuis ce redémarrage (rien n'en est émis ; chacune est aussi au journal, `* refused`, ci-dessous). Puis la mesure du temps réel de la carte, depuis ce redémarrage, un outil de diagnostic au banc (aucun driver ne la lit) ; compter n'y change rien : `evq_drop` les événements de la réception (trames, erreurs, fronts de LENS_CS et de VD, rebonds de XDETECT, changements des FAULT des rails) jetés parce que leur file était pleine, le plus ancien au profit du nouveau ; `ev_back` les événements que la session a reçus datés avant le précédent, `ev_back_us` le plus grand de ces écarts, en µs ; `tx_wait_us` la plus longue attente de fin d'émission d'une trame vers l'objectif, en µs, `tx_timeout` celles qui ont atteint leur échéance de 100 ms ; `pair_late` les paires `0x03`/`0x04` jetées parce qu'une de leurs trames n'a pas pu partir dans sa fenêtre, 2 ms au plus après son échéance (VD + 8,6 ms, VD + 10,1 ms ; § 6), `pair_late_us` le plus grand retard constaté en les jetant, en µs. Puis la marge de pile de chaque tâche de la carte : la plus petite place restée libre sur sa pile depuis ce redémarrage, en octets (`stack_session` la session et cette ligne, `stack_phy` la réception de l'objectif, `stack_usb_rx` la lecture de l'USB, `stack_store` le magasin de la marque, `stack_journal` le journal) ; une marge proche de 0 annonce un débordement de pile, qui redémarre la carte (`reset=panic`). Puis les activations du FAULT de chaque rail de l'objectif depuis ce redémarrage, `fault_motor` le rail moteur, `fault_logic` le rail logique : le commutateur de chaque rail de la carte v1.0 (un TPS2552) le lève sur une surintensité tenue plus de 5 à 10 ms, une surchauffe ou une tension inverse, et le relâche dès que le défaut cesse ; la carte compte chaque activation, même brève, que sa ligne `* rail` (ci-dessous) ait été perdue ou non, et n'en fait rien d'autre : elle ne coupe rien, et `t` n'en dit rien. Puis, en fin de ligne, `stack_sensor`, la marge de pile de la tâche qui lit le capteur de la carte (`z`), comme les autres marges. Cette tâche tourne sous toutes les autres, la session comprise : une paire qu'elle retarderait serait comptée dans `pair_late`, comme toute autre ; `pair_late` à 0 sur une carte dont `z` rend des valeurs dit qu'elle n'en a retardé aucune | `ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=<n> stack_phy=<n> stack_usb_rx=<n> stack_store=<n> stack_journal=<n> fault_motor=0 fault_logic=0 stack_sensor=<n>` (les marges, mesurées par la carte) |
 | `CUSTOM READ` / `CUSTOM WRITE <h><b>` | la configuration du commutateur Custom du **Samyang AF 135**, rangée dans sa flash — lue, ou **écrite** (l'exception de la règle 7). Détail : § 3.1 | `ok 00 00 00 00 00 00 00 10 00 00 00 00 00 00 00 00` |
 
 Toute autre ligne qui commence par une majuscule : `er nocap`.
@@ -179,6 +180,19 @@ l'échéance de 2 ms, sous le plafond de 30 lignes par seconde, sans durée : la
 l'insertion confirmée (D2 tenu 300 ms). Elles alternent, chacune avant la ligne `* session` de la transition qu'elle cause
 (`off`, `powering`), s'il y en a une. Elles ne passent pas par le plafond de 30 lignes par seconde (seul l'anneau plein
 les perd).
+Les FAULT des rails de l'objectif (la carte v1.0 seule ; voir `fault_motor` et `fault_logic` de `DEBUG`) : `* rail <t>
+motor|logic fault|ok cmd=on|off` à chaque changement du FAULT d'un rail, `fault` levé, `ok` relâché ; `<t>` l'instant où
+la carte l'a vu ; `cmd` l'état dans lequel la carte commandait ce rail à cet instant (`off` : coupé, par la session ou
+par la retombée de XDETECT). Un FAULT levé et relâché avant que la carte ne le lise donne ses deux lignes au même
+instant, `fault` puis `ok` ; relâché puis levé de nouveau, `ok` puis `fault`. Sous le plafond de 30 lignes par seconde
+(un commutateur en cycles thermiques en écrirait une par cycle) : les lignes perdues sont comptées dans `dropped`, les
+activations toutes dans `fault_motor` et `fault_logic`. La carte n'en fait rien d'autre.
+Le capteur de la carte (`z`, § 2) : `* sht40 <t> ok` quand sa mesure devient connue, `* sht40 <t> lost why=nack|crc|bus|stale`
+quand elle devient inconnue (`nack` : le capteur n'a pas répondu ; `crc` : une somme de contrôle fausse ; `bus` : le bus
+bloqué, que la carte n'a pas pu libérer ; `stale` : aucune lecture réussie depuis 3 s) ; `<t>` l'instant où la carte le
+constate. Une ligne par changement, aucune tant que la mesure reste connue, ou inconnue : une carte dont le capteur ne
+répond pas depuis son démarrage n'en écrit aucune (`z` rend `-`). Sous le plafond de 30 lignes par
+seconde.
 Un message ponctuel renvoyé tel quel (trois envois au total au plus ; seulement ceux qu'un second
 envoi ne peut rien changer si le premier a été reçu) : `* resend <t> msg=<hh> n=<k> why=<jeton>` à chaque renvoi (`<hh>` le
 type en hexa, `<k>` le numéro de l'envoi, 2 ou 3, `<jeton>` la cause : `timeout`, son échéance ; `bus`, son émission
@@ -264,8 +278,8 @@ Un extrait (les `0x03` de la boucle du Sony FE 24-105 G), chaque ligne suivie, i
 Le débit, mesuré au simulateur sur une minute à 60 Hz depuis la mise sous tension (`4_Firmware/sim/test/test_session135.c:
 t_log_all_minute`, le faux 135 : son init, trois gotos, la bague tournée 20 s ; `test_std.c:log_all_minute`, le faux Tamron
 F051) : environ 3,7 Ko/s en moyenne, 4,3 Ko/s au pire sur une seconde, moins de 3 Ko produits en 500 ms. Le lien USB
-Serial/JTAG de l'ESP32-S3 et du C3 est un USB 2.0 pleine vitesse, CDC-ACM, en paquets en bloc de 64 octets (manuels de
-référence technique ESP32-S3 et ESP32-C3, chapitre « USB Serial/JTAG Controller ») ; au plancher d'un paquet par trame
+Serial/JTAG du C3 est un USB 2.0 pleine vitesse, CDC-ACM, en paquets en bloc de 64 octets (manuel de référence
+technique ESP32-C3, chapitre « USB Serial/JTAG Controller ») ; au plancher d'un paquet par trame
 USB de 1 ms, 64 000 octets par seconde (la norme USB 2.0, § 5.8.4, en permet jusqu'à 19 par trame en bloc). Ces sources
 sont citées de mémoire, sans relecture : le débit du lien sur la carte n'est pas mesuré.
 
@@ -318,7 +332,7 @@ la même commande écrit leur mémoire avec une sémantique que personne n'a rel
 ## 4. Moonlite — repli
 
 `:GP#` → position hex 4 chiffres + `#` · `:GN#` → cible · `:SN xxxx#` → mémorise la cible ·
-`:FG#` → va à la cible · `:FQ#` → arrêt · `:GI#` → `01#`/`00#` · `:GV#` → `10` · `:GT#` → `0000#`
+`:FG#` → va à la cible · `:FQ#` → arrêt · `:GI#` → `01#`/`00#` · `:GV#` → `10` · `:GT#` → la température (ci-dessous)
 · `:GC#` `:GD#` `:GH#` → `00#` `02#` `00#` · `:SD#` `:SH#` `:SF#` `:SC#` `:PO#` `:C#` `:+#` `:-#`
 → sans réponse · `:SP#` → ignoré · `:FQ#` = `q`. **Octets exacts, sans fin de ligne** (`4000#`, `10`), comme le
 driver les lit. Focus seul, muet, pas d'erreur (une commande refusée ne bouge pas, `:GI#` dit
@@ -327,6 +341,13 @@ sinon, hors `READY` comme en `READY` sans elle, la dernière position valide lue
 (`boot_state=off`) ou quand un autre objectif s'identifie, `0000#` sans elle. `:GN#` sans `:SN` rend ce que rend `:GP#` ; la
 cible de `:SN` vit autant que la carte. `:GI#` répond comme `e` (`01#` pour `y`) ; `:FG#` passe par
 l'admission de `f<n>` (bornes de `r`, déplacement en cours), un refus ne répond rien ; `:FQ#` est `q`.
+`:GT#` rend la température du capteur de la carte (`z`, § 2) en demi-degrés, arrondie au plus proche, en hexadécimal signé
+sur 16 bits, 4 chiffres majuscules et `#` : 21,37 °C → `002B#`, -23,12 °C → `FFD2#` (-46), -0,50 °C → `FFFF#`.
+**`0000#` tant qu'elle est inconnue** (`z` rend `-`), parce que Moonlite n'a pas de forme pour « inconnue » (décision de
+l'humain) : un client Moonlite lit alors 0 °C, comme pour une température vraie de -0,24 à 0,24 °C, qu'il ne distingue pas.
+Le format est celui que lit le driver `moonlite` de libindi, la référence : `drivers/focuser/moonlite.cpp`,
+`readTemperature`, qui envoie `:C#` (sans réponse ici, ci-dessus) puis `:GT#`, lit la réponse par `%X`, la prend comme un
+`int16_t` et la divise par 2 (lu sur `indilib/indi`, commit `0c7a3a2da4bc5e891a51cf98819bf77bf07fcbac`, le 2026-10-11).
 
 ## 5. `t` — l'état de la carte
 

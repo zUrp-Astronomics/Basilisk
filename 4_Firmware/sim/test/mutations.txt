@@ -4620,8 +4620,8 @@
 
 @ test_host | components/host/host.c | moonlite
 = :GT# sans # (t_moonlite, « :GT -> 0000# »)
-- put(out, cap, "0000#"); return ""; }
-+ put(out, cap, "0000"); return ""; }
+-     if (!strcmp(cmd, "GT")) { hex4(out, cap, moon_temperature()); return ""; }
++     if (!strcmp(cmd, "GT")) { snprintf(out, cap, "%04X", (unsigned)(moon_temperature() & 0xFFFF)); return ""; }
 
 @ test_host | components/host/host.c | moonlite
 = :GC# -> 01# (t_moonlite, « :GC -> 00# »)
@@ -6676,8 +6676,8 @@
 
 @ test_host | components/host/host.c | debug
 = DEBUG : stack_journal tronquée à 16 bits (t_debug : stack_journal=4294967295)
--              (unsigned long)k.journal);
-+              (unsigned long)(uint16_t)k.journal);
+-              (unsigned long)k.journal, (unsigned long)d.fault_motor,
++              (unsigned long)(uint16_t)k.journal, (unsigned long)d.fault_motor,
 
 @ test_host | components/host/host.c | aperture_line
 = S2 : la plage dans l'erreur de a<f>, 16 caractères dès que la borne haute atteint f/100 (t_aperture_unknown : a300 -> er range ap, 15 caractères au plus)
@@ -6723,3 +6723,410 @@
 = la première case prise aux offsets 2-3 du 0x08, la plus petite ouverture, pas aux offsets 0-1 (t_native : 11BF)
 -     return (uint16_t)(r08[1] | r08[2] << 8);
 +     return (uint16_t)(r08[3] | r08[4] << 8);
+
+# ── les FAULT des rails (ticket #590) : la prise de l'interruption (fault_edge, components/phy/phy_common.h), la PHY
+#    simulée qui la joue (phy_sim_rail_fault, sim/phy_sim.c), la PHY scriptée (ps_rail_fault), la SESSION qui les
+#    journalise seulement (components/session/session.c), la ligne `* rail` sous le plafond
+#    (components/journal/journal.c), fault_motor et fault_logic en fin de DEBUG (components/host/host.c)
+
+@ test_phy | components/phy/phy_common.h | fault_edge
+= une activation finie avant d'être lue prise pour une retombée (t_rail_fault : inactif relu inactif, FAULT_PULSE)
+-     if (was && !active) return FAULT_OFF;
++     if (!active) return FAULT_OFF;
+
+@ test_phy | components/phy/phy_common.h | fault_edge
+= les activations ne sont pas comptées (t_rail_fault : 1, 2, 3, 4)
+-     f->n++;
++     (void)0;
+
+@ test_phy | components/phy/phy_common.h | fault_edge
+= une retombée suivie d'une activation prise pour une activation seule (t_rail_fault : actif relu actif, FAULT_REON)
+-     if (was) return FAULT_REON;
++     if (0) return FAULT_REON;
+
+@ test_phy | components/phy/phy_common.h | fault_edge
+= le niveau relu n'est pas retenu (t_rail_fault : actif après l'activation)
+-     f->active = active;
++     (void)0;
+
+@ test_phy | components/phy/phy_common.h | fault_edge
+= un niveau inactif relu inactif rend une activation seule, sans la retombée (t_rail_fault : FAULT_PULSE)
+-     return active ? FAULT_ON : FAULT_PULSE;
++     return FAULT_ON;
+
+@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+= l'état commandé lu sur le rail moteur quel que soit le rail (t_rail_fault : le rail logique coupé, le moteur allumé)
+-     e.u.fault.on = g.w.rail[rail];
++     e.u.fault.on = g.w.rail[BSK_RAIL_MOTOR];
+
+@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+= le FAULT d'un rail jugé sur celui du moteur (t_rail_fault : le rail logique, ses comptes)
+-     fault_ev_t k = fault_edge(&g.rail_fault[rail], active);
++     fault_ev_t k = fault_edge(&g.rail_fault[BSK_RAIL_MOTOR], active);
+
+@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+= retombé puis activé rendu dans l'autre ordre (t_rail_fault : FAULT_REON, la retombée d'abord)
+-     e.u.fault.active = k != FAULT_OFF && k != FAULT_REON;
++     e.u.fault.active = k != FAULT_OFF;
+
+@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+= une retombée suivie d'une activation rendue en un seul changement (t_rail_fault : trois événements du rail logique)
+-     if (k == FAULT_PULSE || k == FAULT_REON) {
++     if (k == FAULT_PULSE) {
+
+@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+= le second changement rendu comme le premier (t_rail_fault : l'activation brève, activé puis retombé)
+-         e.u.fault.active = !e.u.fault.active;
++         (void)0;
+
+@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+= le changement daté au démarrage de la simulation, pas à l'instant de l'interruption (t_rail_fault : T0 + 1 ms)
+-     bsk_phy_event_t e = {.kind = BSK_PHY_FAULT, .t_us = g.now};
++     bsk_phy_event_t e = {.kind = BSK_PHY_FAULT, .t_us = 0};
+
+@ test_phy | sim/phy_sim.c | bsk_phy_stats
+= fault_motor rend le compte du rail logique (t_rail_fault : moteur 1, logique 0)
+-     st->fault_motor = g.rail_fault[BSK_RAIL_MOTOR].n;
++     st->fault_motor = g.rail_fault[BSK_RAIL_LOGIC].n;
+
+@ test_phy | sim/phy_sim.c | bsk_phy_stats
+= fault_logic rend le compte du rail moteur (t_rail_fault : moteur 1, logique 0)
+-     st->fault_logic = g.rail_fault[BSK_RAIL_LOGIC].n;
++     st->fault_logic = g.rail_fault[BSK_RAIL_MOTOR].n;
+
+@ test_session_script | sim/test/phy_script.c | ps_rail_fault
+= le rail toujours dit coupé (t_rail_fault_ignored : POWERING et READY, cmd=on)
+-     e.u.fault.on = p.rail[rail];
++     e.u.fault.on = false;
+
+@ test_session_script | sim/test/phy_script.c | ps_rail_fault
+= une retombée comptée comme une activation (t_rail_fault_ignored : fault_logic=1)
+-     if (active) p.faults[rail]++;
++     p.faults[rail]++;
+
+@ test_session_script | sim/test/phy_script.c | bsk_phy_rail
+= la commande des rails n'est pas notée pour les FAULT (t_rail_fault_ignored : cmd=on rails allumés)
+-     p.rail[rail] = on;
++     (void)0;
+
+@ test_session_script | sim/test/phy_script.c | bsk_phy_stats
+= fault_motor rend le compte du rail logique (t_rail_fault_ignored : fault_motor=2 fault_logic=1)
+-     st->fault_motor = p.faults[BSK_RAIL_MOTOR];
++     st->fault_motor = p.faults[BSK_RAIL_LOGIC];
+
+@ test_session_script | components/session/session.c | on_event
+= la SESSION ne journalise pas les FAULT (t_rail_fault_ignored : six lignes `* rail`)
+-         bsk_journal_rail_fault(e->u.fault.rail, e->u.fault.active, e->u.fault.on, e->t_us);
++         (void)0;
+
+@ test_session_script | components/session/session.c | on_event
+= la SESSION coupe sur un FAULT (t_rail_fault_ignored : les mêmes actions sur le fil, les mêmes états)
+-         bsk_journal_rail_fault(e->u.fault.rail, e->u.fault.active, e->u.fault.on, e->t_us);
++         bsk_journal_rail_fault(e->u.fault.rail, e->u.fault.active, e->u.fault.on, e->t_us);
++         if (e->u.fault.active && s.state != SESSION_OFF) to_off();
+
+@ test_session_script | components/session/session.c | bsk_session_debug
+= fault_motor rend le compte du rail logique (t_rail_fault_ignored : fault_motor=2 fault_logic=1)
+-     d->fault_motor = p.fault_motor;
++     d->fault_motor = p.fault_logic;
+
+@ test_session_script | components/session/session.c | bsk_session_debug
+= fault_logic rend le compte du rail moteur (t_rail_fault_ignored : fault_motor=2 fault_logic=1)
+-     d->fault_logic = p.fault_logic;
++     d->fault_logic = p.fault_motor;
+
+@ test_host135 | components/journal/journal.c | bsk_journal_rail_fault
+= la ligne hors du plafond (t_rail_fault : la rafale, 30 lignes, 50 dans dropped)
+-     line(false, t_us, "* rail %llu %s %s cmd=%s", (unsigned long long)(t_us / 1000),
++     if (j.on) j.win_n = 0;
++     line(false, t_us, "* rail %llu %s %s cmd=%s", (unsigned long long)(t_us / 1000),
+
+@ test_host135 | components/journal/journal.c | bsk_journal_rail_fault
+= la ligne datée au journal, pas à l'interruption (t_rail_fault : * rail 6500)
+-     line(false, t_us, "* rail %llu %s %s cmd=%s", (unsigned long long)(t_us / 1000),
++     line(false, t_us, "* rail %llu %s %s cmd=%s", (unsigned long long)(now_us() / 1000),
+
+@ test_host135 | components/journal/journal.c | bsk_journal_rail_fault
+= le rail logique dit moteur (t_rail_fault : * rail 6540 logic)
+-          rail == BSK_RAIL_MOTOR ? "motor" : "logic", active ? "fault" : "ok", on ? "on" : "off");
++          rail == BSK_RAIL_MOTOR ? "motor" : "motor", active ? "fault" : "ok", on ? "on" : "off");
+
+@ test_host135 | components/journal/journal.c | bsk_journal_rail_fault
+= activé et retombé confondus (t_rail_fault : fault puis ok)
+-          rail == BSK_RAIL_MOTOR ? "motor" : "logic", active ? "fault" : "ok", on ? "on" : "off");
++          rail == BSK_RAIL_MOTOR ? "motor" : "logic", active ? "fault" : "fault", on ? "on" : "off");
+
+@ test_host135 | components/journal/journal.c | bsk_journal_rail_fault
+= le rail toujours dit allumé (t_rail_fault : p0, cmd=off)
+-          rail == BSK_RAIL_MOTOR ? "motor" : "logic", active ? "fault" : "ok", on ? "on" : "off");
++          rail == BSK_RAIL_MOTOR ? "motor" : "logic", active ? "fault" : "ok", on ? "on" : "on");
+
+@ test_host | components/host/host.c | debug
+= DEBUG : fault_motor et fault_logic échangés (t_debug : fault_motor=3 fault_logic=4294967295)
+-              (unsigned long)k.journal, (unsigned long)d.fault_motor, (unsigned long)d.fault_logic,
++              (unsigned long)k.journal, (unsigned long)d.fault_logic, (unsigned long)d.fault_motor,
+
+# ── le SHT40 de la carte v1.0 (ticket #594) : le bus mené à la main, la mesure, le retour au repos, la lecture et son
+#    jugement (components/sensor/sht40.c, joués par test_sht40 contre sim/sht40_sim.c) ; le faux capteur lui-même ; la
+#    couche HOTE, `z`, `:GT#`, la ligne `* sht40` et stack_sensor de DEBUG (components/host/host.c,
+#    components/journal/journal.c, joués par test_host contre une mesure scriptée)
+
+@ test_sht40 | components/sensor/sht40.c | start
+= START émis sur un bus bloqué, sans le voir : le court-circuit lu comme des acquittements (t_stuck : BUS)
+-     if (!sht_sda_in()) return false;
++     if (0) return false;
+
+@ test_sht40 | components/sensor/sht40.c | start
+= pas de condition START : le capteur n'entend rien (t_normal)
+-     sht_sda(false);
++     (void)0;
+
+@ test_sht40 | components/sensor/sht40.c | stop
+= pas de remontée de SDA, pas de STOP : le bus pas au repos après la lecture (t_normal)
+-     sht_scl(true);
+-     sht_sda(true);
++     sht_scl(true);
+
+@ test_sht40 | components/sensor/sht40.c | put_byte
+= l'acquittement jamais lu : le capteur absent pris pour présent (t_absent : NACK)
+-     ack = !sht_sda_in();
++     ack = true;
+
+@ test_sht40 | components/sensor/sht40.c | put_byte
+= sept bits par octet (t_normal)
+-     for (int i = 7; i >= 0; i--) {
++     for (int i = 7; i >= 1; i--) {
+
+@ test_sht40 | components/sensor/sht40.c | get_byte
+= aucun bit lu (t_normal)
+-         b = (uint8_t)(b << 1 | (sht_sda_in() ? 1u : 0u));
++         b = (uint8_t)(b << 1);
+
+@ test_sht40 | components/sensor/sht40.c | get_byte
+= le premier octet pas acquitté, la lecture finie après lui (t_normal)
+-     sht_sda(!ack);
++     (void)ack;
++     sht_sda(true);
+
+@ test_sht40 | components/sensor/sht40.c | sht_measure
+= le dernier octet acquitté au lieu du non-acquittement qui finit la lecture (DS § 4.1) : le capteur garde le bus (t_normal)
+-     for (int i = 0; i < 6; i++) d[i] = get_byte(i < 5);
++     for (int i = 0; i < 6; i++) d[i] = get_byte(true);
+
+@ test_sht40 | components/sensor/sht40.c | sht_crc
+= le polynôme 0x30 au lieu de 0x31 (t_crc : CRC(0xBEEF) = 0x92)
+-             if (top) c = (uint8_t)(c ^ 0x31u);
++             if (top) c = (uint8_t)(c ^ 0x30u);
+
+@ test_sht40 | components/sensor/sht40.c | sht_crc
+= le départ 0x00 au lieu de 0xFF (t_crc)
+-     uint8_t c = 0xFF;
++     uint8_t c = 0x00;
+
+@ test_sht40 | components/sensor/sht40.c | sht_crc
+= le second octet ignoré (t_crc : l'ordre des octets)
+-     for (int k = 0; k < 2; k++) {
++     for (int k = 0; k < 1; k++) {
+
+@ test_sht40 | components/sensor/sht40.c | sht_recover
+= six coups d'horloge : le capteur pris dans un octet de zéros tient encore SDA (t_stuck)
+-     for (int i = 0; i < 9; i++) {
++     for (int i = 0; i < 6; i++) {
+
+@ test_sht40 | components/sensor/sht40.c | sht_recover
+= pas de remise à zéro 0x94 (t_stuck : le retour au repos seul)
+-         (void)(put_byte(ADDR << 1) && put_byte(CMD_RESET));
++         (void)(put_byte(ADDR << 1));
+
+@ test_sht40 | components/sensor/sht40.c | sht_recover
+= pas d'attente après la remise à zéro : le capteur pas encore prêt à la mesure suivante (t_stuck)
+-     sht_wait_ms(RESET_MS);
++     (void)0;
+
+@ test_sht40 | components/sensor/sht40.c
+= la remise à zéro attendue 0 ms au lieu de sa milliseconde (DS table 4) (t_stuck)
+- #define RESET_MS    1u
++ #define RESET_MS    0u
+
+@ test_sht40 | components/sensor/sht40.c
+= l'en-tête de lecture 8 ms après la mesure, qui en dure 8,2 au plus (DS table 4) : NACK (t_normal)
+- #define MEASURE_MS  9u
++ #define MEASURE_MS  8u
+
+@ test_sht40 | components/sensor/sht40.c | centi
+= la conversion tronquée au lieu d'arrondie (t_humidity_bounds : 56,5010 -> 5650 ; t_normal : 38,1176 -> 3812)
+- static int32_t centi(uint32_t span, uint16_t s) { return (int32_t)((span * s + 32767u) / 65535u); }
++ static int32_t centi(uint32_t span, uint16_t s) { return (int32_t)((span * s) / 65535u); }
+
+@ test_sht40 | components/sensor/sht40.c | sht_measure
+= l'humidité sans sa borne haute (t_humidity_bounds : 100,0121 %RH)
+-     *rh_c = rh < 0 ? 0 : rh > 10000 ? 10000 : rh;
++     *rh_c = rh < 0 ? 0 : rh;
+
+@ test_sht40 | components/sensor/sht40.c | sht_measure
+= l'humidité sans sa borne basse (t_humidity_bounds : -0,0108 %RH)
+-     *rh_c = rh < 0 ? 0 : rh > 10000 ? 10000 : rh;
++     *rh_c = rh > 10000 ? 10000 : rh;
+
+@ test_sht40 | components/sensor/sht40.c | sht_measure
+= l'humidité décalée de -5 au lieu de -6 %RH (DS § 4.5) (t_normal)
+-     rh = centi(12500u, (uint16_t)(d[3] << 8 | d[4])) - 600;
++     rh = centi(12500u, (uint16_t)(d[3] << 8 | d[4])) - 500;
+
+@ test_sht40 | components/sensor/sht40.c | sht_measure
+= la température sur 165 °C au lieu de 175 (DS § 4.5) (t_normal)
+-     *t_c = centi(17500u, (uint16_t)(d[0] << 8 | d[1])) - 4500;
++     *t_c = centi(16500u, (uint16_t)(d[0] << 8 | d[1])) - 4500;
+
+@ test_sht40 | components/sensor/sht40.c | sht_measure
+= le CRC de la température pas vérifié (t_crc_fault : le CRC de T faux)
+-     if (sht_crc(d[0], d[1]) != d[2] || sht_crc(d[3], d[4]) != d[5]) return BSK_SENSOR_CRC;
++     if (sht_crc(d[3], d[4]) != d[5]) return BSK_SENSOR_CRC;
+
+@ test_sht40 | components/sensor/sht40.c | sht_measure
+= le CRC de l'humidité pas vérifié (t_crc_fault : le CRC de RH faux)
+-     if (sht_crc(d[0], d[1]) != d[2] || sht_crc(d[3], d[4]) != d[5]) return BSK_SENSOR_CRC;
++     if (sht_crc(d[0], d[1]) != d[2]) return BSK_SENSOR_CRC;
+
+@ test_sht40 | components/sensor/sht40.c | sht_measure
+= la commande de mesure sans attente de son acquittement (t_absent : NACK, sans attendre la mesure)
+-     if (!ack) return BSK_SENSOR_NACK;
++     (void)ack;
+
+@ test_sht40 | components/sensor/sht40.c | sht_cycle
+= pas de retour au repos avant la seconde mesure : le bus bloqué le reste (t_stuck)
+-         sht_recover();
+-         r = sht_measure(&t, &rh);
++         r = sht_measure(&t, &rh);
+
+@ test_sht40 | components/sensor/sht40.c | sht_cycle
+= pas de retour au repos après une lecture ratée (t_absent : quatre transactions, 2 ms)
+-         if (r != BSK_SENSOR_OK) sht_recover();
++         if (0) sht_recover();
+
+@ test_sht40 | components/sensor/sht40.c | sht_cycle
+= une lecture ratée garde l'issue précédente (t_absent : NACK)
+-     s->st = r;
++     (void)0;
+
+@ test_sht40 | components/sensor/sht40.c | sht_cycle
+= une lecture ratée date la valeur (t_judge : une lecture ratée ne date rien)
+-     if (r != BSK_SENSOR_OK) return;
++     if (0) return;
+
+@ test_sht40 | components/sensor/sht40.c | sht_cycle
+= une lecture réussie ne date pas la valeur (t_judge : une lecture nouvelle date la valeur)
+-     s->at_us = now_us;
++     (void)now_us;
+
+@ test_sht40 | components/sensor/sht40.c | sht_judge
+= périmée dès 3 s, pas au-delà (t_judge : 3 s après, connue)
+-     if (now_us > s->at_us && now_us - s->at_us > BSK_SENSOR_STALE_US) {
++     if (now_us > s->at_us && now_us - s->at_us >= BSK_SENSOR_STALE_US) {
+
+@ test_sht40 | components/sensor/sht40.c | sht_judge
+= un jugement daté d'avant la lecture la dit périmée (t_judge : un instant d'avant la lecture)
+-     if (now_us > s->at_us && now_us - s->at_us > BSK_SENSOR_STALE_US) {
++     if (now_us - s->at_us > BSK_SENSOR_STALE_US) {
+
+@ test_sht40 | components/sensor/sht40.c | sht_judge
+= une lecture ratée rend les nombres de la dernière réussie (t_absent : NACK, 0, 0)
+-     if (s->st != BSK_SENSOR_OK) return;
++     if (0) return;
+
+@ test_sht40 | components/sensor/sht40.c | sht_judge
+= une valeur inconnue garde ses nombres (t_judge : avant toute lecture, 0, 0)
+-     v->t_c = v->rh_c = 0;
++     (void)0;
+
+@ test_sht40 | sim/sht40_sim.c | crc
+= le faux capteur calcule un autre CRC : toute lecture échoue (t_normal)
+-         if (r & (1u << i)) r ^= 0x131u << (i - 8);
++         if (r & (1u << i)) r ^= 0x130u << (i - 8);
+
+@ test_sht40 | sim/sht40_sim.c | take
+= le CRC faux demandé n'est pas rendu (t_crc_fault : deux CRC faux)
+-             g.tx[g.bad_word ? 5 : 2] = (uint8_t)~g.tx[g.bad_word ? 5 : 2];
++             (void)0;
+
+@ test_sht40 | sim/sht40_sim.c | sht40_sim_stuck
+= le banc ne bloque pas le bus (t_stuck : SDA tenue basse par le capteur)
+-     drive_bit();
++     (void)0;
+
+@ test_host | components/host/host.c | climate
+= une mesure inconnue rendue comme un nombre (t_sensor : NACK, CRC, BUS, STALE, NONE)
+-     if (v.st != BSK_SENSOR_OK) {
++     if (0) {
+
+@ test_host | components/host/host.c | climate
+= le signe d'une température négative mal rendu (t_sensor : -23.12)
+-     t = v.t_c < 0 ? -(long)v.t_c : (long)v.t_c;
++     t = (long)v.t_c;
+
+@ test_host | components/host/host.c | climate
+= le signe d'une température négative oublié (t_sensor : -0.50)
+-     snprintf(out, cap, "%s%ld.%02ld %ld.%02ld", v.t_c < 0 ? "-" : "", t / 100, t % 100, (long)v.rh_c / 100,
++     snprintf(out, cap, "%s%ld.%02ld %ld.%02ld", "", t / 100, t % 100, (long)v.rh_c / 100,
+
+@ test_host | components/host/host.c | letter
+= `z` suivi d'autre chose servi comme `z` (t_sensor : zz, z1, z , zx)
+-     case 'z':
+-         if (l[1]) break;
++     case 'z':
+
+@ test_host | components/host/host.c | moon_temperature
+= :GT# rend la température quand elle est inconnue (t_sensor : 0000#)
+-     if (v.st != BSK_SENSOR_OK) return 0;
++     if (0) return 0;
+
+@ test_host | components/host/host.c | moon_temperature
+= :GT# tronqué au lieu d'arrondi au demi-degré le plus proche (t_sensor : 21,37 °C -> 002B#, -0,25 °C -> FFFF#)
+-     return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 25) / 50;
++     return v.t_c / 50;
+
+@ test_host | components/host/host.c | moon_temperature
+= :GT# en degrés au lieu de demi-degrés (t_sensor : 21,37 °C -> 002B#)
+-     return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 25) / 50;
++     return v.t_c < 0 ? -((-v.t_c + 50) / 100) : (v.t_c + 50) / 100;
+
+@ test_host | components/host/host.c | moonlite
+= :GT# rend la constante d'avant (t_sensor : 002B#)
+-     if (!strcmp(cmd, "GT")) { hex4(out, cap, moon_temperature()); return ""; }
++     if (!strcmp(cmd, "GT")) { hex4(out, cap, 0 * moon_temperature()); return ""; }
+
+@ test_host | components/host/host.c | observe_sensor
+= une ligne `* sht40` à chaque pas, sans changement (t_sensor : rien sans changement)
+-     if ((v.st == BSK_SENSOR_OK) == h.sht_known) return;
++     if (0) return;
+
+@ test_host | components/host/host.c | observe_sensor
+= la perte dite comme une apparition (t_sensor : lost why=nack)
+-     bsk_journal_sht40(h.sht_known ? NULL : sensor_why(v.st));
++     (void)sensor_why;
++     bsk_journal_sht40(NULL);
+
+@ test_host | components/host/host.c | sensor_why
+= un CRC faux dit nack (t_sensor : lost why=crc)
+-     case BSK_SENSOR_CRC: return "crc";
++     case BSK_SENSOR_CRC: return "nack";
+
+@ test_host | components/host/host.c | sensor_why
+= un bus bloqué dit stale (t_sensor : lost why=bus)
+-     case BSK_SENSOR_BUS: return "bus";
++     case BSK_SENSOR_BUS: return "stale";
+
+@ test_host | components/host/host.c | bsk_host_observe
+= le capteur jamais observé : aucune ligne `* sht40` (t_sensor)
+-     observe_sensor();
++     (void)observe_sensor;
+
+@ test_host | components/host/host.c | debug
+= stack_sensor rend 0, pas la marge de la tâche du capteur (t_debug : 4294967295)
+-              (unsigned long)k.sensor);
++              (unsigned long)0);
+
+@ test_host | components/journal/journal.c | bsk_journal_sht40
+= la ligne `* sht40` sans son instant en millisecondes (t_sensor : 123456)
+-     line(false, t, "* sht40 %llu %s%s", (unsigned long long)(t / 1000), why ? "lost why=" : "ok", why ? why : "");
++     line(false, t, "* sht40 %llu %s%s", (unsigned long long)t, why ? "lost why=" : "ok", why ? why : "");

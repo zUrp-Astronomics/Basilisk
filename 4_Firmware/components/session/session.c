@@ -570,6 +570,9 @@ static void on_event(const bsk_phy_event_t *e)
     case BSK_PHY_BOUNCE:                            /* le journal seul, rien ne change */
         bsk_journal_xdetect_bounce(e->t_us);
         break;
+    case BSK_PHY_FAULT:                             /* le journal seul, rien ne change (décision Q1 de l'humain) */
+        bsk_journal_rail_fault(e->u.fault.rail, e->u.fault.active, e->u.fault.on, e->t_us);
+        break;
     case BSK_PHY_LENS_CS:
         s.lens_cs = e->u.level;
         break;
@@ -703,6 +706,8 @@ void bsk_session_debug(bsk_session_debug_t *d)
     d->tx_timeout = p.tx_timeout;
     d->pair_late = l.n;
     d->pair_late_us = l.max_us;
+    d->fault_motor = p.fault_motor;
+    d->fault_logic = p.fault_logic;
 }
 
 /* ─────────────────────────── cmd.h : ce que la boîte de commandes lit et demande ─────────────────────────── */

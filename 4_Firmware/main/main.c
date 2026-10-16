@@ -1,9 +1,10 @@
 /* SOURCE: composant main — app_main
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — ticket #528 : la tâche de SESSION abonnée au chien de garde
+ * STATUS: actif — ticket #528 : la tâche de SESSION abonnée au chien de garde ; ticket #594 : le capteur SHT40
  *
- * Prépare la PHY, l'USB, le magasin de la marque et la SESSION, puis avance la SESSION en boucle sur cette tâche. */
+ * Prépare la PHY, l'USB, le magasin de la marque, la SESSION et le capteur, puis avance la SESSION en boucle sur cette
+ * tâche. */
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -15,6 +16,7 @@
 #include "bsk_host.h"
 #include "bsk_led.h"
 #include "bsk_phy.h"
+#include "bsk_sensor.h"
 #include "bsk_session.h"
 #include "bsk_store.h"
 
@@ -22,6 +24,8 @@
  *   - bsk_phy_init d'abord : tant que D2 ne dit pas « présent », la carte n'émet rien (TXD, BODY_CS et VD au repos,
  *     rails coupés) ;
  *   - le magasin prêt avant la SESSION, la LED après elle (son fixe « ON » dit la SESSION prête) ;
+ *   - le capteur n'attend rien et rien ne l'attend (bsk_sensor.h) : après la LED, avant la boucle, qui seule lit sa
+ *     marge de pile (DEBUG) ;
  *   - dans la boucle, après chaque pas : bsk_host_observe (accusés et instantané : last_op, move_rc), puis
  *     bsk_host_usb_service (la ligne en attente, déposée sur la tâche de bsk_session_step comme bsk_session.h l'exige),
  *     puis la LED, qui lit l'instantané, rendu sur cette tâche seulement.
@@ -49,6 +53,7 @@ void app_main(void)
     bsk_session_params_default(&p);
     bsk_session_init(&p);
     bsk_led_board_init();
+    bsk_sensor_init();
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
     for (;;) {
         esp_task_wdt_reset();

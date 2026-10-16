@@ -4,7 +4,7 @@
  * STATUS: actif — joué par 4_Firmware/run.sh (job `firmware` de la CI), chaque vérification tenue par une mutation
  * Le codec, le flux (rx_t, fr_scan) et la présence (pres_t) de components/phy/phy_common.c, communs à la carte et à la
  * PHY simulée ; et la PHY simulée : E_BUS injecté, émissions de l'objectif injectées, trame perdue ou fausse, lignes
- * relâchées, verrou de XDETECT.
+ * relâchées, verrou de XDETECT, FAULT des rails (fault_t).
  *
  * Seules remontent une trame syntaxiquement valide ou une erreur nommée (bsk_phy.h). E_BUS, l'erreur matérielle que
  * signale le pilote UART de la carte, est injectée dans la PHY simulée. D2 : l'insertion après 300 ms d'anti-rebond, la
@@ -1012,6 +1012,71 @@ static void t_presence_kept(void)
     CHECK(n_pres == 2 && alt && last, "une retombée puis une insertion jamais lues : l'absence, puis la présence");
 }
 
+/* Les FAULT des rails (bsk_phy.h, BSK_PHY_FAULT) : fault_edge (phy_common.h), la prise de l'interruption de la carte, sur
+ * les quatre cas de la parité ; puis la PHY simulée qui la joue (phy_sim_rail_fault) : les événements, leur instant,
+ * l'état commandé du rail (allumé, coupé, coupé par le verrou de XDETECT), les compteurs. Attendus écrits à la main. */
+static bool next_fault(bsk_rail_t rail, bool active, bool on, uint64_t t)
+{
+    bsk_phy_event_t e;
+    return bsk_phy_poll(&e) && e.kind == BSK_PHY_FAULT && e.u.fault.rail == rail && e.u.fault.active == active &&
+           e.u.fault.on == on && e.t_us == t;
+}
+
+static void t_rail_fault(void)
+{
+    fault_t f = {0};
+    bsk_phy_event_t e;
+    bsk_phy_stats_t st;
+    uint64_t t;
+    printf("FAULT des rails : la prise de l'interruption (fault_edge), puis la PHY simulée\n");
+    CHECK(fault_edge(&f, true) == FAULT_ON && f.active && f.n == 1, "inactif, relu actif : activé, compté (1)");
+    CHECK(fault_edge(&f, false) == FAULT_OFF && !f.active && f.n == 1, "actif, relu inactif : retombé, pas compté (1)");
+    CHECK(fault_edge(&f, false) == FAULT_PULSE && !f.active && f.n == 2,
+          "inactif, relu inactif : une activation finie avant d'être lue, comptée (2)");
+    CHECK(fault_edge(&f, true) == FAULT_ON && f.active && f.n == 3, "puis activé (3)");
+    CHECK(fault_edge(&f, true) == FAULT_REON && f.active && f.n == 4,
+          "actif, relu actif : retombé puis activé de nouveau, compté (4)");
+
+    l135_init(&L, &P);                               /* hors tension : rien d'autre ne remonte */
+    phy_sim_init(lens_sim_135(&L), T0);
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, true);
+    CHECK(next_fault(BSK_RAIL_MOTOR, true, false, T0) && !bsk_phy_poll(&e),
+          "rails coupés : le moteur activé, rail coupé, à l'instant, seul");
+    bsk_phy_stats(&st);
+    CHECK(st.fault_motor == 1 && st.fault_logic == 0, "compté : moteur 1, logique 0 (%lu, %lu)", (unsigned long)st.fault_motor,
+          (unsigned long)st.fault_logic);
+    phy_sim_mounted();
+    CHECK(bsk_phy_rail(BSK_RAIL_MOTOR, true), "le rail moteur allumé");
+    phy_sim_run(T0 + 1 * MS);
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, false);
+    CHECK(next_fault(BSK_RAIL_MOTOR, false, true, T0 + 1 * MS) && !bsk_phy_poll(&e), "rail moteur allumé : retombé, rail allumé");
+    phy_sim_run(T0 + 2 * MS);
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, false);       /* relu inactif : activé et retombé avant la prise */
+    CHECK(next_fault(BSK_RAIL_MOTOR, true, true, T0 + 2 * MS) && next_fault(BSK_RAIL_MOTOR, false, true, T0 + 2 * MS) &&
+              !bsk_phy_poll(&e),
+          "une activation brève : activé puis retombé, au même instant");
+    phy_sim_rail_fault(BSK_RAIL_LOGIC, true);
+    phy_sim_rail_fault(BSK_RAIL_LOGIC, true);        /* relu actif : retombé puis activé de nouveau */
+    CHECK(next_fault(BSK_RAIL_LOGIC, true, false, T0 + 2 * MS) && next_fault(BSK_RAIL_LOGIC, false, false, T0 + 2 * MS) &&
+              next_fault(BSK_RAIL_LOGIC, true, false, T0 + 2 * MS) && !bsk_phy_poll(&e),
+          "le rail logique, coupé (le moteur allumé) : activé, puis retombé et activé de nouveau");
+    bsk_phy_stats(&st);
+    CHECK(st.fault_motor == 2 && st.fault_logic == 2, "comptés : moteur 2, logique 2 (%lu, %lu)", (unsigned long)st.fault_motor,
+          (unsigned long)st.fault_logic);
+    t = phy_sim_now();
+    phy_sim_d2(false);                               /* le verrou de XDETECT coupe les rails */
+    phy_sim_run(t + DROP);
+    CHECK(bsk_phy_poll(&e) && e.kind == BSK_PHY_PRESENCE && !e.u.present && e.t_us == t + DROP, "la retombée de D2 : coupé");
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, false);
+    CHECK(next_fault(BSK_RAIL_MOTOR, true, false, t + DROP) && next_fault(BSK_RAIL_MOTOR, false, false, t + DROP) &&
+              !bsk_phy_poll(&e),
+          "après la coupure du verrou : le rail moteur coupé");
+    bsk_phy_stats(&st);
+    CHECK(st.fault_motor == 3 && st.fault_logic == 2 && st.evq_drop == 0 && st.tx_wait_us == 0 && st.tx_timeout == 0,
+          "moteur 3, logique 2, les autres compteurs à zéro (%lu, %lu)", (unsigned long)st.fault_motor,
+          (unsigned long)st.fault_logic);
+}
+
 int main(void)
 {
     signal(SIGALRM, too_long);
@@ -1031,6 +1096,7 @@ int main(void)
     t_lock();
     t_presence_kept();
     t_pres_task();
+    t_rail_fault();
     printf("test_phy : %d vérifications, %d échec(s)\n", checks, fails);
     return fails ? 1 : 0;
 }

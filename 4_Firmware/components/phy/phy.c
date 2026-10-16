@@ -3,13 +3,16 @@
  * DATE: 2026-10-04
  * STATUS: actif — compilé par ESP-IDF seul : aucun test hôte ne le joue (seul phy_common.c l'est, dans les deux PHY) ;
  *         ticket #528 : l'ISR de l'UART en IRAM, la tâche abonnée au chien de garde, le compteur des fronts perdus, la
- *         VD refusée arrête la carte ; ticket #574 : les EN par leur polarité (pins.h), mis en sortie déjà coupés
+ *         VD refusée arrête la carte ; ticket #574 : les EN par leur polarité (pins.h), mis en sortie déjà coupés ;
+ *         ticket #590 : les FAULT des rails lus par interruption, comptés, rapportés ;
+ *         ticket #606 : les FAULT toujours lus, la carte v1.0 seule (pins.h)
  *
- * L'UART, les lignes, la VD, les rails et le verrou de XDETECT de la carte ; la réception en flux et la présence
- * viennent de phy_common.c.
+ * L'UART, les lignes, la VD, les rails, leurs FAULT et le verrou de XDETECT de la carte ; la réception en flux, la
+ * présence et la lecture des FAULT viennent de phy_common.c.
  */
 #include "bsk_phy.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "driver/gpio.h"
@@ -60,12 +63,15 @@
 
 #define MUST(x) do { if (!(x)) abort(); } while (0)
 
-typedef enum { RAW_LENS_CS, RAW_VD, RAW_BOUNCE } raw_kind_t;   /* RAW_BOUNCE : posé par drop_expire */
+/* RAW_BOUNCE : posé par drop_expire ; RAW_FAULT : par fault_isr (level : activé) */
+typedef enum { RAW_LENS_CS, RAW_VD, RAW_BOUNCE, RAW_FAULT } raw_kind_t;
 
 typedef struct {
     raw_kind_t kind;
     bool       level;
     int64_t    t_us;
+    bsk_rail_t rail;     /* RAW_FAULT : le rail, */
+    bool       on;       /* et son état commandé à l'instant du front */
 } raw_t;
 
 static QueueHandle_t uart_q, raw_q, ev_q;
@@ -82,6 +88,11 @@ static portMUX_TYPE raw_mux = portMUX_INITIALIZER_UNLOCKED;
 static pres_t pres;
 static portMUX_TYPE pres_mux = portMUX_INITIALIZER_UNLOCKED;
 static esp_timer_handle_t drop_timer;    /* l'échéance d'une retombée */
+
+/* Les FAULT et l'état commandé des rails, indexés par bsk_rail_t, sous pres_mux aussi : fault_isr les lit ensemble,
+ * bsk_phy_rail et cut écrivent rail_on avec les EN. */
+static fault_t fault[2];
+static bool    rail_on[2];
 
 /* État de la tâche de PHY, qu'elle seule touche. */
 static rx_t    rx;                       /* la réception en flux (phy_common.h) */
@@ -112,12 +123,17 @@ static void IRAM_ATTR raw_lost_one(void)
     portEXIT_CRITICAL_ISR(&raw_mux);
 }
 
+static void IRAM_ATTR raw_send(const raw_t *r)
+{
+    BaseType_t hp = pdFALSE;
+    if (xQueueSendFromISR(raw_q, r, &hp) != pdTRUE) raw_lost_one();
+    if (hp) portYIELD_FROM_ISR();
+}
+
 static void IRAM_ATTR raw_from_isr(raw_kind_t kind, bool level)
 {
-    raw_t r = {kind, level, esp_timer_get_time()};
-    BaseType_t hp = pdFALSE;
-    if (xQueueSendFromISR(raw_q, &r, &hp) != pdTRUE) raw_lost_one();
-    if (hp) portYIELD_FROM_ISR();
+    raw_t r = {.kind = kind, .level = level, .t_us = esp_timer_get_time()};
+    raw_send(&r);
 }
 
 static void IRAM_ATTR cs_isr(void *arg)
@@ -145,6 +161,7 @@ static void IRAM_ATTR cut(void)
 {
     gpio_ll_set_level(&GPIO, PIN_EN_LOGIC, EN_OFF);
     gpio_ll_set_level(&GPIO, PIN_EN_MOTOR, EN_OFF);
+    rail_on[BSK_RAIL_LOGIC] = rail_on[BSK_RAIL_MOTOR] = false;
     gpio_ll_intr_disable(&GPIO, PIN_BODY_VD);
     gpio_ll_output_disable(&GPIO, PIN_LENS_TXD);
     gpio_ll_output_disable(&GPIO, PIN_BODY_CS);
@@ -163,7 +180,7 @@ static void IRAM_ATTR drop_expire(void *arg)
     if (pres_expire(&pres, absent, t)) cut();
     portEXIT_CRITICAL_ISR(&pres_mux);
     if (!absent) {
-        raw_t r = {RAW_BOUNCE, false, (int64_t)t};
+        raw_t r = {.kind = RAW_BOUNCE, .t_us = (int64_t)t};
         BaseType_t hp = pdFALSE;
         if (xQueueSendFromISR(raw_q, &r, &hp) != pdTRUE) raw_lost_one();
         if (hp) esp_timer_isr_dispatch_need_yield();
@@ -189,6 +206,28 @@ static void IRAM_ATTR detect_isr(void *arg)
         break;
     }
     portEXIT_CRITICAL_ISR(&pres_mux);
+}
+
+/* Un front de FAULT# (les deux sens, arg : le rail) : le niveau relu, ce qu'il dit depuis le dernier connu (fault_edge,
+ * qui compte), et l'état commandé du rail, lus ensemble sous pres_mux ; puis le ou les changements vers la tâche, au
+ * même instant, par la file des fronts (pleine : une E_BUS, comme un front de LENS_CS perdu ; le compte, lui, est
+ * fait). Rien n'est coupé ni décidé ici. */
+static void IRAM_ATTR fault_isr(void *arg)
+{
+    bsk_rail_t rail = (bsk_rail_t)(uintptr_t)arg;
+    raw_t r = {.kind = RAW_FAULT, .t_us = esp_timer_get_time(), .rail = rail};
+    bool active = gpio_ll_get_level(&GPIO, rail == BSK_RAIL_LOGIC ? PIN_FAULT_LOGIC : PIN_FAULT_MOTOR) == 0;
+    fault_ev_t k;
+    portENTER_CRITICAL_ISR(&pres_mux);
+    k = fault_edge(&fault[rail], active);
+    r.on = rail_on[rail];
+    portEXIT_CRITICAL_ISR(&pres_mux);
+    r.level = k != FAULT_OFF && k != FAULT_REON;      /* le premier changement : l'activation, sauf après une retombée */
+    raw_send(&r);
+    if (k == FAULT_PULSE || k == FAULT_REON) {        /* le second, au même instant */
+        r.level = !r.level;
+        raw_send(&r);
+    }
 }
 
 /* Le verrou levé ? Sans rien toucher. */
@@ -279,6 +318,14 @@ static void on_uart(const uart_event_t *u)
 static void on_raw(const raw_t *r)
 {
     bsk_phy_event_t e = {.t_us = (uint64_t)r->t_us};
+    if (r->kind == RAW_FAULT) {
+        e.kind = BSK_PHY_FAULT;
+        e.u.fault.rail = r->rail;
+        e.u.fault.active = r->level;
+        e.u.fault.on = r->on;
+        push(&e);
+        return;
+    }
     if (r->kind == RAW_VD || r->kind == RAW_BOUNCE) {
         e.kind = r->kind == RAW_VD ? BSK_PHY_VD : BSK_PHY_BOUNCE;
         push(&e);
@@ -425,6 +472,10 @@ void bsk_phy_stats(bsk_phy_stats_t *st)
     st->evq_drop = evq_drop;
     st->tx_wait_us = tx_wait_us;
     st->tx_timeout = tx_timeout;
+    portENTER_CRITICAL(&pres_mux);
+    st->fault_motor = fault[BSK_RAIL_MOTOR].n;
+    st->fault_logic = fault[BSK_RAIL_LOGIC].n;
+    portEXIT_CRITICAL(&pres_mux);
 }
 
 /* La présence tenue d'abord, si elle précède le premier événement de la file : lu dans `ev` même, que pres_next
@@ -444,7 +495,10 @@ bool bsk_phy_rail(bsk_rail_t rail, bool on)
     bool ok;
     portENTER_CRITICAL(&pres_mux);
     ok = !on || pres.present;
-    if (ok) gpio_ll_set_level(&GPIO, rail == BSK_RAIL_LOGIC ? PIN_EN_LOGIC : PIN_EN_MOTOR, on ? EN_ON : EN_OFF);
+    if (ok) {
+        gpio_ll_set_level(&GPIO, rail == BSK_RAIL_LOGIC ? PIN_EN_LOGIC : PIN_EN_MOTOR, on ? EN_ON : EN_OFF);
+        rail_on[rail] = on;
+    }
     portEXIT_CRITICAL(&pres_mux);
     return ok;
 }
@@ -466,8 +520,7 @@ bool bsk_phy_lines(bool drive)
 }
 
 /* Les EN mis en sortie sans jamais sortir ni être tirés vers « allumé » (ticket #574) : du reset jusqu'à la demande
- * de la SESSION (bsk_phy_rail), aucune écriture de ce firmware ne va vers « allumé ». Pourquoi c'est vrai, sur les
- * deux cibles :
+ * de la SESSION (bsk_phy_rail), aucune écriture de ce firmware ne va vers « allumé ». Pourquoi c'est vrai :
  *   - au reset, la sortie de GPIO7 et GPIO8 du C3 est coupée (DS C3, table 2-1) : R1 et R4 tiennent les /EN hauts,
  *     rails coupés. Ouvrir une sortie sort ce que contient le registre de sortie du GPIO, que rien ici n'a écrit : sur
  *     le C3, 0 est « allumé ». D'où le niveau écrit avant que la sortie ne soit ouverte ;
@@ -498,6 +551,23 @@ static void en_init(void)
     ESP_ERROR_CHECK(gpio_set_direction(PIN_EN_MOTOR, GPIO_MODE_OUTPUT));
 }
 
+/* Un FAULT armé : son niveau lu d'abord, puis son interruption sur les deux fronts. Actif, c'est une activation, rail
+ * coupé (rien ne l'a encore allumé), rapportée par la tâche de PHY, pas encore créée : seule productrice de la file des
+ * événements, elle n'y entre pas en concurrence. Un front entre la lecture et l'armement, quelques microsecondes, rails
+ * coupés, ne serait pas vu ; le prochain l'est, mais fault_edge le jugerait par rapport au niveau lu avant. Non vérifié
+ * sur la carte. */
+static void fault_arm(bsk_rail_t rail, gpio_num_t pin)
+{
+    if (gpio_get_level(pin) == 0) {
+        raw_t r = {.kind = RAW_FAULT, .level = true, .t_us = esp_timer_get_time(), .rail = rail, .on = false};
+        (void)fault_edge(&fault[rail], true);
+        on_raw(&r);
+    }
+    ESP_ERROR_CHECK(gpio_set_intr_type(pin, GPIO_INTR_ANYEDGE));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(pin, fault_isr, (void *)(uintptr_t)rail));
+    ESP_ERROR_CHECK(gpio_intr_enable(pin));
+}
+
 void bsk_phy_init(void)
 {
     const gpio_config_t lines = {   /* au repos (rest) : TXD n'est pas routée, VD arrêtée */
@@ -517,6 +587,17 @@ void bsk_phy_init(void)
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_ANYEDGE,
     };
+    /* Les FAULT# : entrées, jamais sorties, tirées haut comme R3 et R6 et comme après le reset (DS C3, table 2-1 : le
+     * tirage haut de GPIO9, celui de GPIO6 selon l'eFuse du JTAG) ; aucun tirage bas. GPIO9 est la broche de strapping
+     * du mode de démarrage : rien ici ne la tire vers 0. L'interruption est armée par fault_arm, après la lecture du
+     * niveau. */
+    const gpio_config_t faults = {
+        .pin_bit_mask = (1ULL << PIN_FAULT_MOTOR) | (1ULL << PIN_FAULT_LOGIC),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
     const uart_config_t ucfg = {
         .baud_rate = BAUD,
         .data_bits = UART_DATA_8_BITS,
@@ -531,6 +612,7 @@ void bsk_phy_init(void)
     en_init();
     ESP_ERROR_CHECK(gpio_config(&detect));
     ESP_ERROR_CHECK(gpio_config(&cs));
+    ESP_ERROR_CHECK(gpio_config(&faults));
 
     MUST((raw_q = xQueueCreate(RAW_LEN, sizeof(raw_t))) != NULL);
     MUST((ev_q = xQueueCreate(EV_LEN, sizeof(bsk_phy_event_t))) != NULL);
@@ -568,8 +650,10 @@ void bsk_phy_init(void)
     /* le verrou est posé (pres à zéro, « absent ») avant que l'interruption ne soit armée ; une insertion se confirme
      * par la tâche, 300 ms après */
     ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_LENS_DETECT, detect_isr, NULL));
+    fault_arm(BSK_RAIL_MOTOR, PIN_FAULT_MOTOR);
+    fault_arm(BSK_RAIL_LOGIC, PIN_FAULT_LOGIC);
 
     /* le cœur 0, comme toutes les tâches (décision de l'humain) : la carte v1.0 est un ESP32-C3, à un seul cœur (le
-     * cœur 0) ; sur la S3, un cœur réservé à la PHY la testerait dans de meilleures conditions que le C3. */
+     * cœur 0). */
     MUST(xTaskCreatePinnedToCore(phy_task, "phy", 4096, NULL, 12, NULL, 0) == pdPASS);
 }

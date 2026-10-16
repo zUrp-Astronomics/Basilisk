@@ -312,7 +312,7 @@ static void bench(void)
     bsk_session_init(&P);
     bsk_journal_init(phy_sim_now);
     bsk_journal_set(false, false);
-    bsk_host_init("1.0", "poweron");
+    bsk_host_init("0.9", "poweron");
     host_mode = false;
     n_rules = 0;                                     /* aucune trame perdue */
     rails_power = unhang = false;                    /* l'alimentation commandée par le scénario */
@@ -910,12 +910,12 @@ static void hote(void)
     host_mode = true;
     LP.steps_per_s = 5000;                           /* q pendant le second goto : plus d'une seconde de mouvement */
     params();
-    ASK("v", "1.0");
+    ASK("v", "0.9");
     T_HAS(" present=0 ");
     ASK("f", "nc");
     mount_cold();
     run_for(10000 * MS);
-    ASK("v", "1.0");
+    ASK("v", "0.9");
     T_HAS(" present=1 ");
     T_HAS(" boot_state=ready ");
     T_HAS(" last_op=boot:ok ");

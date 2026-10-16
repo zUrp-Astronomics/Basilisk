@@ -1,7 +1,7 @@
 /* SOURCE: test de la page de banc dans un navigateur — une pageerror fait échouer le test (avant : écrasée par le process.exit final)
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — joué par ../run.sh ; le faux port rend `v` comme une version de carte (1.0), `t` (ext=1 en tête),
+ * STATUS: actif — joué par ../run.sh ; le faux port rend `v` comme une version de carte (0.9), `t` (ext=1 en tête),
  *         `DEBUG` ; la page lit i, r par leur lettre ; la marque sur `j` (lue, posée, rejointe par les boutons),
  *         `m<n>` un déplacement, `u…`, `cm`, `m`, `ms`, `mg`, `mx` inconnues du faux port ; la page n'en envoie aucune,
  *         ni h, c, n, w, l, d, DUMP, SNIFF, SDRIVE, que la carte ne sert pas (ticket #392) ; le démarrage de `b` occupé
@@ -34,7 +34,7 @@ const path = require('path');
       const c = cmd[0];
       if (cmd.startsWith(':')) { const m = cmd.slice(1, -1); if (m === 'GP') return S.pos.toString(16).toUpperCase().padStart(4, '0') + '#'; if (m === 'GI') return S.moving ? '01#' : '00#'; if (m === 'GV') return '10'; return null; }
       if (/^[A-Z]/.test(cmd)) { if (cmd === 'DEBUG') return 'ok reset=poweron dropped=0 move_rc=-'; if (cmd === 'LOG ON') return 'ok log=1 all=0'; return 'er nocap'; }
-      if (c === 'v') return '1.0';
+      if (c === 'v') return '0.9';
       if (c === 't') return `ext=1 present=${S.present ? 1 : 0} boot_state=${!S.present ? 'off' : S.fault ? 'fault' : S.busy === 'boot' ? 'powering' : 'ready'} busy=${S.busy} power_off=0 last_op=${S.fault ? 'boot:er:"lost"' : 'boot:ok'} mf=- oss=- ring=-`;
       if (c === 'g') return S.g;                     /* le résultat du dernier déplacement suivi (PROTOCOL.md § 2) */
       if (c === 'p') return cmd.length === 1 ? '1 1' : 'ok';
@@ -80,7 +80,7 @@ const path = require('path');
   check(await page.textContent('#connTxt') === 'connecté', 'connexion');
   if (fails) { console.log(await page.textContent('#log')); }
   check((await page.textContent('#s_id')).includes('Samyang AF 135mm'), 'identite affichee (i)');
-  check((await page.textContent('#s_board')).startsWith('fw 1.0 · reset poweron · boot ready'), 'la carte, v et DEBUG (« ' + (await page.textContent('#s_board')) + ' »)');
+  check((await page.textContent('#s_board')).startsWith('fw 0.9 · reset poweron · boot ready'), 'la carte, v et DEBUG (« ' + (await page.textContent('#s_board')) + ' »)');
   check(await page.textContent('#s_caps') === 'lot étendu (ext=1)', 'ext lu au lieu de caps');
   if (fails) { console.log(await page.textContent('#log')); console.log(await page.evaluate(() => JSON.stringify(window.__sent))); }
   check(await page.textContent('#s_focus') === '16384', 'position lue par f');

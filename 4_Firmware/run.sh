@@ -4,11 +4,12 @@
 # DATE: 2026-09-26
 # STATUS: actif — la même commande en local et en CI : `bash 4_Firmware/run.sh` ; sources et chemins d'en-têtes lus
 #         dans sim/test/programmes.sh, comme mutants.sh ; ticket #539 : la passe sous ASan et UBSan (étape 5) ;
-#         ticket #574 : la table de broches du C3 compilée, la cible sans table est l'ESP32
+#         ticket #574 : la table de broches du C3 compilée, la cible sans table est l'ESP32 ; ticket #594 : test_sht40 ;
+#         ticket #606 : la table de la carte de banc retirée, celle du C3 seule
 #
 # 1. chaque en-tête partagé de 4_Firmware/include compile seul, inclus deux fois ; la table de broches
-#    (components/phy/pins.h) compile pour les cibles esp32s3 et esp32c3, et une cible sans table échoue avec son
-#    message ;
+#    (components/phy/pins.h) compile pour la cible esp32c3, et une cible sans table (l'ESP32, aucune) échoue
+#    avec son message ;
 # 2. le faux 135 et ses tests compilent sans avertissement (-Werror) ;
 # 3. test_lens135 : les comportements de la référence et les pannes, dans les deux sens ;
 #    test_lens_std : le faux objectif standard (Tamron F051, sim/lens_std.c) piloté directement, sans PHY simulée ;
@@ -18,6 +19,8 @@
 # 4. replay : le faux 135 contre les traces réelles de traces/ (lues en place) ;
 #    test_journal : le journal de debug seul, sur une horloge de test ;
 #    test_led : le calcul de la LED de statut (components/led/led.c), des suites d'instantanés rejouées, sans PWM ;
+#    test_sht40 : le SHT40 de la carte v1.0 (components/sensor/sht40.c) contre le faux capteur bit par bit
+#    (sim/sht40_sim.c) ;
 #    test_session_script : SESSION et TRANSACTION contre un répondeur minimal (sim/test/phy_script.c) ;
 #    test_session135 : SESSION et TRANSACTION contre le faux 135, requêtes d'init comparées aux traces ;
 #    test_host : la couche HOTE contre une session scriptée, et les motifs que la page applique aux réponses
@@ -56,14 +59,12 @@ for h in "$F2"/include/*.h; do
     echo "   $nom : compile seul"
 done
 
-echo "== broches : une table par cible ESP-IDF (components/phy/pins.h), une cible sans table ne compile pas"
+echo "== broches : la table de la carte v1.0 (components/phy/pins.h), une cible sans table ne compile pas"
 mkdir -p "$SORTIE/cible"
 printf '#include "pins.h"\ntypedef int broches_t;\n' > "$SORTIE/cible/broches.c"
-for cible in ESP32S3 ESP32C3; do
-    printf '#define CONFIG_IDF_TARGET_%s 1\n' "$cible" > "$SORTIE/cible/sdkconfig.h"
-    gcc "${CFLAGS[@]}" -fsyntax-only -I"$SORTIE/cible" "$SORTIE/cible/broches.c"
-    echo "   cible ${cible,,} : sa table compile"
-done
+printf '#define CONFIG_IDF_TARGET_ESP32C3 1\n' > "$SORTIE/cible/sdkconfig.h"
+gcc "${CFLAGS[@]}" -fsyntax-only -I"$SORTIE/cible" "$SORTIE/cible/broches.c"
+echo "   cible esp32c3 : sa table compile"
 attendu="aucune table de broches pour cette cible ESP-IDF : ajouter la sienne dans components/phy/pins.h"
 for cible in CONFIG_IDF_TARGET_ESP32 ""; do
     printf '%s\n' "${cible:+#define $cible 1}" > "$SORTIE/cible/sdkconfig.h"
@@ -133,6 +134,12 @@ gcc "${CFLAGS[@]}" "${SOURCES[@]}" -o "$SORTIE/test_led"
 programme_args "$F2" test_led
 "$SORTIE/test_led" "${ARGS[@]}"
 
+echo "== le SHT40 de la carte v1.0 : le vrai code (components/sensor/sht40.c) contre le faux capteur bit par bit"
+programme_sources "$F2" test_sht40
+gcc "${CFLAGS[@]}" "${SOURCES[@]}" -o "$SORTIE/test_sht40"
+programme_args "$F2" test_sht40
+"$SORTIE/test_sht40" "${ARGS[@]}"
+
 echo "== SESSION et TRANSACTION : par une PHY scriptée (sim/test/phy_script.c)"
 programme_sources "$F2" test_session_script
 gcc "${CFLAGS[@]}" "${SOURCES[@]}" "${LIENS[@]}" -o "$SORTIE/test_session_script"
@@ -169,7 +176,7 @@ programme_args "$F2" test_std
 # Les sanitizers ralentissent test_session135 au-delà de sa garde de 10 s : GARDE_S la relève, pour ce passage seul.
 echo "== sous ASan et UBSan : chaque programme de la suite, recompilé et rejoué"
 SAN=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -DGARDE_S=60)
-for p in test_lens135 test_lens_std test_phy test_bench_core replay test_journal test_led test_session_script \
+for p in test_lens135 test_lens_std test_phy test_bench_core replay test_journal test_led test_sht40 test_session_script \
          test_session135 test_host test_host135 test_std; do
     programme_sources "$F2" "$p"
     gcc "${CFLAGS[@]}" "${SAN[@]}" "${SOURCES[@]}" "${LIENS[@]}" -o "$SORTIE/san_$p"

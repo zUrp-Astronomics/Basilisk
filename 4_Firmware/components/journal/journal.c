@@ -512,6 +512,21 @@ void bsk_journal_xdetect_bounce(uint64_t t_us)
     line(false, t_us, "* xdetect %llu bounce", (unsigned long long)(t_us / 1000));
 }
 
+/* Sous le plafond : un commutateur en cycles thermiques en écrirait une à chaque cycle. Les lignes perdues sont comptées
+ * dans `dropped` ; les activations, par la PHY (fault_motor, fault_logic de DEBUG), qui ne dépendent pas de ces lignes. */
+void bsk_journal_rail_fault(bsk_rail_t rail, bool active, bool on, uint64_t t_us)
+{
+    line(false, t_us, "* rail %llu %s %s cmd=%s", (unsigned long long)(t_us / 1000),
+         rail == BSK_RAIL_MOTOR ? "motor" : "logic", active ? "fault" : "ok", on ? "on" : "off");
+}
+
+/* Sous le plafond : une ligne par changement, une lecture par seconde au plus. */
+void bsk_journal_sht40(const char *why)
+{
+    uint64_t t = now_us();
+    line(false, t, "* sht40 %llu %s%s", (unsigned long long)(t / 1000), why ? "lost why=" : "ok", why ? why : "");
+}
+
 void bsk_journal_resend(uint8_t type, uint8_t n, bsk_err_t why)
 {
     uint64_t t = now_us();

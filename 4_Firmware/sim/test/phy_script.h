@@ -1,7 +1,8 @@
 /* SOURCE: include/bsk_phy.h ; 7_Docs/E-Mount/protocol.md § 2 (la poignée de main)
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — implémente include/bsk_phy.h à la place de sim/phy_sim.c pour sim/test/test_session_script.c
+ * STATUS: actif — implémente include/bsk_phy.h à la place de sim/phy_sim.c pour sim/test/test_session_script.c ;
+ *         ticket #590 : ps_rail_fault
  * Un répondeur minimal derrière bsk_phy.h, sans le verrou de XDETECT.
  *
  * Il joue un objectif réduit à ce que le script lui donne, sur une horloge virtuelle en µs :
@@ -23,8 +24,8 @@
  *     0x06), que le flux émet ensuite ; avec `fail_sends`, les émissions suivantes échouent (E_BUS).
  * Les messages rendus sont ceux que le test lui donne : le test cite leur source. Il note tout ce que
  * la carte fait sur le fil (trames, BODY_CS, rails, VD, lignes pilotées ou relâchées), horodaté. Relâcher les
- * lignes pose BODY_CS basse pour l'objectif (le tirage bas de la carte). D2 et les erreurs de PHY sont
- * injectés tels que PHY les rapporte (présence déjà filtrée par l'anti-rebond, E_FRAMING, E_BUS). Il n'a pas le verrou
+ * lignes pose BODY_CS basse pour l'objectif (le tirage bas de la carte). D2, les erreurs de PHY et les FAULT des rails
+ * sont injectés tels que PHY les rapporte (présence déjà filtrée par l'anti-rebond, E_FRAMING, E_BUS). Il n'a pas le verrou
  * de XDETECT : bsk_phy_rail, bsk_phy_lines et bsk_phy_vd sont notés et rendent true ; le verrou se joue
  * dans la PHY simulée (sim/phy_sim.c, joué par test_phy et test_session135). */
 #ifndef PHY_SCRIPT_H
@@ -85,6 +86,10 @@ void     ps_presence(bool present);        /* BSK_PHY_PRESENCE, à l'instant cou
  * avant sa lecture. */
 void     ps_push_back(const bsk_phy_event_t *e);
 void     ps_error(bsk_err_t err);          /* BSK_PHY_ERROR, à l'instant courant */
+/* BSK_PHY_FAULT, à l'instant courant, tel que la PHY le rend : le FAULT de `rail` activé (`active`) ou retombé, le rail
+ * commandé allumé ou non à cet instant, d'après la dernière commande notée (bsk_phy_rail). Une activation est comptée
+ * (fault_motor, fault_logic de bsk_phy_stats). */
+void     ps_rail_fault(bsk_rail_t rail, bool active);
 void     ps_frame(uint8_t cls, const uint8_t *msg, size_t len, uint64_t at);   /* une trame de l'objectif */
 void     ps_lens_cs(bool high, uint64_t at);                                   /* LENS_CS, hors poignée de main */
 /* LENS_CS à ce niveau dès maintenant, SANS événement, comme phy.c la trouve à bsk_phy_init sans rien

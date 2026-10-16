@@ -56,9 +56,10 @@ const char *bsk_host_later(char *out, size_t cap);
 /* Les marges de pile des tâches de la carte, pour `DEBUG` (PROTOCOL.md § 3) : la plus petite place restée libre sur la
  * pile de chaque tâche depuis le démarrage, en octets (uxTaskGetStackHighWaterMark). Appelée par bsk_host_line, sur la
  * tâche de SESSION. Fournie par la carte (host_usb.c) ; dans la suite, chaque programme qui compile host.c en fournit
- * une (sim/test/test_host.c pose les siennes, les autres prennent sim/stacks_sim.c, à zéro). */
+ * une (sim/test/test_host.c pose les siennes, les autres prennent sim/stacks_sim.c, à zéro). `sensor`, la tâche du
+ * capteur de la carte (bsk_sensor.h). */
 typedef struct {
-    uint32_t session, phy, usb_rx, store, journal;
+    uint32_t session, phy, usb_rx, store, journal, sensor;
 } bsk_host_stacks_t;
 void bsk_host_stacks(bsk_host_stacks_t *s);
 

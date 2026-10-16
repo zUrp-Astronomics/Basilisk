@@ -1,8 +1,8 @@
 # Défauts du driver Pinefeat d'origine
 
 **Date** : 2026-10-04
-**Dernière révision** : 2026-10-08
-**Statut** : actif — constats ; corrigés dans notre fourche : la réponse de 15 caractères (décision de l'humain du 2026-10-04) et les points R9 de l'audit statique, L09-05, L09-08, L09-09 et la fin de ligne des textes affichés (décision de l'humain du 2026-10-07) ; les autres restent tels quels ; les remonter à indilib est une décision de l'humain
+**Dernière révision** : 2026-10-11 (ticket #600 : L09-03 corrigé contre notre carte, `ext=1`) ; 2026-10-08
+**Statut** : actif — constats ; corrigés dans notre fourche : la réponse de 15 caractères (décision de l'humain du 2026-10-04), les points R9 de l'audit statique, L09-05, L09-08, L09-09 et la fin de ligne des textes affichés (décision de l'humain du 2026-10-07), et L09-03 contre notre carte (`ext=1`) seulement (décision de l'humain, ticket #600) ; les autres restent tels quels, L09-03 et le `Busy` de `CALIBRATE` contre un adaptateur Pinefeat ; les remonter à indilib est une décision de l'humain
 **Référencé par** : `6_Driver/indi/README.md`
 
 Le driver est le `pinefeat_cef` d'`indilib/indi` au commit `1dd9b34f24df6fd74ed45be17823fc937e192b47`
@@ -12,15 +12,18 @@ vu ») : la réponse de 15 caractères sans fin de chaîne. Le 2026-10-07, la d�
 2026-10-06 (`plans/robustesse-2026-10.md` de l'atelier : R9 « corrigé sans décision », proposition de l'audit validée)
 la remplace pour les points R9 : `ERR_NC` (L09-05), le `%d` des déplacements (L09-08), la cadence de `TimerHit`
 (L09-09) et la fin de ligne gardée dans les textes affichés sont corrigés dans notre fourche. Chaque entrée dit si elle
-est corrigée, et comment ; **restent tels quels** : L09-03, L09-07, la part amont de L09-04, le `Busy` de `CALIBRATE` et
-l'erreur répétée au journal sans objectif.
+est corrigée, et comment. L09-03 est levé pour notre carte seulement (décision de l'humain, ticket #600 : « la seule
+bonne réponse à une demande de calibration, c'est de répondre les bornes qu'on a ») : corrigé contre une carte qui
+porte `ext=1`, tel quel contre un adaptateur Pinefeat, dont personne ici ne sait ce que rend `r` avant une calibration.
+**Restent tels quels** : L09-07, la part amont de L09-04, l'erreur répétée au journal sans objectif, et, contre un
+adaptateur Pinefeat (sans `ext=1`), L09-03 et le `Busy` de `CALIBRATE`.
 
 Chaque entrée nomme la fonction du fichier amont (`pinefeat_cef.cpp`), le symptôme, et la correction
 qu'on proposerait. Chacune a été vérifiée sur le code ; celles qui touchent la lecture série ont aussi été
 vérifiées sur `indicom.c` de libindi 1.9.9 (source du paquet Ubuntu 24.04). Les numéros `L09-…` sont ceux
 de l'audit statique (lot 9).
 
-## L09-03 — les bornes de `r` : la basse ignorée, la haute appliquée seulement après `CALIBRATE`
+## L09-03 — les bornes de `r` : la basse ignorée, la haute appliquée seulement après `CALIBRATE` (corrigé dans notre fourche contre notre carte, `ext=1` ; tel quel contre un adaptateur Pinefeat)
 
 - **Où** : `readFocusMaxPosition`, `updateProperties(pos, max, dist, aper)`.
 - **Symptôme** : `r` rend `<min>-<max>` ; `sscanf(res, "%*d-%d", &pos)` jette le minimum, aucun champ ne
@@ -31,6 +34,22 @@ de l'audit statique (lot 9).
   bornée.
 - **Correction proposée** : lire les deux nombres, et poser `min`/`max` de la position absolue (et
   `FOCUS_MAX`) à chaque lecture de `r` réussie, connexion comprise.
+- **Corrigé dans notre fourche contre notre carte (`ext=1`)**, décision de l'humain (ticket #600) : ses bornes sont
+  celles que l'objectif publie (`PROTOCOL.md`, ligne `r`), il n'y a rien à calibrer. `readFocusMaxPosition` lit les
+  deux nombres ; `applyLimits` pose la plage de la position absolue et celle de `FOCUS_MAX` sur `<min>..<max>`, et la
+  valeur de `FOCUS_MAX` sur `<max>`, à la connexion et à chaque lecture réussie de `r`, et ne les envoie aux clients
+  que si elles ont changé (un nouvel objectif, ou un `FOCUS_MAX` écrit par un client, qu'`INDI::Focuser` traduit en
+  une plage depuis 0, remise à la lecture suivante). Une lecture qui échoue (objectif retiré, `nc`) ne change rien :
+  les dernières bornes connues restent. Chaque connexion repart de la plage d'`initProperties` (0 à 32767). `CALIBRATE`
+  n'envoie pas `c` (la carte y répond `ok` sans rien faire) : il relit `r` et pose ces bornes, sans `Busy`, sans rien
+  déplacer ; `r` en échec, il finit en `Alert`. Une cible hors des bornes, absolue ou relative, est refusée par
+  `INDI::Focuser` avant d'atteindre le driver. Joué sous `indiserver` (libindi 1.9.9, 2026-10-11), contre une fausse
+  carte sur un pty (`README.md`).
+- **Tel quel contre un adaptateur Pinefeat** (sans `ext=1`) : son `r` porte une plage calibrée, et personne ici ne
+  sait ce qu'il rend avant une calibration. Les mêmes réponses de `r` sont refusées (`%d-%d` à deux champs, comme
+  `%*d-%d` à un), la basse n'est pas employée, `CALIBRATE` est celui de l'amont. Joué sous `indiserver` (libindi 1.9.9,
+  2026-10-11), contre une fausse carte sans `ext=1` sur un pty : les états d'`ABS_FOCUS_POSITION`, `FOCUS_MAX` et
+  `CALIBRATE` et les commandes envoyées, étape par étape, identiques à ceux du driver d'avant.
 
 ## L09-05 — `ERR_NC` : `strcmp(...) > 0` au lieu d'un test d'égalité (corrigé dans notre fourche)
 
@@ -76,8 +95,10 @@ de l'audit statique (lot 9).
 - **Correction proposée** : si une cadence d'une seconde est voulue à l'arrêt, poser `lastUpdate` à chaque
   relecture dans `TimerHit` ; sinon, retirer le test et garder le seul délai de `CALIBRATE`.
 - **Corrigé dans notre fourche** : `TimerHit` pose `lastUpdate` à chaque passage où la seconde est écoulée : `e`,
-  et à l'arrêt `e f r d a`, une fois par seconde ; `CALIBRATE` garde son délai. Joué sous `indiserver` (libindi 1.9.9,
-  2026-10-08), contre une fausse carte sur un pty : 6 `e` en 6 s, contre 98 à 116 pour le driver d'avant.
+  et à l'arrêt `e f r d a`, une fois par seconde ; sans `ext=1`, `CALIBRATE` garde son délai ; contre notre carte
+  (`ext=1`), il n'en pose aucun : il relit `r` et pose ses bornes sur-le-champ, sans `Busy` à attendre (L09-03).
+  Joué sous `indiserver` (libindi 1.9.9, 2026-10-08), contre une fausse carte sur un pty : 6 `e` en 6 s, contre 98 à
+  116 pour le driver d'avant.
 
 ## Audit R9 — la fin de ligne gardée dans les textes affichés (corrigé dans notre fourche)
 
@@ -99,13 +120,14 @@ de l'audit statique (lot 9).
 - **Correction proposée** : après une échéance, ne pas envoyer la commande suivante avant que la ligne
   soit restée muette un moment (lire et jeter jusqu'au silence), ou marquer la connexion à resynchroniser.
 
-## Le `Busy` de `CALIBRATE` ne finit que par un `f` réussi
+## Le `Busy` de `CALIBRATE` ne finit que par un `f` réussi (sans `ext=1` seulement)
 
 - **Où** : `ISNewSwitch` (`CALIBRATE`), `TimerHit`, `updateProperties(pos, max, dist, aper)`.
 - **Symptôme** : un `CALIBRATE` accepté pose la position absolue et `FOCUS_MAX` à `Busy`. Seul
   `updateProperties` les en sort, et il n'est appelé que si `f`, `r`, `d` et `a` répondent tous, une fois
   `e` à `n`. Un objectif retiré ou en `FAULT` (`f` en erreur) les laisse `Busy` pour toujours. Le lot
-  étendu de ce dépôt termine ses propres `Busy` ; celui de `CALIBRATE` est laissé à l'amont.
+  étendu de ce dépôt termine ses propres `Busy` ; celui de `CALIBRATE` est laissé à l'amont. Contre notre carte
+  (`ext=1`), `CALIBRATE` ne pose plus de `Busy` (L09-03) : ce défaut n'existe que contre un adaptateur Pinefeat.
 - **Correction proposée** : une fois `e` à `n`, une lecture qui échoue passe ces propriétés à `Alert`.
 
 ## Hors de l'audit — une réponse de 15 caractères n'a pas de fin de chaîne (corrigé dans notre copie)
@@ -116,7 +138,8 @@ de l'audit statique (lot 9).
   quand la réponse les remplit, il n'y a pas de place pour un zéro final et il n'en écrit pas. Une réponse
   de 15 caractères et son `\n` remplissent le tampon : `strstr`, `sscanf`, `setText` et le journal lisent
   au-delà. La carte en rend une : `er range limits` (15 caractères), à `f<n>` et `f±n` hors des bornes
-  (`PROTOCOL.md` § 2), ce que L09-03 rend possible. Les lettres du lot étendu lisent avec `EXT_BUF - 1`
+  (`PROTOCOL.md` § 2), ce que L09-03 rend possible sans `ext=1` (avec, une cible hors des bornes connues est
+  refusée avant le driver). Les lettres du lot étendu lisent avec `EXT_BUF - 1`
   dans des tampons de `EXT_BUF` et ne sont pas touchées.
 - **Corrigé dans notre copie** (décision de l'humain). Notre `sendCommand` n'appelle pas
   `tty_nread_section` comme l'amont : il lit le premier octet à part (pour sauter les lignes `* …`), le

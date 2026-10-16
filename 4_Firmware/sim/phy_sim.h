@@ -1,7 +1,7 @@
 /* SOURCE: spec de l'atelier § 2 et § 11 — la frontière PHY
  * AUTHOR: engineer
  * DATE: 2026-09-26
- * STATUS: actif — compilé par 4_Firmware/run.sh dans les bancs qui jouent le fil
+ * STATUS: actif — compilé par 4_Firmware/run.sh dans les bancs qui jouent le fil ; ticket #590 : phy_sim_rail_fault
  * Implémente include/bsk_phy.h au-dessus d'un faux objectif (lens_sim.h : le faux 135 ou le faux standard), sur une
  * horloge virtuelle : le fil entre la carte et le faux objectif, et un récepteur qui rend ce que bsk_phy.h promet.
  *
@@ -80,6 +80,14 @@ void     phy_sim_d2(bool present);
  * événement. Pour un test qui joue le fil sans SESSION (le faux objectif, le rejeu) : sans lui, le verrou refuse la VD et
  * les lignes, qu'un tel test pilote ensuite (bsk_phy_lines(true)) pour que BODY_CS et l'émission arrivent à l'objectif. */
 void     phy_sim_mounted(void);
+
+/* Le FAULT# d'un rail (bsk_phy.h, BSK_PHY_FAULT) : l'interruption de la carte, prise à l'instant courant, `active` le
+ * niveau qu'elle relit (true : FAULT# à 0). Comme la carte (fault_edge, components/phy/phy_common.h) : un niveau changé
+ * depuis le dernier connu est une activation ou une retombée ; le même, deux fronts au moins depuis — une activation
+ * finie avant d'être lue (inactif), une retombée suivie d'une nouvelle activation (actif). Les changements vont dans la
+ * file à l'instant courant, avec l'état du rail de phy_sim_wires ; les activations sont comptées dans bsk_phy_stats.
+ * Rien d'autre ne change : rien n'est coupé, le faux objectif n'en sait rien. */
+void     phy_sim_rail_fault(bsk_rail_t rail, bool active);
 
 /* Les lignes émises et les rails, tels que la carte les commande, notés pour les tests. Le faux objectif
  * n'est pas alimenté par les rails (lens_sim_power). Les lignes touchent le fil comme sur la carte : bsk_phy_vd(0)
