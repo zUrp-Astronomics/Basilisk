@@ -1,9 +1,11 @@
 # emount-bench — une carte pour piloter un objectif Sony E depuis un PC
 
 **Date** : 2026-10-06
-**Dernière révision** : 2026-10-16 (ticket #626 : la procédure de flash sur les trois fichiers de la release, dont
-deux voies qui gardent la marque ; le site n'installe rien) ; 2026-10-12 (ticket #617 : une version publiée sur sa
-release GitHub) ;
+**Dernière révision** : 2026-10-16 (ticket #635 : la page de banc en français ou en anglais, et les navigateurs qui
+l'ouvrent) ; 2026-10-16 (ticket #633 : la release porte aussi la page de banc) ; 2026-10-16 (ticket
+#630 : le flash en un clic depuis la page produit d'abord, les voies manuelles en secours) ; 2026-10-16 (ticket
+#626 : la procédure de flash sur les trois fichiers de la release, dont deux voies qui gardent la marque ; le site
+n'installe rien) ; 2026-10-12 (ticket #617 : une version publiée sur sa release GitHub) ;
 2026-10-11 (ticket #606 : la carte v1.0 seule, la XIAO de banc retirée ; la version 0.9) ;
 2026-10-11 (ticket #602 : le firmware livré sous le nom `basilisk_FW`, l'image unique, les
 scripts de flash) ; 2026-10-11 (ticket #594 : le capteur SHT40 lu et rapporté, `z`, `:GT#`, le driver INDI ; la table du
@@ -63,13 +65,16 @@ Le firmware est dans `4_Firmware/` (ESP-IDF 5.3.2, C, aucune dépendance hors ES
 ### Le récupérer
 
 **Une version publiée** est sur la dernière release GitHub du dépôt,
-`https://github.com/zUrp-Astronomics/Basilisk/releases/latest`. Elle porte trois fichiers :
+`https://github.com/zUrp-Astronomics/Basilisk/releases/latest`. Elle porte quatre fichiers :
 
 - `basilisk_<tag>_esp32c3_flash.zip` : à plat, le bootloader (`…-bootloader.bin`), la table de partitions
   (`…-partition-table.bin`), l'application (`….bin`), `flash_args` qui les place, et les scripts `flash.sh` et
   `flash.cmd` ;
 - `basilisk_<tag>_esp32c3.bin` : l'image unique, à écrire en `0x0` ;
-- `manifest.json` (format ESP Web Tools), joint pour un bouton d'installation que le site ne sert pas aujourd'hui.
+- `manifest.json` (format ESP Web Tools) : le site de l'org le copie, avec l'image unique, pour le bouton
+  d'installation de la page produit ;
+- `basilisk_<tag>_bench.html` : la page de banc de cette version (`5_App/emount-bench.html` au tag, § La page de
+  banc), à ouvrir dans le navigateur ; la page produit l'ouvrira en ligne, quand le site le publie.
 
 **Pour qui développe**, la CI de la forge construit le firmware à chaque run (job `firmware-build`) et publie
 l'artefact **`firmware-esp32c3`** : les mêmes fichiers séparés, `flash_args` et les scripts, plus l'image unique
@@ -79,8 +84,14 @@ télécharge depuis la page du run, ou par l'API de la forge (`GET /api/v1/repos
 
 ### Le flasher
 
-On branche la carte à l'ordinateur en USB-C, avec un câble de données ; rien d'autre : l'outil de flash fait passer la
-carte en téléchargement par l'USB. Trois voies, dont deux gardent la marque :
+**Depuis la page produit, en un clic.** La page produit, `https://zurp-astronomics.github.io/basilisk/`, installe
+depuis le navigateur (Firefox, Chrome ou Edge, sur ordinateur) la dernière version publiée, la carte branchée en
+USB-C : bouton d'installation, choisir le port de la carte. Elle écrit l'image unique en `0x0` : **la marque est
+remise à zéro**.
+
+**Les autres voies**, avec les fichiers de la release. On branche la carte à l'ordinateur en USB-C, avec un câble de
+données ; rien d'autre : l'outil de flash fait passer la carte en téléchargement par l'USB. Trois voies, dont deux
+gardent la marque :
 
 - **Dans le navigateur, sans rien installer — la marque est gardée.** Firefox 151 ou plus, Chrome ou Edge, sur
   ordinateur ; pas Safari, pas de mobile. Décompresser le zip, ouvrir le flasheur web d'Espressif, esptool-js
@@ -177,8 +188,11 @@ envoie, `v e r f m c a`, avec les réponses qu'il attend (`PROTOCOL.md` § 2.1).
 
 ## La page de banc (`5_App/`)
 
-`5_App/emount-bench.html` : une page seule, sans installation, qui parle à la carte par Web Serial. L'ouvrir dans **Chrome
-ou Edge** sur ordinateur. Si le navigateur refuse Web Serial sur `file://` : `python3 -m http.server` dans `5_App/`, puis
+`5_App/emount-bench.html` : une page seule, sans installation, qui parle à la carte par Web Serial. L'ouvrir dans **Firefox
+151 ou plus, Chrome ou Edge**, sur ordinateur. Elle est en français ou en anglais : la langue du navigateur au départ, puis
+la bascule **FR | EN** en haut de la page, retenue d'une visite à l'autre ; la bascule ne coupe pas la connexion, et le
+journal garde la langue où chaque ligne a été écrite.
+Si le navigateur refuse Web Serial sur `file://` : `python3 -m http.server` dans `5_App/`, puis
 `http://localhost:8000/emount-bench.html`.
 
 - **Connecter** : la page envoie `v` jusqu'à une réponse (l'ouverture du port peut redémarrer la carte), puis lit l'état ;

@@ -7,11 +7,14 @@ if (process.argv.length !== 3) { console.error('usage : node test_app_vm.cjs <re
 const traces = process.argv[2];
 const html = fs.readFileSync(path.join(__dirname, '..', 'emount-bench.html'), 'utf8');
 const source = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+/* La page parle FR ou EN (la langue du navigateur, sinon le choix retenu) ; cette suite teste le transport, pas la
+   traduction (test_app.js la porte) : la langue y est fixee a FR par navigator.language, sans localStorage (la page
+   marche sans), et ses attendus restent les textes francais. */
 function setup() {
   let id = 0; const timers = new Map(), elements = new Map();
   const el = () => ({ textContent: '', value: '', checked: true, disabled: false, hidden: false, style: {}, classList: { add() {}, remove() {} }, addEventListener() {}, querySelector() { return el(); }, appendChild() {}, removeChild() {}, childElementCount: 0, click() {}, innerHTML: '' });
-  const c = vm.createContext({ console, TextEncoder, TextDecoder, Date, Blob, URL, navigator: {}, confirm: () => true, Map, Set, Promise,
-    document: { getElementById(k) { if (!elements.has(k)) elements.set(k, el()); return elements.get(k); }, createElement: el, querySelectorAll: () => [], addEventListener() {} },
+  const c = vm.createContext({ console, TextEncoder, TextDecoder, Date, Blob, URL, navigator: { language: 'fr-FR' }, confirm: () => true, Map, Set, Promise,
+    document: { documentElement: { lang: '' }, getElementById(k) { if (!elements.has(k)) elements.set(k, el()); return elements.get(k); }, createElement: el, querySelectorAll: () => [], addEventListener() {} },
     setTimeout(fn, ms) { timers.set(++id, { fn, ms }); return id; }, clearTimeout(i) { timers.delete(i); }, setInterval() { return ++id; }, clearInterval() {} });
   vm.runInContext(source, c); return { c, timers, elements, run: s => vm.runInContext(s, c) };
 }

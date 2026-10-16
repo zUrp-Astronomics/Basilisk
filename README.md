@@ -71,8 +71,8 @@ is. Its manufacturing files are in `1_Board/`, the printable case in `3_3D-Model
 
 - **Firmware** — `4_Firmware/`: ESP-IDF, no other dependency. Built for the ESP32-C3 of the v1.0 board
   (not yet validated on it).
-- **Bench page** — `5_App/`: a single HTML page that drives the board from Chrome or Edge over Web
-  Serial. Nothing to install.
+- **Bench page** — `5_App/`: a single HTML page that drives the board over Web Serial from Firefox 151 or
+  later, Chrome or Edge, on a computer; in French or English. Nothing to install.
 - **tool_station** — `5_App/tool_station/`: reads and sets the M1/M2 custom switch of the Samyang
   AF 135, without Samyang's tool.
 - **INDI driver** — `6_Driver/indi/`: `indi_basilisk_focus`, a focuser for Ekos. The stock Pinefeat
@@ -80,20 +80,24 @@ is. Its manufacturing files are in `1_Board/`, the printable case in `3_3D-Model
 
 ## Flash
 
-1. **Download** the [latest release](https://github.com/zUrp-Astronomics/Basilisk/releases/latest).
-2. **Plug** the board into the computer over USB-C, with a data cable. Nothing else: the flashing tool puts the
-   board into download mode over USB.
-3. **Flash**, one of three ways:
-   - **In the browser, nothing to install — keeps your focus mark.** Firefox 151 or later, Chrome or Edge, on a
-     computer (not Safari, not mobile). Unzip `basilisk_<tag>_esp32c3_flash.zip`, open Espressif's
-     [esptool-js](https://espressif.github.io/esptool-js/), click **Connect** and pick the board's port, then add
-     the three `.bin` files at the addresses listed in `flash_args`: `0x0` the `…-bootloader.bin`, `0x8000` the
-     `…-partition-table.bin`, `0x10000` the application `….bin`. Click **Program**. Do not click **Erase Flash**.
-   - **Command line — keeps your focus mark.** Install esptool (`pip install esptool`), unzip
-     `basilisk_<tag>_esp32c3_flash.zip`, then run `sh flash.sh [PORT]` (Linux, macOS) or `flash.cmd [PORT]`
-     (Windows) from that folder.
-   - **Clean install — erases your focus mark.** Write `basilisk_<tag>_esp32c3.bin` at `0x0` (esptool-js or
-     esptool), for a new chip or one that ran other firmware.
+Install it from your browser on the [product page](https://zurp-astronomics.github.io/basilisk/) (Firefox, Chrome
+or Edge). On a computer, with the board plugged in over USB-C; this install resets your focus mark.
+
+### Other ways
+
+From the files of the [latest release](https://github.com/zUrp-Astronomics/Basilisk/releases/latest), with the board
+plugged into the computer over USB-C with a data cable (the flashing tool puts it into download mode over USB):
+
+- **In the browser, keeps your focus mark.** Firefox 151 or later, Chrome or Edge, on a computer (not Safari, not
+  mobile). Unzip `basilisk_<tag>_esp32c3_flash.zip`, open Espressif's
+  [esptool-js](https://espressif.github.io/esptool-js/), click **Connect** and pick the board's port, then add the
+  three `.bin` files at the addresses listed in `flash_args`: `0x0` the `…-bootloader.bin`, `0x8000` the
+  `…-partition-table.bin`, `0x10000` the application `….bin`. Click **Program**. Do not click **Erase Flash**.
+- **Command line, keeps your focus mark.** Install esptool (`pip install esptool`), unzip
+  `basilisk_<tag>_esp32c3_flash.zip`, then run `sh flash.sh [PORT]` (Linux, macOS) or `flash.cmd [PORT]` (Windows)
+  from that folder.
+- **Clean install, erases your focus mark.** Write `basilisk_<tag>_esp32c3.bin` at `0x0` (esptool-js or esptool),
+  for a new chip or one that ran other firmware.
 
 The port is `/dev/ttyACM0` on Linux, `/dev/cu.usbmodem…` on macOS and `COMx` on Windows ("USB Serial Device"); no
 driver is needed.
