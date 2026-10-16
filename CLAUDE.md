@@ -182,11 +182,13 @@ travail est `/home/projects.workshop/basilisk/backlog.md` (face atelier, hors du
   `.github/workflows/firmware.yml`, sa copie pour GitHub (`espressif/idf:v5.3.2`, `4_Firmware/build.sh`, artefact
   `firmware-esp32c3`) : on change l'un, on change l'autre. Le workflow GitHub ne joue aucun test et ne tourne que
   sur GitHub. La publication suit la norme de l'org : sur la poussée d'un tag `v*.*.*` (posé par Starfleet, sous le
-  compte de l'humain ; jamais par Basilisk), son job `release` crée la release du tag avec deux fichiers,
-  `basilisk_<tag>_esp32c3.bin` (l'image `-full.bin` de l'artefact, renommée) et `manifest.json` (ESP Web Tools,
-  écrit par `4_Firmware/manifest.py`, qu'aucune suite ne joue), puis réveille le site de l'org (secret
-  `ZURP_SITE_DISPATCH`), dont la page produit installe le firmware (le lien du `README.md`). La version publiée est
-  le tag (`v0.9.0`), `PROJECT_VER` reste `<maj>.<min>`.
+  compte de l'humain ; jamais par Basilisk), son job `release` crée la release du tag avec trois fichiers,
+  `basilisk_<tag>_esp32c3.bin` (l'image `-full.bin` de l'artefact, renommée), `manifest.json` (ESP Web Tools,
+  écrit par `4_Firmware/manifest.py`, qu'aucune suite ne joue) et `basilisk_<tag>_esp32c3_flash.zip` (les fichiers
+  de l'artefact qui flashent sans effacer la marque : `flash_args`, ses trois `.bin`, `flash.sh`, `flash.cmd`), puis
+  réveille le site de l'org (secret `ZURP_SITE_DISPATCH`). Le site n'installe rien : le `manifest.json` reste joint
+  pour un bouton qu'il ne sert pas aujourd'hui, et la procédure de flash est dans `README.md` § Flash. La version
+  publiée est le tag (`v0.9.0`), `PROJECT_VER` reste `<maj>.<min>`.
 - **`6_Driver/indi/` est compilé et lié en CI, pas testé** : le job `indi` (image `ubuntu:24.04`, pas
   `act-latest`, étiquette mobile) installe `libindi-dev` d'Ubuntu 24.04, **libindi 1.9.9**, et joue
   `6_Driver/indi/build.sh` : `cmake` puis `make` sur son `CMakeLists.txt` tel quel (branche pkg-config :

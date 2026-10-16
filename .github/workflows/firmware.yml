@@ -1,6 +1,7 @@
-# SOURCE: ticket #612 — le firmware construit sur GitHub ; ticket #617 — publié sur la release d'un tag v*.*.*
+# SOURCE: ticket #612 — le firmware construit sur GitHub ; ticket #617 — publié sur la release d'un tag v*.*.* ;
+#         ticket #626 — la release porte aussi le zip de flash qui garde la marque
 # AUTHOR: engineer
-# DATE: 2026-10-12
+# DATE: 2026-10-16
 # STATUS: actif — ne tourne que sur GitHub ; la forge ne lit que .gitea/workflows/
 #
 # ⚠ ON CHANGE L'UN, ON CHANGE L'AUTRE. Le job `build` est la copie du job `firmware-build` de .gitea/workflows/ci.yml :
@@ -15,10 +16,15 @@
 # v*.*.* ; le tag est posé par Starfleet, sous le compte de l'humain (un tag poussé avec le GITHUB_TOKEN ne
 # déclencherait rien). Une poussée de branche construit seulement. Le job `release`, sur le tag :
 #   1. renomme l'image fusionnée de l'artefact, basilisk_FW-v<PROJECT_VER>-esp32c3-full.bin, en
-#      basilisk_<tag>_esp32c3.bin, et écrit à côté manifest.json (4_Firmware/manifest.py, format ESP Web Tools) ;
-#   2. crée la release du tag, à son nom, avec ces deux fichiers et eux seuls ;
-#   3. réveille le site de l'org (dispatch zurp-catalog, secret d'org ZURP_SITE_DISPATCH) : une release créée avec le
+#      basilisk_<tag>_esp32c3.bin, et écrit à côté manifest.json (4_Firmware/manifest.py, format ESP Web Tools ; joint
+#      pour un bouton d'installation que le site ne sert pas aujourd'hui) ;
+#   2. met dans basilisk_<tag>_esp32c3_flash.zip (ticket #626), à plat et tels quels, les fichiers de l'artefact qui
+#      flashent sans effacer la marque : flash_args, les trois .bin qu'il liste, flash.sh, flash.cmd. Le zip se fait
+#      ici, sur l'artefact téléchargé : le job `build` n'en sait rien ;
+#   3. crée la release du tag, à son nom, avec ces trois fichiers et eux seuls ;
+#   4. réveille le site de l'org (dispatch zurp-catalog, secret d'org ZURP_SITE_DISPATCH) : une release créée avec le
 #      GITHUB_TOKEN ne déclenche pas zurp-site.yml.
+# La procédure de flash, sur ces fichiers, est dans README.md § Flash.
 # Un run en échec se relance depuis GitHub.
 name: Firmware
 
@@ -83,12 +89,32 @@ jobs:
           cp "${images[0]}" "release/basilisk_${TAG}_esp32c3.bin"
           python3 4_Firmware/manifest.py "$TAG" "basilisk_${TAG}_esp32c3.bin" > release/manifest.json
           cat release/manifest.json
+      # Les noms des .bin sont pris dans flash_args, qui les place : le zip porte ce que le script écrit, rien d'autre.
+      # Chaque fichier est vérifié présent AVANT zip : zip saute un nom absent (avertissement) et rend 0, il publierait
+      # un zip partiel (revue de la PR #627).
+      - name: Le zip qui garde la marque
+        run: |
+          set -euo pipefail
+          bins=$(awk 'NR > 1 && NF == 2 { print $2 }' artefact/flash_args)
+          if [ "$(echo "$bins" | wc -l)" -ne 3 ]; then
+            echo "::error::flash_args doit lister trois fichiers : bootloader, table de partitions, application"
+            exit 1
+          fi
+          for f in flash_args flash.sh flash.cmd $bins; do
+            if [ ! -f "artefact/$f" ]; then
+              echo "::error::$f manque dans l'artefact : pas de zip partiel"
+              exit 1
+            fi
+          done
+          (cd artefact && zip -X -j "../release/basilisk_${TAG}_esp32c3_flash.zip" flash_args flash.sh flash.cmd $bins)
+          unzip -l "release/basilisk_${TAG}_esp32c3_flash.zip"
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           files: |
             release/basilisk_${{ github.ref_name }}_esp32c3.bin
             release/manifest.json
+            release/basilisk_${{ github.ref_name }}_esp32c3_flash.zip
           fail_on_unmatched_files: true
       - name: Le dispatch au site
         env:

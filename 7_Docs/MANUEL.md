@@ -1,7 +1,9 @@
 # emount-bench — une carte pour piloter un objectif Sony E depuis un PC
 
 **Date** : 2026-10-06
-**Dernière révision** : 2026-10-12 (ticket #617 : une version publiée, depuis la page produit du site et sa release GitHub) ;
+**Dernière révision** : 2026-10-16 (ticket #626 : la procédure de flash sur les trois fichiers de la release, dont
+deux voies qui gardent la marque ; le site n'installe rien) ; 2026-10-12 (ticket #617 : une version publiée sur sa
+release GitHub) ;
 2026-10-11 (ticket #606 : la carte v1.0 seule, la XIAO de banc retirée ; la version 0.9) ;
 2026-10-11 (ticket #602 : le firmware livré sous le nom `basilisk_FW`, l'image unique, les
 scripts de flash) ; 2026-10-11 (ticket #594 : le capteur SHT40 lu et rapporté, `z`, `:GT#`, le driver INDI ; la table du
@@ -58,41 +60,48 @@ Et encore :
 Le firmware est dans `4_Firmware/` (ESP-IDF 5.3.2, C, aucune dépendance hors ESP-IDF). `v` rend sa version,
 `<majeur>.<mineur>` : celle de `PROJECT_VER`, dans `4_Firmware/CMakeLists.txt`.
 
-### Le récupérer : les artefacts de la CI
+### Le récupérer
 
-À chaque run, la CI construit le firmware de la carte v1.0 (job `firmware-build`) et publie un artefact,
-**`firmware-esp32c3`**. Les fichiers portent la version et la cible, par exemple en 0.9 : l'application
-`basilisk_FW-v0.9-esp32c3.bin`, son bootloader (`…-bootloader.bin`) et sa table de partitions
-(`…-partition-table.bin`), `flash_args` qui les place, l'image unique `basilisk_FW-v0.9-esp32c3-full.bin`, et les scripts `flash.sh` et `flash.cmd`. On les télécharge
-depuis la page du run, ou par l'API de la forge (`GET /api/v1/repos/fleet/basilisk/actions/artifacts`, puis
+**Une version publiée** est sur la dernière release GitHub du dépôt,
+`https://github.com/zUrp-Astronomics/Basilisk/releases/latest`. Elle porte trois fichiers :
+
+- `basilisk_<tag>_esp32c3_flash.zip` : à plat, le bootloader (`…-bootloader.bin`), la table de partitions
+  (`…-partition-table.bin`), l'application (`….bin`), `flash_args` qui les place, et les scripts `flash.sh` et
+  `flash.cmd` ;
+- `basilisk_<tag>_esp32c3.bin` : l'image unique, à écrire en `0x0` ;
+- `manifest.json` (format ESP Web Tools), joint pour un bouton d'installation que le site ne sert pas aujourd'hui.
+
+**Pour qui développe**, la CI de la forge construit le firmware à chaque run (job `firmware-build`) et publie
+l'artefact **`firmware-esp32c3`** : les mêmes fichiers séparés, `flash_args` et les scripts, plus l'image unique
+`…-full.bin`. Les noms portent la version et la cible, par exemple en 0.9 `basilisk_FW-v0.9-esp32c3.bin`. On le
+télécharge depuis la page du run, ou par l'API de la forge (`GET /api/v1/repos/fleet/basilisk/actions/artifacts`, puis
 `…/artifacts/<id>/zip`).
-
-Une version publiée s'installe depuis la page produit du site, `https://zurp-astronomics.github.io/basilisk/` ; sa
-release GitHub porte `basilisk_<tag>_esp32c3.bin` (l'image unique, à écrire en `0x0`) et `manifest.json`.
 
 ### Le flasher
 
-Par l'USB de la carte, avec esptool (`pip install esptool`, ou l'exécutable autonome d'Espressif), depuis le dossier
-de l'artefact, décompressé. Trois voies :
+On branche la carte à l'ordinateur en USB-C, avec un câble de données ; rien d'autre : l'outil de flash fait passer la
+carte en téléchargement par l'USB. Trois voies, dont deux gardent la marque :
 
-- **Le script** : `sh flash.sh [PORT]` (Linux, macOS), `flash.cmd [PORT]` (Windows). Il écrit les fichiers séparés
-  de `flash_args`, rien d'autre : la marque, en NVS, est gardée. Sans `PORT`, esptool cherche la carte.
-- **L'image unique** `…-full.bin`, à écrire en `0x0` (esptool, ou un flasheur web : esptool-js, ESP Web Tools) :
-  l'installation complète, sur une puce vierge ou qui a porté autre chose. Elle remplit la NVS de `0xFF` : **la
-  marque est remise à zéro**.
-- **esptool à la main**, ce que fait le script :
+- **Dans le navigateur, sans rien installer — la marque est gardée.** Firefox 151 ou plus, Chrome ou Edge, sur
+  ordinateur ; pas Safari, pas de mobile. Décompresser le zip, ouvrir le flasheur web d'Espressif, esptool-js
+  (`https://espressif.github.io/esptool-js/`), **Connect**, choisir le port de la carte, puis ajouter les trois `.bin`
+  aux adresses que donne `flash_args` : `0x0` le bootloader, `0x8000` la table de partitions, `0x10000` l'application.
+  **Program**. Ne pas cliquer **Erase Flash**.
+- **En ligne de commande — la marque est gardée.** Avec esptool (`pip install esptool`, ou l'exécutable autonome
+  d'Espressif), depuis le dossier décompressé, celui du zip ou de l'artefact : `sh flash.sh [PORT]` (Linux, macOS),
+  `flash.cmd [PORT]` (Windows). Le script écrit les fichiers séparés de `flash_args`, rien d'autre ; sans `PORT`,
+  esptool cherche la carte. À la main, c'est :
 
-```sh
-python -m esptool --chip esp32c3 -p PORT -b 460800 write_flash "@flash_args"
-```
+  ```sh
+  python -m esptool --chip esp32c3 -p PORT -b 460800 write_flash "@flash_args"
+  ```
 
-`PORT` : `/dev/ttyACM0` sous Linux, `COMx` sous Windows (la carte y apparaît comme « Périphérique série USB », sans
-pilote).
+- **Installation propre — la marque est effacée.** L'image unique (`basilisk_<tag>_esp32c3.bin` de la release,
+  `…-full.bin` de l'artefact), écrite en `0x0` avec esptool-js ou esptool : pour une puce neuve ou qui a porté autre
+  chose. Elle remplit la NVS de `0xFF` : la marque est remise à zéro.
 
-- **Carte v1.0** : elle n'a ni bouton BOOT ni bouton RESET, et la broche qui choisit le mode de démarrage (GPIO9) porte
-  FAULT_LOGIC, tirée haut par la carte : aucun mode de téléchargement ne s'y force à la main. Le flash par l'USB
-  n'est pas encore validé au banc sur cette carte, ni sur un C3 vierge ni sur un C3 qui porte déjà le firmware ; aucune
-  procédure de récupération n'est établie.
+`PORT` : `/dev/ttyACM0` sous Linux, `/dev/cu.usbmodem…` sous macOS, `COMx` sous Windows (la carte y apparaît comme
+« Périphérique série USB »), sans pilote.
 
 ### Le construire soi-même
 
