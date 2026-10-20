@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: captain <captain@lcars.local>
+Date: Mon, 19 Oct 2026 18:55:18 +0200
+Subject: [PATCH 7/8] Pinefeat CEF: don't take the rest of a stale line for the
+ next reply
+
+A reply that comes after its command's timeout (CEF_TIMEOUT) stays on
+the line. sendCommand() flushed the input before each command and after
+each reply, but tcflush() discards only what is already received: when
+it cuts a late reply in two, the rest arrives after the flush and is
+read as the reply to the next command, which takes it for its own (a
+number for a position, an `ok` for an acknowledgement).
+
+The input still pending before a command is now read and discarded
+instead of flushed, which shows where it ends: if it ends inside a line,
+the rest of that line is read up to its delimiter and discarded before
+the reply. The input is no longer flushed after the reply: what follows
+it is left to the next command, which discards it the same way. The
+output is flushed before each command, as before.
+
+This fixes the case of a late reply partly received when the next
+command is sent. A late reply that arrives whole after the next command
+was sent is still taken for its reply: the protocol carries nothing that
+ties a reply to its command.
+
+The cost: if the rest of a stale fragment never arrives (a controller
+that stopped mid-line), the next command's reply is taken for that rest
+and discarded, and the command fails after CEF_TIMEOUT, as when no reply
+comes. The line is clean again for the command after it.
+---
+ drivers/focuser/pinefeat_cef.cpp | 33 +++++++++++++++++++++++++++++---
+ 1 file changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
+index 5f9d01b..82baefb 100644
+--- a/drivers/focuser/pinefeat_cef.cpp
++++ b/drivers/focuser/pinefeat_cef.cpp
+@@ -24,9 +24,12 @@
+ 
+ #include <connectionplugins/connectionserial.h>
+ 
++#include <algorithm>
+ #include <cstring>
++#include <sys/ioctl.h>
+ #include <termios.h>
+ #include <thread>
++#include <unistd.h>
+ 
+ #define ERR_NC(res) (strcmp(res, "nc") == 0 ? "lens is not attached" : res)
+ 
+@@ -526,7 +529,20 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
+ {
+     int nbytes_written = 0, nbytes_read = 0, rc = -1;
+ 
+-    tcflush(PortFD, TCIOFLUSH);
++    // The input still pending is stale (a reply that came after its command's timeout): it is read and discarded,
++    // as tcflush did, and if it ends inside a line, the rest of that line, still to come, is not this command's
++    // reply either
++    bool midLine = false;
++    int pending = 0;
++    while (ioctl(PortFD, FIONREAD, &pending) == 0 && pending > 0)
++    {
++        char stale[CEF_BUF];
++        ssize_t n = read(PortFD, stale, std::min(pending, int(sizeof(stale))));
++        if (n <= 0)
++            break;
++        midLine = stale[n - 1] != CEF_DEL;
++    }
++    tcflush(PortFD, TCOFLUSH);
+ 
+     LOGF_DEBUG("CMD <%s>", cmd);
+ 
+@@ -544,6 +560,19 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
+         return true;
+     }
+ 
++    char c = 0;
++    while (midLine)
++    {
++        if ((rc = tty_read(PortFD, &c, 1, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
++        {
++            char errstr[MAXRBUF] = {0};
++            tty_error_msg(rc, errstr, MAXRBUF);
++            LOGF_ERROR("Serial read error: %s.", errstr);
++            return false;
++        }
++        midLine = c != CEF_DEL;
++    }
++
+     if ((rc = tty_nread_section(PortFD, res, CEF_BUF, CEF_DEL, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
+     {
+         char errstr[MAXRBUF] = {0};
+@@ -559,7 +588,5 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
+ 
+     LOGF_DEBUG("RES <%s>", res);
+ 
+-    tcflush(PortFD, TCIOFLUSH);
+-
+     return true;
+ }

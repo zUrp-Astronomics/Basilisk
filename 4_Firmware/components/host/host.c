@@ -2,7 +2,8 @@
  * AUTHOR: engineer
  * DATE: 2026-10-04
  * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte ; ticket #594 : le capteur de la carte (`z`,
- *         `:GT#`, la ligne `* sht40`, stack_sensor de DEBUG)
+ *         `:GT#`, la ligne `* sht40`, stack_sensor de DEBUG) ; ticket #641 : le seuil de condensation dans `z` (point de
+ *         rosée ou de givre)
  *
  * La couche HOTE : la table de traduction de la spec, § 4.5.1 à § 4.5.6, lettre par lettre ; PROTOCOL.md donne la
  * forme exacte des lignes. */
@@ -469,14 +470,50 @@ static void line_t(const bsk_status_t *st, char *out, size_t cap)
              h.last_op, tri(st->mf), tri(st->oss), ring_role(st->ring));
 }
 
-/* `z` (PROTOCOL.md § 2) : la température et l'humidité relative du capteur de la carte, en centièmes écrits avec deux
- * décimales, `<°C> <%RH>` (le signe de la température à part : -0.50), ou `-` quand elles sont inconnues
- * (bsk_sensor.h) : jamais un nombre. L'humidité est bornée à 0..100 %RH (bsk_sensor.h). Dans tout état, objectif ou
- * non. */
+/* Le seuil de condensation sur l'optique (PROTOCOL.md § 2, `z`), en centièmes de °C arrondis au plus proche, calculé de
+ * la mesure `v` (connue) : le point de rosée quand il est positif ou nul, le point de givre quand il est négatif (sous
+ * 0 °C, c'est le givre qui se forme, à un seuil plus haut que le point de rosée sur l'eau ; décision de l'humain du
+ * 2026-10-19). Faux quand il n'est pas défini : jamais un nombre inventé.
+ *
+ * Les formules : guide CIMO de l'OMM (WMO-No. 8, « Guide to Instruments and Methods of Observation », partie I,
+ * chapitre 4, annexe 4.B, « Formulae for the computation of measures of humidity ») :
+ *   pression de vapeur saturante sur l'eau     e_w(t) = 6,112 exp(17,62 t / (243,12 + t)) hPa, de -45 à 60 °C ;
+ *   pression de vapeur saturante sur la glace  e_i(t) = 6,112 exp(22,46 t / (272,62 + t)) hPa, de -65 à 0 °C ;
+ *   point de rosée  t_d = 243,12 L / (17,62 - L), de -45 à 60 °C ; point de givre  t_f = 272,62 L / (22,46 - L), de -65
+ *   à 0 °C ; L = ln(e' / (6,112 f(p))), e' la pression de vapeur de l'air, f(p) son facteur d'accroissement ;
+ *   l'humidité relative U = 100 e' / (f(p) e_w(t)) %, rapportée à l'eau à toute température.
+ * D'où L = ln(U / 100) + 17,62 t / (243,12 + t) : f(p) se simplifie, la pression de l'air n'entre pas dans le calcul.
+ * L'humidité du SHT40 est prise rapportée à l'eau sous 0 °C aussi, comme celle de l'OMM : sa datasheet ne le dit pas,
+ * c'est une hypothèse.
+ *
+ * Les deux dénominateurs sont positifs (U ≤ 100 % et t ≤ 60 °C : L ≤ 3,5) : t_d et t_f ont le signe de L, et valent 0
+ * ensemble (e_w(0) = e_i(0)). La branche se choisit donc sur L. Non défini : U = 0 (ln 0, aucune vapeur) ; t au-dessus
+ * de 60 °C, hors du domaine de e_w (le SHT40 lit jusqu'à 130 °C) ; t_f sous -65 °C, hors du domaine de e_i (un air très
+ * sec), jugé sur la valeur calculée, avant l'arrondi. t_d reste dans son domaine : 0 ≤ t_d ≤ t ≤ 60 °C.
+ *
+ * Calculé sur la tâche de SESSION, à chaque `z` (comme l'ouverture de `a`, en double) : rien dans la tâche du capteur,
+ * dont la marge de pile est la plus faible que `DEBUG` ait relevée sur la carte (stack_sensor=1672, relevé de l'humain
+ * du 2026-10-19, firmware 0.9). */
+static bool condensation(const bsk_sensor_t *v, long *c)
+{
+    double t = v->t_c / 100.0, l, x;
+    if (v->rh_c == 0 || v->t_c > 6000) return false;
+    l = log(v->rh_c / 10000.0) + 17.62 * t / (243.12 + t);
+    x = l >= 0 ? 243.12 * l / (17.62 - l) : 272.62 * l / (22.46 - l);
+    if (x < -65.0) return false;
+    *c = lround(100.0 * x);
+    return true;
+}
+
+/* `z` (PROTOCOL.md § 2) : la température et l'humidité relative du capteur de la carte, puis le seuil de condensation
+ * (condensation), en centièmes écrits avec deux décimales, `<°C> <%RH> <°C>` (le signe à part : -0.50), le seuil `-`
+ * quand il n'est pas défini ; ou `-` seul quand la mesure est inconnue (bsk_sensor.h) : jamais un nombre. L'humidité
+ * est bornée à 0..100 %RH (bsk_sensor.h). Dans tout état, objectif ou non. */
 static void climate(char *out, size_t cap)
 {
     bsk_sensor_t v;
-    long t;
+    long t, c;
+    size_t n;
     bsk_sensor_read(&v);
     if (v.st != BSK_SENSOR_OK) {
         put(out, cap, "-");
@@ -485,6 +522,12 @@ static void climate(char *out, size_t cap)
     t = v.t_c < 0 ? -(long)v.t_c : (long)v.t_c;
     snprintf(out, cap, "%s%ld.%02ld %ld.%02ld", v.t_c < 0 ? "-" : "", t / 100, t % 100, (long)v.rh_c / 100,
              (long)v.rh_c % 100);
+    n = strlen(out);
+    if (!condensation(&v, &c)) {
+        snprintf(out + n, cap - n, " -");
+        return;
+    }
+    snprintf(out + n, cap - n, " %s%ld.%02ld", c < 0 ? "-" : "", labs(c) / 100, labs(c) % 100);
 }
 
 static void letter(const char *l, const bsk_status_t *st, char *out, size_t cap)

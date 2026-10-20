@@ -56,8 +56,8 @@ en-têtes de code.
 - Pas de dépendance pour économiser vingt lignes. **Le firmware n'en a aucune hors ESP-IDF** —
   c'est une propriété, pas un hasard. L'outillage de développement en a, et elles ne tournent
   jamais sur la carte : Playwright épinglé dans `package.json` (`5_App/test/test_app.js`), Python 3
-  (`tool_station` et son test, le générateur de la table des noms, le `manifest.json` des releases), Node (tests
-  de l'app).
+  (`tool_station` et son test, le générateur de la table des noms, le `manifest.json` des releases, la démonstration
+  du driver INDI), Node (tests de l'app), libindi 2 et astyle (la démonstration du driver INDI).
 - Dire quand on ne sait pas. Sans matériel, on n'affirme aucun comportement de l'objectif : on dit
   ce que prouvent les tests hôte, et face à quel faux objectif.
 - `PROJECT_VER` (`4_Firmware/CMakeLists.txt`) se bumpe **avant** de construire un binaire qu'on livre,
@@ -92,11 +92,16 @@ en-têtes de code.
   répertoire courant : un script se lance depuis n'importe quel répertoire, et un programme de test
   reçoit en argument, obligatoire, ce qu'il lit hors de son répertoire. La CI n'appelle qu'un script
   d'entrée par composant, qui vit dans ce composant (`5_App/run.sh`, `4_Firmware/run.sh`,
-  `4_Firmware/build.sh`, `5_App/tool_station/run.sh`, `6_Driver/indi/build.sh`). Un composant qui lit
-  un fichier d'un autre le déclare en une ligne de son script d'entrée, et nulle part ailleurs.
-- **La vitrine est tenue par l'org** : `README.md`, `9_Assets/`, `LICENSE`, `LICENSE-HARDWARE`,
-  `.github/workflows/zurp-site.yml`. Les licences, exceptions comprises, sont dans `README.md`
-  (§ License) : `LICENSE` est la GPL-3.0, `LICENSE-HARDWARE` l'OCL v1.1, `6_Driver/indi/` en LGPL 2.1.
+  `4_Firmware/build.sh`, `5_App/tool_station/run.sh`, `6_Driver/indi/build.sh`, `6_Driver/indi/test.sh`). Un
+  composant qui lit un fichier d'un autre le déclare en une ligne de son script d'entrée, et nulle part ailleurs.
+- **Qui tient la vitrine.** Le `README.md` est au projet, et l'org n'y fait qu'une passe de style pour qu'il reste
+  homogène entre ses produits (l'humain, 2026-10-20). Le manuel de la page produit, `9_Assets/manual/`, est au projet,
+  au format que fixe le site (noms des fichiers, front matter, images : le `content/README.md` du dépôt du site ;
+  l'architecte du site, avec l'accord de l'humain, 2026-10-20). La fiche `9_Assets/zurp.yml` est au format du site, et
+  son `status` ne change que sur décision expresse de l'humain. L'org tient `LICENSE`, `LICENSE-HARDWARE`,
+  `.github/workflows/zurp-site.yml`, l'affiche et les autres images de `9_Assets/`. Les licences, exceptions
+  comprises, sont dans `README.md` (§ License) : `LICENSE` est la GPL-3.0, `LICENSE-HARDWARE` l'OCL v1.1,
+  `6_Driver/indi/` en LGPL 2.1.
 - L'arborescence et le nommage des fichiers de carte suivent le kit README de l'org, section
   « Arborescence et nommage des dépôts produit » : https://github.com/zUrp-Astronomics/.github/blob/main/readme-kit/README.md
 
@@ -195,12 +200,17 @@ travail est `/home/projects.workshop/basilisk/backlog.md` (face atelier, hors du
   produit d'abord, voies manuelles ensuite, est dans `README.md` § Flash ; on y renvoie à la page produit, jamais à
   l'URL d'un manifeste, qui change à chaque release. La version publiée est le tag (`v0.9.0`), `PROJECT_VER` reste
   `<maj>.<min>`.
-- **`6_Driver/indi/` est compilé et lié en CI, pas testé** : le job `indi` (image `ubuntu:24.04`, pas
-  `act-latest`, étiquette mobile) installe `libindi-dev` d'Ubuntu 24.04, **libindi 1.9.9**, et joue
-  `6_Driver/indi/build.sh` : `cmake` puis `make` sur son `CMakeLists.txt` tel quel (branche pkg-config :
-  pas de `FindINDI.cmake`, et `libindi.pc` ne donne aucune bibliothèque, seul `indidriver` est lié).
-  Contre libindi 2.x, seule la syntaxe a été vérifiée (`g++ -fsyntax-only`, 2.2.5), jamais l'édition de
-  liens. Aucun comportement du driver n'est testé ; il n'entre dans aucune suite de § Test.
+- **`6_Driver/indi/` est l'amont d'INDI plus deux séries de patchs, et la CI le démontre hors de § Test** : le
+  driver est `pinefeat_cef` d'indilib, puis `patches/fixes/`, puis `patches/basilisk/` ; ses deux fichiers et les
+  patchs changent dans le même commit (son README, § « Refaire une série »). Le job `indi` (image `ubuntu:26.04`)
+  installe **libindi 2** du PPA d'INDI (`ppa:mutlaqja/ppa`, 2.2.5 au 2026-10-19 ; il ne la publie que pour 26.04 ; la
+  version jugée est celle qu'il sert le jour du run), joue `6_Driver/indi/build.sh` (`cmake` puis `make`, pkg-config,
+  seul `indidriver` lié), puis `6_Driver/indi/test.sh` : les séries vérifiées sur l'amont (identifiants de blob) et au
+  style d'indilib (astyle), puis l'amont, l'amont et les correctifs, et le driver joués sous libindi contre un faux
+  Pinefeat, le driver contre une fausse Basilisk (`test/test_driver.py`). `test.sh` n'est pas dans § Test : la sonde
+  rejoue § Test dans l'image du job `test`, où libindi 2 n'existe pas. Pas de cale libindi 1.9.9 (décision de
+  l'humain : « on construit pas pour le passé »). Le binaire porte le nom de l'amont, `indi_pinefeat_cef_focus` :
+  installé sous `/usr/local`, jamais sous `/usr`, où il remplacerait en silence celui du paquet.
 - **La table des noms d'objectifs est générée** : `4_Firmware/components/host/lens_names.c` et la table
   `LENS_NAMES` de `5_App/emount-bench.html` sortent de `4_Firmware/gen_lens_names.py` (ExifTool `Sony.pm`,
   téléchargé, ou un `Sony.pm` local en argument). On régénère, on n'édite pas à la main ; aucune suite

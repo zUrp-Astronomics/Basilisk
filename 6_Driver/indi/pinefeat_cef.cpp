@@ -2,17 +2,11 @@
     Pinefeat EF / EF-S Lens Controller – Canon® Lens Compatible
     Copyright (C) 2025 Pinefeat LLP (support@pinefeat.co.uk)
 
+    Extended set of the Basilisk E-mount lens controller (`t` reports ext=1)
+    Copyright (C) 2026 zUrp Astronomics
+
     Based on Moonlite focuser
     Copyright (C) 2013-2019 Jasem Mutlaq (mutlaqja@ikarustech.com)
-
-    Basilisk E-mount lens controller: extended set (when `t` reports ext=1),
-    board major-version guard and a 15-character reply terminated, over indilib/indi 1dd9b34f24df6fd74ed45be17823fc937e192b47
-    drivers/focuser/pinefeat_cef.{h,cpp}, changed 2026-10-04; `a` read whole, the version reply judged by its form,
-    `nc` compared whole, unsigned moves, replies shown without their line end, the state read once a second,
-    `w` and `n` asked once a connection, changed 2026-10-08; the board's temperature and relative humidity (`z`),
-    changed 2026-10-11; the bounds of `r` applied and CALIBRATE answered by them against the board (ext=1), changed
-    2026-10-11; driver version 0.9, with the board's, changed 2026-10-11
-    Copyright (C) 2026 zUrp Astronomics
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -35,50 +29,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
-#include <iterator>
 #include <sstream>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <thread>
 #include <unistd.h>
 
-// Driver 0.9. Its major must equal the board's (`v`).
-#define DRIVER_MAJOR 0
-#define DRIVER_MINOR 9
-
-// The board's reply, without the line end that tty_nread_section keeps
-static std::string chomp(const char * res)
-{
-    std::string s(res);
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r'))
-        s.pop_back();
-    return s;
-}
-
-// A reply, as the log shows it: `nc` (PROTOCOL.md § 1: no lens) said in words, anything else as it came, without its
-// line end. The whole reply is compared: upstream's strcmp(res, "nc") > 0 also took any reply sorted after `nc`.
-// The temporary lives to the end of the full expression, the log call that uses it.
-#define ERR_NC(res) (chomp(res) == "nc" ? std::string("lens is not attached") : chomp(res)).c_str()
-
-// The form of a reply to `v`, `<maj>.<min>` (PROTOCOL.md § 2), line end apart. A line of another form is not the
-// reply: opening the port can restart the board, and the lines of its ROM can arrive after `v` was sent (audit R5).
-static bool isVersion(const std::string &line)
-{
-    size_t dot = line.find('.');
-    auto digits = [&](size_t from, size_t to)
-    {
-        return to > from
-               && std::all_of(line.begin() + from, line.begin() + to, [](char c) { return c >= '0' && c <= '9'; });
-    };
-    return dot != std::string::npos && digits(0, dot) && digits(dot + 1, line.size());
-}
+#define ERR_NC(res) (strcmp(res, "nc") == 0 ? "lens is not attached" : res)
 
 static std::unique_ptr<PinefeatCEF> pinefeatCEF(new PinefeatCEF());
 
 PinefeatCEF::PinefeatCEF()
 {
-    setVersion(DRIVER_MAJOR, DRIVER_MINOR);
+    setVersion(1, 2);
 
     FI::SetCapability(FOCUSER_CAN_ABS_MOVE | FOCUSER_CAN_REL_MOVE | FOCUSER_HAS_VARIABLE_SPEED);
 
@@ -87,7 +52,7 @@ PinefeatCEF::PinefeatCEF()
 
 const char * PinefeatCEF::getDefaultName()
 {
-    return "Basilisk E-mount Lens";
+    return "Pinefeat EF Lens Controller";
 }
 
 bool PinefeatCEF::initProperties()
@@ -98,26 +63,27 @@ bool PinefeatCEF::initProperties()
     FocusSpeedNP[0].setStep(1);
     FocusSpeedNP[0].setValue(1);
 
+    FocusMaxPosNP[0].setMinMax(0, 32767);
     FocusMaxPosNP[0].setStep(1);
+    FocusMaxPosNP[0].setValue(0);
 
     FocusRelPosNP[0].setMinMax(0, 32767);
     FocusRelPosNP[0].setStep(1);
     FocusRelPosNP[0].setValue(0);
 
+    FocusAbsPosNP[0].setMinMax(0, 32767);
     FocusAbsPosNP[0].setStep(1);
     FocusAbsPosNP[0].setValue(0);
-
-    resetLimits();
 
     CalibrateSP[0].fill("CALIBRATE", "Calibrate", ISS_OFF);
     CalibrateSP.fill(m_defaultDevice->getDeviceName(), "CALIBRATE", "Calibrate", MAIN_CONTROL_TAB, IP_RW, ISR_ATMOST1, 60,
                      IPS_OK);
 
-    ApertureAbsNP[0].fill("APERTURE_ABSOLUTE", "f-stop", "%.f", 0.0, 327.67, 0.0, 0.0);
+    ApertureAbsNP[0].fill("APERTURE_ABSOLUTE", "f-stop", "%.1f", 0.0, 327.67, 0.0, 0.0);
     ApertureAbsNP.fill(getDeviceName(), "ABS_APERTURE", "Absolute Aperture", MAIN_CONTROL_TAB, IP_WO,
                        60, IPS_OK);
 
-    ApertureRelNP[0].fill("APERTURE_RELATIVE", "f-stop", "%.f", -327.68, 327.67, 0.0, 0.0);
+    ApertureRelNP[0].fill("APERTURE_RELATIVE", "f-stop", "%.1f", -327.68, 327.67, 0.0, 0.0);
     ApertureRelNP.fill(getDeviceName(), "REL_APERTURE", "Relative Aperture", MAIN_CONTROL_TAB, IP_WO,
                        60, IPS_OK);
 
@@ -130,6 +96,7 @@ bool PinefeatCEF::initProperties()
     FirmwareTP[0].fill("FIRMWARE_VERSION", "Version", "Unknown");
     FirmwareTP.fill(getDeviceName(), "FIRMWARE_VERSION", "Firmware", INFO_TAB, IP_RO, 0, IPS_IDLE);
 
+    // Extended set, defined only when `t` reports ext=1
     ApertureNP[0].fill("FNUMBER", "f-stop", "%.1f", 0.0, 327.67, 0.0, 0.0);
     ApertureNP.fill(getDeviceName(), "APERTURE", "Aperture", MAIN_CONTROL_TAB, IP_RO, 0, IPS_IDLE);
 
@@ -148,16 +115,19 @@ bool PinefeatCEF::initProperties()
     RebootSP.fill(getDeviceName(), "LENS_REBOOT", "Lens", MAIN_CONTROL_TAB, IP_RW, ISR_ATMOST1, 60, IPS_OK);
 
     LensTP[0].fill("LENS_NAME", "Name", nullptr);
-    LensTP[1].fill("LENS_FIRMWARE", "Firmware", nullptr);
-    LensTP[2].fill("LENS_MODULE", "Module", nullptr);
     LensTP.fill(getDeviceName(), "LENS_INFO", "Lens", "Lens", IP_RO, 0, IPS_IDLE);
 
-    // The range is the sensor's (SHT40 datasheet § 4.5: -45 to 130 °C, the humidity bounded to 0-100 %RH by the board)
+    // The range is the sensor's (SHT40: -45 to 130 °C, the humidity bounded to 0-100 %RH by the board)
     TemperatureNP[0].fill("TEMPERATURE", "Celsius", "%6.2f", -45, 130, 0, 0);
     TemperatureNP.fill(getDeviceName(), "FOCUS_TEMPERATURE", "Temperature", MAIN_CONTROL_TAB, IP_RO, 0, IPS_OK);
 
     HumidityNP[0].fill("HUMIDITY", "%RH", "%6.2f", 0, 100, 0, 0);
     HumidityNP.fill(getDeviceName(), "FOCUS_HUMIDITY", "Humidity", MAIN_CONTROL_TAB, IP_RO, 0, IPS_OK);
+
+    // The board's threshold of condensation on the optics: the dew point when it is 0 or above, the frost point below;
+    // its range is the one the board computes it in (-65 to 60 °C)
+    DewPointNP[0].fill("DEW_POINT", "Celsius (frost point below 0)", "%6.2f", -65, 60, 0, 0);
+    DewPointNP.fill(getDeviceName(), "FOCUS_DEW_POINT", "Dew or frost point", MAIN_CONTROL_TAB, IP_RO, 0, IPS_OK);
 
     serialConnection->setDefaultBaudRate(Connection::Serial::B_115200);
 
@@ -172,6 +142,8 @@ bool PinefeatCEF::updateProperties()
 
     if (isConnected())
     {
+        positionError.clear();
+
         defineProperty(FirmwareTP);
         defineProperty(FocusDistanceTP);
         defineProperty(CalibrateSP);
@@ -179,14 +151,11 @@ bool PinefeatCEF::updateProperties()
         defineProperty(ApertureAbsNP);
         defineProperty(ApertureRelNP);
 
-        int32_t pos, min, max;
+        int32_t pos, max;
         std::string dist, aper;
-        bool limitsRead = readFocusPosition(pos)
-                          && (max = pos, 1)
-                          && readFocusMaxPosition(min, max);
-        if (ext && limitsRead)
-            applyLimits(min, max);
-        if (limitsRead
+        if (readFocusPosition(pos)
+                && (max = pos, 1)
+                && readFocusMaxPosition(max)
                 && readFocusDistance(dist)
                 && readApertureRange(aper))
         {
@@ -206,7 +175,7 @@ bool PinefeatCEF::updateProperties()
             // The board keeps no LED level (100 at each start): the saved one is sent again
             loadConfig(true, LedNP.getName());
             readLed(IPS_OK);
-            readExtended(true);
+            readExtended();
         }
     }
     else
@@ -236,7 +205,7 @@ bool PinefeatCEF::updateProperties()
 void PinefeatCEF::updateProperties(const int32_t pos, const int32_t max, const std::string dist, const std::string aper)
 {
     FocusAbsPosNP[0].setValue(pos);
-    // Extended set: the state a move ended in (TimerHit) stays until the next one; only a BUSY ends here
+    // Extended set: the state a move ended in (TimerHit) stays until the next one; only a Busy ends here
     if (!ext || FocusAbsPosNP.getState() == IPS_BUSY)
         FocusAbsPosNP.setState(IPS_OK);
     FocusAbsPosNP.apply();
@@ -265,27 +234,18 @@ void PinefeatCEF::updateProperties(const int32_t pos, const int32_t max, const s
     ApertureRangeTP.apply();
 }
 
-// Three tries of `v`. A `v` sent while the board restarts (opening the port can restart it) is lost: its read ends at
-// CEF_TIMEOUT, and the next try goes; the lines of its ROM are not taken for the reply (readFirmwareVersion).
 bool PinefeatCEF::Handshake()
 {
     for (int i = 0; i < 3; i++)
     {
         if (readFirmwareVersion())
         {
-            if (firmwareMajor != DRIVER_MAJOR)
-            {
-                LOGF_ERROR("Board firmware %s does not match driver %d.%d: their major versions must be equal.",
-                           chomp(FirmwareTP[0].getText()).c_str(), DRIVER_MAJOR, DRIVER_MINOR);
-                return false;
-            }
-
-            // A Pinefeat controller answers `er` to `t`: only a board that reports ext=1 gets the extended set
+            // Extended set: only a controller that reports ext=1 to `t` gets it (a Pinefeat controller answers `er`)
             char res[EXT_BUF] = {0};
             ext = false;
-            if (sendCommand("t\n", res, EXT_BUF - 1))
+            if (sendCommand("t\n", res, EXT_BUF))
             {
-                std::istringstream line(chomp(res));
+                std::istringstream line(res);
                 std::string token;
                 while (line >> token)
                     ext = ext || token == "ext=1";
@@ -294,14 +254,12 @@ bool PinefeatCEF::Handshake()
             uint32_t cap = FOCUSER_CAN_ABS_MOVE | FOCUSER_CAN_REL_MOVE | FOCUSER_HAS_VARIABLE_SPEED;
             FI::SetCapability(ext ? cap | FOCUSER_CAN_ABORT : cap);
 
-            // The range before any bounds of `r`, in this connection too: a past one's lens is not this one, and a
-            // Pinefeat controller gets upstream's
+            // The range before any bounds of `r`, in this connection too: a past lens is not this one, and a Pinefeat
+            // controller gets the range of initProperties
             if (limitsApplied)
                 resetLimits();
 
             tracked = relMove = rebooting = stopWatch = false;
-            std::fill(std::begin(lensNocap), std::end(lensNocap), false);
-            climateNocap = false;
             if (ext)
             {
                 LOG_INFO("Extended set enabled (ext=1).");
@@ -319,30 +277,32 @@ bool PinefeatCEF::Handshake()
     return false;
 }
 
-// `v`: the first line of the form `<maj>.<min>` (isVersion) that comes within CEF_TIMEOUT, read into EXT_BUF so that a
-// longer line of the ROM is skipped whole; none, and the board is not detected (Handshake tries again).
 bool PinefeatCEF::readFirmwareVersion()
 {
+    // Extended set: only a line of the form of a version is the reply (sendCommand), read into EXT_BUF. Opening the
+    // port can restart the Basilisk board, and the lines of its ROM, some longer than CEF_BUF, come after `v` was sent.
     char res[EXT_BUF] = {0};
 
-    if (!sendCommand("v\n", res, EXT_BUF - 1, isVersion))
+    if (!sendCommand("v\n", res, EXT_BUF, true))
         return false;
 
-    std::string version = chomp(res);
     int major, minor;
-    firmwareMajor = sscanf(version.c_str(), "%d.%d", &major, &minor) == 2 ? major : -1;
+    if (sscanf(res, "%d.%d", &major, &minor) == 2)
+    {
+        firmwareMinor = minor;
+    }
 
-    FirmwareTP[0].setText(version);
+    FirmwareTP[0].setText(res);
     FirmwareTP.setState(IPS_OK);
 
-    LOGF_INFO("Detected firmware version %s.", version.c_str());
+    LOGF_INFO("Detected firmware version %s.", res);
 
     return true;
 }
 
 bool PinefeatCEF::readFocusPosition(int32_t &pos)
 {
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
 
     if (!sendCommand("f\n", res))
         return false;
@@ -350,37 +310,49 @@ bool PinefeatCEF::readFocusPosition(int32_t &pos)
     int rc = sscanf(res, "%d", &pos);
     if (rc <= 0)
     {
-        LOGF_ERROR("Can't read focus position: %s.", ERR_NC(res));
+        // Logged once, not at each refresh while it lasts (no lens: `nc` until one is attached)
+        if (positionError != res)
+            LOGF_ERROR("Can't read focus position: %s.", ERR_NC(res));
+        positionError = res;
         return false;
     }
 
+    positionError.clear();
     return true;
 }
 
-// `r`, `<min>-<max>`: both bounds. Read as upstream's `%*d-%d`, which took the high one alone: the same replies are
-// refused (upstream's rc <= 0 is this rc < 2), the low one is only used against the board (applyLimits)
-bool PinefeatCEF::readFocusMaxPosition(int32_t &min, int32_t &max)
+bool PinefeatCEF::readFocusMaxPosition(int32_t &pos)
 {
-    char res[CEF_RES] = {0};
+    if (firmwareMinor < 3)
+    {
+        return true;
+    }
+
+    char res[CEF_BUF] = {0};
 
     if (!sendCommand("r\n", res))
         return false;
 
-    int rc = sscanf(res, "%d-%d", &min, &max);
-    if (rc < 2)
+    int rc = sscanf(res, "%*d-%d", &pos);
+    if (rc <= 0)
     {
         LOGF_ERROR("Can't read max focus position: %s.", ERR_NC(res));
         return false;
     }
 
+    // Extended set: both bounds are the lens's own, the range of the position (applyLimits)
+    int32_t min;
+    if (ext && sscanf(res, "%d-", &min) == 1)
+        applyLimits(min, pos);
+
     return true;
 }
 
-// ext=1: the bounds of `r` are the lens's own (PROTOCOL.md, line `r`: published by the lens, nothing measured), and the
-// range of the absolute position and of FOCUS_MAX, whose value is the high bound: a client is not offered a position the
-// board refuses (`er range limits`). Set at each read of `r` that succeeds, sent to the clients only when they changed:
-// a new lens, or a FOCUS_MAX written by a client or the config, which INDI::Focuser turns into an absolute range from 0.
-// A read that fails changes nothing: the last known bounds stay (no lens, and the board refuses a goto anyway).
+// Extended set: the bounds of `r` are the lens's own (published by the lens, nothing measured), and the range of the
+// absolute position and of FOCUS_MAX, whose value is the high bound: a client is not offered a position the board
+// refuses (`er range limits`). Set at each read of `r` that succeeds, sent to the clients only when they changed: a new
+// lens, or a FOCUS_MAX written by a client or the config, which INDI::Focuser turns into an absolute range from 0. A
+// read that fails changes nothing: the last known bounds stay.
 void PinefeatCEF::applyLimits(int32_t min, int32_t max)
 {
     limitsApplied = true;
@@ -400,7 +372,8 @@ void PinefeatCEF::applyLimits(int32_t min, int32_t max)
     LOGF_INFO("Lens focus range %d-%d.", min, max);
 }
 
-// initProperties' range of the absolute position and of FOCUS_MAX, upstream's: the one before any bounds of `r`
+// Extended set: the range of the absolute position and of FOCUS_MAX that initProperties sets, the one before any
+// bounds of `r`
 void PinefeatCEF::resetLimits()
 {
     FocusMaxPosNP[0].setMinMax(0, 32767);
@@ -411,38 +384,36 @@ void PinefeatCEF::resetLimits()
 
 bool PinefeatCEF::readFocusDistance(std::string &result)
 {
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
 
     if (!sendCommand("d\n", res))
         return false;
 
-    result = chomp(res);
+    result = res;
     return true;
 }
 
-// `a` is read into EXT_BUF, as `t`: a reply longer than 15 characters (an older board's `er nocap aperture`) is read
-// whole, not cut by an overflow that fails the connection and every refresh (audit S2)
 bool PinefeatCEF::readApertureRange(std::string &result)
 {
-    char res[EXT_BUF] = {0};
+    char res[CEF_BUF] = {0};
 
-    if (!sendCommand("a\n", res, EXT_BUF - 1))
+    if (!sendCommand("a\n", res))
         return false;
 
-    result = chomp(res);
+    result = res;
     return true;
 }
 
 bool PinefeatCEF::isNotMoving()
 {
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
     return sendCommand("e\n", res) && strstr(res, "n");
 }
 
 bool PinefeatCEF::moveFocusAbs(uint32_t position)
 {
     char cmd[CEF_BUF] = {0};
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
     snprintf(cmd, CEF_BUF, "f%u\n", position);
 
     if (!sendCommand(cmd, res))
@@ -460,7 +431,7 @@ bool PinefeatCEF::moveFocusAbs(uint32_t position)
 bool PinefeatCEF::moveFocusRel(FocusDirection dir, uint32_t offset)
 {
     char cmd[CEF_BUF] = {0};
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
     snprintf(cmd, CEF_BUF, "f%s%u\n", (dir == FOCUS_INWARD) ? "-" : "+", offset);
 
     if (!sendCommand(cmd, res))
@@ -478,7 +449,7 @@ bool PinefeatCEF::moveFocusRel(FocusDirection dir, uint32_t offset)
 bool PinefeatCEF::setSpeed(int speed)
 {
     char cmd[CEF_BUF] = {0};
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
     snprintf(cmd, CEF_BUF, "s%d\n", speed);
 
     if (!sendCommand(cmd, res))
@@ -496,7 +467,7 @@ bool PinefeatCEF::setSpeed(int speed)
 bool PinefeatCEF::setApertureAbs(double value)
 {
     char cmd[CEF_BUF] = {0};
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
     snprintf(cmd, CEF_BUF, "a%.6g\n", value);
 
     if (!sendCommand(cmd, res))
@@ -516,7 +487,7 @@ bool PinefeatCEF::setApertureAbs(double value)
 bool PinefeatCEF::setApertureRel(double value)
 {
     char cmd[CEF_BUF] = {0};
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
     snprintf(cmd, CEF_BUF, "a%s%.6g\n", (value < 0) ? "" : "+", value);
 
     if (!sendCommand(cmd, res))
@@ -535,7 +506,7 @@ bool PinefeatCEF::setApertureRel(double value)
 
 bool PinefeatCEF::calibrate()
 {
-    char res[CEF_RES] = {0};
+    char res[CEF_BUF] = {0};
 
     if (!sendCommand("c\n", res))
         return false;
@@ -549,17 +520,12 @@ bool PinefeatCEF::calibrate()
     return true;
 }
 
-// `o`, `j`, `i`, `w`, `n`: once a second while the focuser is still, or now
-void PinefeatCEF::readExtended(bool now)
+// Extended set: `o`, `j`, `i` and `z`, at the connection, after a mark command, and at each refresh while still
+void PinefeatCEF::readExtended()
 {
-    auto t = std::chrono::steady_clock::now();
-    if (!now && std::chrono::duration_cast<std::chrono::seconds>(t - extUpdate).count() < 1)
-        return;
-    extUpdate = t;
-
     char res[EXT_BUF] = {0};
 
-    if (!sendCommand("o\n", res, EXT_BUF - 1))
+    if (!sendCommand("o\n", res, EXT_BUF))
         return;
     double fnum;
     if (sscanf(res, "%lf", &fnum) == 1)
@@ -568,54 +534,45 @@ void PinefeatCEF::readExtended(bool now)
         ApertureNP.setState(IPS_OK);
     }
     else
-        ApertureNP.setState(IPS_IDLE);     // `er nocap ap`: the lens serves no aperture
+        ApertureNP.setState(IPS_IDLE);     // an `er …`: the lens serves no aperture, or it is not known
     ApertureNP.apply();
 
-    memset(res, 0, sizeof(res));
-    if (!sendCommand("j\n", res, EXT_BUF - 1))
+    if (!sendCommand("j\n", res, EXT_BUF))
         return;
-    IPState state = IPS_IDLE;
-    MarkTP[0].setText(extValue(res, state));
-    MarkTP.setState(state);
-    MarkTP.apply();
+    showExtText(MarkTP, res);
 
-    // A letter that answers `er nocap` is not served, in every state (PROTOCOL.md § 2: `w` and `n` today): it is not
-    // asked again in this connection, its field stays empty and weighs nothing in the state, as its `er nocap` did
-    const char * cmds[] = { "i\n", "w\n", "n\n" };
-    state = IPS_IDLE;
-    for (int i = 0; i < 3; i++)
-    {
-        if (lensNocap[i])
-            continue;
-        memset(res, 0, sizeof(res));
-        if (!sendCommand(cmds[i], res, EXT_BUF - 1))
-            return;
-        LensTP[i].setText(extValue(res, state));
-        lensNocap[i] = chomp(res).compare(0, 8, "er nocap") == 0;
-    }
-    LensTP.setState(state);
-    LensTP.apply();
+    if (!sendCommand("i\n", res, EXT_BUF))
+        return;
+    showExtText(LensTP, res);
 
     readClimate();
 }
 
-// `z` (PROTOCOL.md § 2): `<°C> <%RH>` while the board knows them, `-` while it doesn't (no reading yet, the sensor
-// silent, a bad checksum, the bus stuck, a reading too old; no sensor on this board). Ekos takes any value published
-// on FOCUS_TEMPERATURE as it comes, whatever the property's state (plans/sht40.md § 2.1 of the workshop): an unknown
-// value is therefore never published, not even as an old number in an Alert state. Both properties exist only while
-// the board reports a value: defined when one comes, deleted when it is unknown or unread; a client sees no number
-// rather than a stale one. Nothing is computed from them (no dew point) and nothing is compensated.
+// Extended set: a reply as a text field. An `er …` is never shown as a value: the field is empty. The state: Ok with a
+// value; Alert when the value exists but can't be read now (`er nolens`, `er busy boot`, `er fault`); Idle when the
+// board doesn't serve it (`er nocap`)
+void PinefeatCEF::showExtText(INDI::PropertyText &property, const char * res)
+{
+    bool error = strncmp(res, "er", 2) == 0 && (res[2] == ' ' || res[2] == '\0');
+    property[0].setText(error ? "" : res);
+    property.setState(!error ? IPS_OK : strncmp(res, "er nocap", 8) == 0 ? IPS_IDLE : IPS_ALERT);
+    property.apply();
+}
+
+// Extended set, `z`: `<°C> <%RH> <threshold>` while the board knows the temperature and the humidity, `-` while it
+// doesn't (no reading yet, the sensor silent, a bad checksum, the bus stuck, a reading too old). The threshold is the
+// one the board computes, published as it comes, never computed here: the dew point when it is 0 or above, the frost
+// point below; `-` when the board doesn't define it (no humidity, the air above 60 °C, a frost point below -65 °C).
+// Ekos takes any value published on FOCUS_TEMPERATURE as it comes, whatever the property's state: an unknown value is
+// therefore never published, not even as an old number in an Alert state. Each property exists only while the board
+// reports its value: defined when one comes, deleted when it is unknown or unread; a client sees no number rather than
+// a stale one. Any other reply is unknown. Nothing is compensated.
 void PinefeatCEF::readClimate()
 {
-    if (climateNocap)
-        return;
-
     char res[EXT_BUF] = {0};
+    char cond[EXT_BUF] = {0};
     double t, rh;
-    bool known = sendCommand("z\n", res, EXT_BUF - 1) && sscanf(res, "%lf %lf", &t, &rh) == 2;
-    climateNocap = chomp(res).compare(0, 8, "er nocap") == 0;
-
-    if (!known)
+    if (!sendCommand("z\n", res, EXT_BUF) || sscanf(res, "%lf %lf %255s", &t, &rh, cond) != 3)
     {
         climateProperties(false);
         return;
@@ -630,11 +587,28 @@ void PinefeatCEF::readClimate()
     }
     else
         climateProperties(true);
+
+    // The threshold: a number, whole, or the board's `-`
+    char *end = nullptr;
+    double dew = std::strtod(cond, &end);
+    if (end == cond || *end != '\0')
+    {
+        dewPointProperty(false);
+        return;
+    }
+    DewPointNP[0].setValue(dew);
+    if (dewPointDefined)
+        DewPointNP.apply();
+    else
+        dewPointProperty(true);
 }
 
-// TemperatureNP and HumidityNP defined (their values set before) or deleted, each change once
+// Extended set: TemperatureNP and HumidityNP defined (their values set before) or deleted, each change once;
+// DewPointNP goes with them when they are deleted
 void PinefeatCEF::climateProperties(bool define)
 {
+    if (!define)
+        dewPointProperty(false);
     if (define == climateDefined)
         return;
     climateDefined = define;
@@ -652,31 +626,31 @@ void PinefeatCEF::climateProperties(bool define)
     }
 }
 
-// A reply of the extended set, as a field: an `er …` is never shown as a value, the field is empty.
-// The property's state, over its fields: Alert if one is refused for now (`er nolens`, `er busy boot`,
-// `er fault`: the value exists, it can't be read), else Ok if one holds a value, else Idle (`er nocap`:
-// the board doesn't serve it, as `w` and `n` today).
-std::string PinefeatCEF::extValue(const char * res, IPState &state)
+// Extended set: DewPointNP defined (its value set before) or deleted, each change once
+void PinefeatCEF::dewPointProperty(bool define)
 {
-    std::string s = chomp(res);
-    if (s.compare(0, 3, "er ") != 0 && s != "er")
+    if (define == dewPointDefined)
+        return;
+    dewPointDefined = define;
+    if (define)
     {
-        if (state == IPS_IDLE)
-            state = IPS_OK;
-        return s;
+        defineProperty(DewPointNP);
+        LOG_INFO("Board dew or frost point known.");
     }
-    if (s.compare(0, 8, "er nocap") != 0)
-        state = IPS_ALERT;
-    return "";
+    else
+    {
+        deleteProperty(DewPointNP);
+        LOG_INFO("Board dew or frost point unknown: not published.");
+    }
 }
 
-// `k`: the value shown is the one the board reads back
+// Extended set, `k`: the value shown is the one the board reads back
 void PinefeatCEF::readLed(IPState state)
 {
     char res[EXT_BUF] = {0};
     int level;
 
-    if (sendCommand("k\n", res, EXT_BUF - 1) && sscanf(res, "%d", &level) == 1)
+    if (sendCommand("k\n", res, EXT_BUF) && sscanf(res, "%d", &level) == 1)
         LedNP[0].setValue(level);
     else
         state = IPS_ALERT;
@@ -693,16 +667,13 @@ bool PinefeatCEF::ISNewSwitch(const char * dev, const char * name, ISState * sta
         {
             CalibrateSP.reset();
 
-            // ext=1: nothing to calibrate, the bounds of `r` are the lens's own (PROTOCOL.md, line `c`: the board's
-            // `ok` does nothing). CALIBRATE answers them: `r` read again and applied (applyLimits), `c` not sent,
-            // nothing moves, the position never taken as a bound. `r` failing (no lens): Alert, the known bounds stay.
+            // Extended set: nothing to calibrate, the bounds of `r` are the lens's own (the board answers `ok` to `c`
+            // and does nothing). CALIBRATE answers them: `r` read again and applied (readFocusMaxPosition), `c` not
+            // sent, nothing moves, no Busy. `r` failing (no lens): Alert, the known bounds stay.
             if (ext)
             {
-                int32_t min, max;
-                bool read = readFocusMaxPosition(min, max);
-                if (read)
-                    applyLimits(min, max);
-                CalibrateSP.setState(read ? IPS_OK : IPS_ALERT);
+                int32_t max;
+                CalibrateSP.setState(readFocusMaxPosition(max) ? IPS_OK : IPS_ALERT);
                 CalibrateSP.apply();
                 return true;
             }
@@ -735,7 +706,7 @@ bool PinefeatCEF::ISNewSwitch(const char * dev, const char * name, ISState * sta
 
             const char * cmd = i == 0 ? "js\n" : i == 1 ? "jg\n" : i == 2 ? "jx\n" : nullptr;
             char res[EXT_BUF] = {0};
-            if (cmd != nullptr && sendCommand(cmd, res, EXT_BUF - 1) && strstr(res, "ok"))
+            if (cmd != nullptr && sendCommand(cmd, res, EXT_BUF) && strstr(res, "ok"))
             {
                 if (i == 1)
                 {
@@ -749,12 +720,12 @@ bool PinefeatCEF::ISNewSwitch(const char * dev, const char * name, ISState * sta
             {
                 if (cmd != nullptr)
                     LOGF_ERROR("Can't %s: %s.", i == 0 ? "set the mark" : i == 1 ? "go to the mark" : "clear the mark",
-                               chomp(res).c_str());
+                               res);
                 MarkSP.setState(IPS_ALERT);
             }
 
             MarkSP.apply();
-            readExtended(true);
+            readExtended();
             return true;
         }
 
@@ -763,7 +734,7 @@ bool PinefeatCEF::ISNewSwitch(const char * dev, const char * name, ISState * sta
             RebootSP.reset();
 
             char res[EXT_BUF] = {0};
-            if (sendCommand("b\n", res, EXT_BUF - 1) && strstr(res, "ok"))
+            if (sendCommand("b\n", res, EXT_BUF) && strstr(res, "ok"))
             {
                 LOG_INFO("Lens reboot requested.");
                 rebooting = true;
@@ -774,7 +745,7 @@ bool PinefeatCEF::ISNewSwitch(const char * dev, const char * name, ISState * sta
             }
             else
             {
-                LOGF_ERROR("Can't reboot the lens: %s.", chomp(res).c_str());
+                LOGF_ERROR("Can't reboot the lens: %s.", res);
                 RebootSP.setState(IPS_ALERT);
             }
 
@@ -826,9 +797,9 @@ bool PinefeatCEF::ISNewNumber(const char * dev, const char * name, double values
             char res[EXT_BUF] = {0};
             snprintf(cmd, CEF_BUF, "k%ld\n", lround(LedNP[0].getValue()));
 
-            bool ok = sendCommand(cmd, res, EXT_BUF - 1) && strstr(res, "ok");
+            bool ok = sendCommand(cmd, res, EXT_BUF) && strstr(res, "ok");
             if (!ok)
-                LOGF_ERROR("Can't set the LED brightness: %s.", chomp(res).c_str());
+                LOGF_ERROR("Can't set the LED brightness: %s.", res);
 
             readLed(ok ? IPS_OK : IPS_ALERT);
             return ok;
@@ -843,19 +814,20 @@ bool PinefeatCEF::SetFocuserSpeed(int speed)
     return setSpeed(speed);
 }
 
+// Extended set, `q`
 bool PinefeatCEF::AbortFocuser()
 {
-    // FOCUS_ABORT_MOTION reaches this by its name even where it is not defined: no `q` without ext=1
+    // Without ext=1, a focuser that can't abort, as INDI::Focuser makes it: no `q`
     if (!ext)
-        return false;
+        return INDI::Focuser::AbortFocuser();
 
     char res[EXT_BUF] = {0};
-    if (!sendCommand("q\n", res, EXT_BUF - 1))
+    if (!sendCommand("q\n", res, EXT_BUF))
         return false;
 
     if (!strstr(res, "ok"))
     {
-        LOGF_ERROR("Can't abort: %s.", chomp(res).c_str());
+        LOGF_ERROR("Can't abort: %s.", res);
         return false;
     }
 
@@ -890,8 +862,8 @@ IPState PinefeatCEF::MoveRelFocuser(FocusDirection dir, uint32_t ticks)
     return IPS_BUSY;
 }
 
-// Extended set: a move the board accepted (absolute, relative, `jg`) is tracked to its end, read by `g`;
-// it ends the watch of the previous stop
+// Extended set: a move the board accepted (absolute, relative, `jg`) is tracked to its end, read by `g`; it ends the
+// watch of the previous stop
 void PinefeatCEF::moveStarted(bool rel)
 {
     if (!ext)
@@ -901,10 +873,10 @@ void PinefeatCEF::moveStarted(bool rel)
     stopWatch = false;
 }
 
-// Extended set, once `e` answers n after a tracked move: its end, as the state of the focuser position.
-// `g` (PROTOCOL.md § 2): `ok` Ok; `aborted`, the user's own `q` (AbortFocuser: the barrel button sends none),
-// is no failure: Idle, the state INDI::Focuser gives a successful abort; anything else Alert, logged. After
-// `stall` or `aborted`, the stop is watched (watchStop). A position `f` can't read is Alert whatever `g` says.
+// Extended set, once `e` answers n after a tracked move: its end, as the state of the focuser position. `g`: `ok` Ok;
+// `aborted`, the user's own `q` (AbortFocuser: the barrel button sends none), is no failure: Idle, the state
+// INDI::Focuser gives a successful abort; anything else Alert, logged. After `stall` or `aborted`, the stop is watched
+// (watchStop). A position `f` can't read is Alert whatever `g` says.
 IPState PinefeatCEF::moveEnd(bool positionRead)
 {
     std::string g = readMoveResult();
@@ -921,7 +893,7 @@ IPState PinefeatCEF::moveEnd(bool positionRead)
 
     if (g == "stall" || g == "aborted")
     {
-        // `unconfirmed` comes at most 4.5 s after the stop was first sent (PROTOCOL.md § 3): 5 s, a margin
+        // `unconfirmed` comes at most 4.5 s after the stop was first sent: 5 s, a margin
         stopWatch = true;
         stopWatchFrom = g;
         stopWatchEnd = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -930,9 +902,9 @@ IPState PinefeatCEF::moveEnd(bool positionRead)
     return positionRead ? state : IPS_ALERT;
 }
 
-// Extended set: `g` read at each timer pass while the stop is watched. `unconfirmed` turns the position
-// to Alert; any other change of `g` (a move the barrel button launched has ended) or the end of the window
-// ends the watch, and the state of the move's end stays.
+// Extended set: `g` read at each timer pass while the stop is watched. `unconfirmed` turns the position to Alert; any
+// other change of `g` (a move the barrel button launched has ended) or the end of the window ends the watch, and the
+// state of the move's end stays.
 void PinefeatCEF::watchStop()
 {
     if (std::chrono::steady_clock::now() >= stopWatchEnd)
@@ -959,13 +931,13 @@ void PinefeatCEF::watchStop()
     }
 }
 
-// `g`: the result of the last tracked move, without its line end; empty if the board did not reply
+// Extended set, `g`: the result of the last tracked move; empty if the board did not reply
 std::string PinefeatCEF::readMoveResult()
 {
     char res[EXT_BUF] = {0};
-    if (!sendCommand("g\n", res, EXT_BUF - 1))
+    if (!sendCommand("g\n", res, EXT_BUF))
         return "";
-    return chomp(res);
+    return res;
 }
 
 void PinefeatCEF::TimerHit()
@@ -979,27 +951,23 @@ void PinefeatCEF::TimerHit()
     if (ext && stopWatch)
         watchStop();
 
-    // The state is read once a second: lastUpdate moves at each read (upstream set it only at CALIBRATE, and read
-    // `e f r d a` at every pass of the timer, 50 ms, once the first second was gone)
+    // Once a second: the next refresh is a second after this one
     if (elapsed >= 1)
         lastUpdate = now;
 
     if (elapsed >= 1 && isNotMoving())
     {
-        int32_t pos, min, max;
+        int32_t pos, max;
         std::string dist, aper;
         bool positionRead = readFocusPosition(pos);
-        bool limitsRead = positionRead
-                && (max = pos, 1)
-                && readFocusMaxPosition(min, max);
-        if (ext && limitsRead)
-            applyLimits(min, max);
-        bool read = limitsRead
-                && readFocusDistance(dist)
-                && readApertureRange(aper);
+        bool read = positionRead
+                    && (max = pos, 1)
+                    && readFocusMaxPosition(max)
+                    && readFocusDistance(dist)
+                    && readApertureRange(aper);
 
-        // Extended set: a BUSY it set always ends here, `e` at n. A tracked move by `g`, `b` by `f` answering;
-        // Alert if `f` doesn't (no lens, `er fault`)
+        // Extended set: a Busy it set ends here, `e` at n: a tracked move by `g`, `b` by `f` answering; Alert if `f`
+        // doesn't (no lens, `er fault`)
         if (ext && (tracked || rebooting))
         {
             IPState state = tracked ? moveEnd(positionRead) : positionRead ? IPS_OK : IPS_ALERT;
@@ -1019,30 +987,52 @@ void PinefeatCEF::TimerHit()
         {
             updateProperties(pos, max, dist, aper);
         }
+        else
+        {
+            // Stopped, and the state can't be read (no lens, a fault): a move or a calibration still Busy has
+            // failed. Only a successful read ends it otherwise.
+            if (FocusAbsPosNP.getState() == IPS_BUSY)
+            {
+                FocusAbsPosNP.setState(IPS_ALERT);
+                FocusAbsPosNP.apply();
+            }
+
+            if (FocusRelPosNP.getState() == IPS_BUSY)
+            {
+                FocusRelPosNP.setState(IPS_ALERT);
+                FocusRelPosNP.apply();
+            }
+
+            if (FocusMaxPosNP.getState() == IPS_BUSY)
+            {
+                FocusMaxPosNP.setState(IPS_ALERT);
+                FocusMaxPosNP.apply();
+            }
+        }
 
         if (ext)
-            readExtended(false);
+            readExtended();
     }
 
     SetTimer(getCurrentPollingPeriod());
 }
 
-bool PinefeatCEF::sendCommand(const char * cmd, char * res, int size, bool (*isReply)(const std::string &))
+bool PinefeatCEF::sendCommand(const char * cmd, char * res, int size, bool version)
 {
     int nbytes_written = 0, nbytes_read = 0, rc = -1;
 
-    // The pending input is discarded, as tcflush did, but read: a line of the board's log arrives in pieces
-    // (a `* rx` line of LOG ALL is longer than a USB packet), and if the last piece read is not a line's end,
-    // the rest of that line, still to come, is not the reply either
+    // The input still pending is stale (a reply that came after its command's timeout): it is read and discarded,
+    // as tcflush did, and if it ends inside a line, the rest of that line, still to come, is not this command's
+    // reply either
     bool midLine = false;
     int pending = 0;
     while (ioctl(PortFD, FIONREAD, &pending) == 0 && pending > 0)
     {
-        char old[256];
-        ssize_t n = read(PortFD, old, std::min(pending, int(sizeof(old))));
+        char stale[CEF_BUF];
+        ssize_t n = read(PortFD, stale, std::min(pending, int(sizeof(stale))));
         if (n <= 0)
             break;
-        midLine = old[n - 1] != CEF_DEL;
+        midLine = stale[n - 1] != CEF_DEL;
     }
     tcflush(PortFD, TCOFLUSH);
 
@@ -1062,19 +1052,32 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res, int size, bool (*isR
         return true;
     }
 
-    // A `* …` line of the board's log (LOG ON or LOG ALL, left by the bench page) is never the reply: it is
-    // consumed up to its '\n', however long, and the reply is the next line; so is the rest of a line cut
-    // above, and, when the caller gives the reply's form (isReply), a line of another form. Skipping stops
-    // CEF_TIMEOUT after the command: a board that keeps logging and never replies fails as a silent one does.
+    // Extended set: a line of the Basilisk board's log (`* …`, after a LOG ON left by its bench page) is never the
+    // reply, nor, when version is set, a line that is not a version: each is skipped up to its delimiter, until
+    // CEF_TIMEOUT after the command. A Pinefeat controller sends neither: no reply of its starts with '*', and its reply
+    // to `v` is its version.
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(int(CEF_TIMEOUT));
     char c = 0;
-    auto readByte = [&]()
+    for (;;)
     {
+        while (midLine)
+        {
+            if ((rc = tty_read(PortFD, &c, 1, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
+            {
+                char errstr[MAXRBUF] = {0};
+                tty_error_msg(rc, errstr, MAXRBUF);
+                LOGF_ERROR("Serial read error: %s.", errstr);
+                return false;
+            }
+            midLine = c != CEF_DEL;
+        }
+
         if (std::chrono::steady_clock::now() > deadline)
         {
-            LOG_ERROR("Serial read error: no reply among the board's log lines.");
+            LOG_ERROR("Serial read error: no reply among the lines received.");
             return false;
         }
+
         if ((rc = tty_read(PortFD, &c, 1, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
         {
             char errstr[MAXRBUF] = {0};
@@ -1082,49 +1085,37 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res, int size, bool (*isR
             LOGF_ERROR("Serial read error: %s.", errstr);
             return false;
         }
-        return true;
-    };
-
-    if (!readByte())
-        return false;
-    for (;;)
-    {
-        while (c == '*' || midLine)
+        if (c == '*')
         {
-            midLine = false;
-            while (c != CEF_DEL)
-                if (!readByte())
-                    return false;
-            if (!readByte())
-                return false;
+            midLine = true;
+            continue;
         }
-        res[0] = c;
 
-        // At most size bytes, '\n' kept, then a zero, which tty_nread_section does not write when the reply fills
-        // its size: res holds size + 1.
-        // A 15-character reply and its '\n' (`er range limits`) fill CEF_BUF, its zero is res[CEF_BUF].
+        // The rest of the line, after its first byte: at most size bytes in all, as before
+        res[0] = c;
         nbytes_read = 0;
-        if (c != CEF_DEL && (rc = tty_nread_section(PortFD, res + 1, size - 1, CEF_DEL, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
+        if (c != CEF_DEL
+                && (rc = tty_nread_section(PortFD, res + 1, size - 1, CEF_DEL, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
         {
             char errstr[MAXRBUF] = {0};
             tty_error_msg(rc, errstr, MAXRBUF);
             LOGF_ERROR("Serial read error: %s.", errstr);
             return false;
         }
-        res[1 + nbytes_read] = '\0';
+        nbytes_read++;
 
-        if (isReply == nullptr || isReply(chomp(res)))
+        // The reply as a string, without its line end: tty_nread_section keeps the delimiter, and writes no
+        // terminating zero when the reply fills size
+        while (nbytes_read > 0 && (res[nbytes_read - 1] == CEF_DEL || res[nbytes_read - 1] == '\r'))
+            res[--nbytes_read] = '\0';
+
+        int major, minor;
+        if (!version || sscanf(res, "%d.%d", &major, &minor) == 2)
             break;
-        LOGF_DEBUG("Not a reply to %s, skipped: <%s>", chomp(cmd).c_str(), chomp(res).c_str());
-        if (!readByte())
-            return false;
+        LOGF_DEBUG("Not a version, skipped: <%s>", res);
     }
 
     LOGF_DEBUG("RES <%s>", res);
-
-    // What follows the reply is left to the next command's read above, which discards it knowing where its
-    // lines end: flushed here, a log line could be cut and its rest taken for the next reply
-    tcflush(PortFD, TCOFLUSH);
 
     return true;
 }

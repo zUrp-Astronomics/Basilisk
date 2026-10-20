@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: captain <captain@lcars.local>
+Date: Mon, 19 Oct 2026 18:54:56 +0200
+Subject: [PATCH 6/8] Pinefeat CEF: log a position that can't be read once, not
+ at each refresh
+
+Without a lens, `e` reports the focuser still and `f` answers `nc`:
+readFocusPosition() logged "Can't read focus position: lens is not
+attached." at each refresh, once a second, for as long as the lens was
+away.
+
+The error is now logged when it first comes, and again only if the reply
+changes or after a position was read. Each connection logs it anew.
+---
+ drivers/focuser/pinefeat_cef.cpp | 8 +++++++-
+ drivers/focuser/pinefeat_cef.h   | 3 +++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
+index 5b2da96..5f9d01b 100644
+--- a/drivers/focuser/pinefeat_cef.cpp
++++ b/drivers/focuser/pinefeat_cef.cpp
+@@ -100,6 +100,8 @@ bool PinefeatCEF::updateProperties()
+ 
+     if (isConnected())
+     {
++        positionError.clear();
++
+         defineProperty(FirmwareTP);
+         defineProperty(FocusDistanceTP);
+         defineProperty(CalibrateSP);
+@@ -209,10 +211,14 @@ bool PinefeatCEF::readFocusPosition(int32_t &pos)
+     int rc = sscanf(res, "%d", &pos);
+     if (rc <= 0)
+     {
+-        LOGF_ERROR("Can't read focus position: %s.", ERR_NC(res));
++        // Logged once, not at each refresh while it lasts (no lens: `nc` until one is attached)
++        if (positionError != res)
++            LOGF_ERROR("Can't read focus position: %s.", ERR_NC(res));
++        positionError = res;
+         return false;
+     }
+ 
++    positionError.clear();
+     return true;
+ }
+ 
+diff --git a/drivers/focuser/pinefeat_cef.h b/drivers/focuser/pinefeat_cef.h
+index b4c1919..3060819 100644
+--- a/drivers/focuser/pinefeat_cef.h
++++ b/drivers/focuser/pinefeat_cef.h
+@@ -93,4 +93,7 @@ class PinefeatCEF : public INDI::Focuser
+         std::chrono::steady_clock::time_point lastUpdate;
+ 
+         uint16_t firmwareMinor {0};
++
++        // The last reply to `f` that was not a position, logged once; empty once a position is read
++        std::string positionError;
+ };

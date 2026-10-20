@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: captain <captain@lcars.local>
+Date: Mon, 19 Oct 2026 18:54:35 +0200
+Subject: [PATCH 3/8] Pinefeat CEF: show the aperture with one decimal
+
+ABS_APERTURE and REL_APERTURE were formatted "%.f": a client showed
+f/5.6 as 6, f/1.8 as 2, and a relative step of 1/3 stop as 0. The value
+sent to the controller was right (setApertureAbs() writes %.6g), only
+the display rounded it. Both are now formatted "%.1f".
+---
+ drivers/focuser/pinefeat_cef.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
+index a0b1f6b..b335f09 100644
+--- a/drivers/focuser/pinefeat_cef.cpp
++++ b/drivers/focuser/pinefeat_cef.cpp
+@@ -70,11 +70,11 @@ bool PinefeatCEF::initProperties()
+     CalibrateSP.fill(m_defaultDevice->getDeviceName(), "CALIBRATE", "Calibrate", MAIN_CONTROL_TAB, IP_RW, ISR_ATMOST1, 60,
+                      IPS_OK);
+ 
+-    ApertureAbsNP[0].fill("APERTURE_ABSOLUTE", "f-stop", "%.f", 0.0, 327.67, 0.0, 0.0);
++    ApertureAbsNP[0].fill("APERTURE_ABSOLUTE", "f-stop", "%.1f", 0.0, 327.67, 0.0, 0.0);
+     ApertureAbsNP.fill(getDeviceName(), "ABS_APERTURE", "Absolute Aperture", MAIN_CONTROL_TAB, IP_WO,
+                        60, IPS_OK);
+ 
+-    ApertureRelNP[0].fill("APERTURE_RELATIVE", "f-stop", "%.f", -327.68, 327.67, 0.0, 0.0);
++    ApertureRelNP[0].fill("APERTURE_RELATIVE", "f-stop", "%.1f", -327.68, 327.67, 0.0, 0.0);
+     ApertureRelNP.fill(getDeviceName(), "REL_APERTURE", "Relative Aperture", MAIN_CONTROL_TAB, IP_WO,
+                        60, IPS_OK);
+ 

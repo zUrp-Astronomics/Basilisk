@@ -3,12 +3,13 @@
  *         dictionnaire ; une pageerror fait échouer le test
  * AUTHOR: engineer
  * DATE: 2026-10-16
- * STATUS: actif — joué par ../run.sh ; le faux port rend `v` comme une version de carte (0.9), `t` (ext=1 en tête),
+ * STATUS: actif — joué par ../run.sh ; le faux port rend `v` comme une version de carte (1.3), `t` (ext=1 en tête),
  *         `DEBUG` ; la page lit i, r par leur lettre ; la marque sur `j` (lue, posée, rejointe par les boutons),
  *         `m<n>` un déplacement, `u…`, `cm`, `m`, `ms`, `mg`, `mx` inconnues du faux port ; la page n'en envoie aucune,
  *         ni h, c, n, w, l, d, DUMP, SNIFF, SDRIVE, que la carte ne sert pas (ticket #392) ; le démarrage de `b` occupé
  *         plus longtemps qu'une période de `t`, et l'état attendu plutôt qu'un délai fixe (la lecture de `t` à 1 Hz
- *         manquait la fenêtre de 0,8 s selon sa phase) ; `p0`/`p1` tiennent power_off de `t` (ticket #635)
+ *         manquait la fenêtre de 0,8 s selon sa phase) ; `p0`/`p1` tiennent power_off de `t` (ticket #635) ; `z`, la
+ *         température, l'humidité et le seuil de condensation de la carte, affichés objectif monté ou non (ticket #641)
  *
  * Test de l'app dans un navigateur sans carte : un faux port Web Serial qui parle PROTOCOL.md
  * (lettres, Moonlite, labo). Verifie la connexion, le poll, les panneaux, un deplacement, une
@@ -28,27 +29,34 @@ const PAGE = path.resolve(__dirname, '..', 'emount-bench.html');
 const T = {
   fr: { connect: 'Connecter', connected: 'connecté', caps: 'lot étendu (ext=1)', near: '13 723 (proche)', moveEnd: '[app] fin du déplacement',
         stall: '[app] fin du déplacement : stall', stopped: 'arrêté', busyBoot: 'occupé : boot', ready: '· prêt', absent: '· absent (off)',
-        fault: '· FAULT : lost' },
+        fault: '· FAULT : lost',
+        /* `z` : la carte rend 21.37 48.02 9.91, puis -3.05 87.50 -4.27, puis -0.50 0.00 - (le seuil non défini) */
+        dew: ['point de rosée', '21,37 °C', '48,02 %HR', '9,91 °C'], frost: ['point de givre', '-3,05 °C', '87,50 %HR', '-4,27 °C'],
+        noCond: ['point de rosée ou de givre', '-0,50 °C', '0,00 %HR', '—'] },
   en: { connect: 'Connect', connected: 'connected', caps: 'extended set (ext=1)', near: '13,723 (near)', moveEnd: '[app] end of move',
         stall: '[app] end of move: stall', stopped: 'stopped', busyBoot: 'busy: boot', ready: '· ready', absent: '· no lens (off)',
-        fault: '· FAULT: lost' },
+        fault: '· FAULT: lost',
+        dew: ['dew point', '21.37 °C', '48.02 %RH', '9.91 °C'], frost: ['frost point', '-3.05 °C', '87.50 %RH', '-4.27 °C'],
+        noCond: ['dew or frost point', '-0.50 °C', '0.00 %RH', '—'] },
 };
-const norm = s => String(s).replace(/[  ]/g, ' ');   /* l'espace insécable du groupement FR, U+202F ou U+00A0 selon ICU */
+/* l'espace insécable du groupement FR, U+202F ou U+00A0 selon ICU ; le signe moins, U+2212 si ICU le donne */
+const norm = s => String(s).replace(/[  ]/g, ' ').replace(/−/g, '-');
 
 /* ---- simulateur de carte, injecté avant la page ---- */
 function sim() {
   /* boot : `b` rejoue un démarrage, busy=boot pendant 10 réponses à `e` (5 Hz, 2 s au moins) : plus long que la période
      de `t` (1 s), que la page lit pour l'afficher ; à 4 (0,8 s), la lecture de `t` tombait ou non dans la fenêtre selon
      sa phase */
-  const S = { present: true, pos: 16384, min: 13723, max: 30988, moving: 0, fnum: 1.8, busy: '-', target: null, mark: null, limitsAfter: 13723, g: '-', stallNext: false, fault: false, powerOff: false };
+  const S = { present: true, pos: 16384, min: 13723, max: 30988, moving: 0, fnum: 1.8, busy: '-', target: null, mark: null, limitsAfter: 13723, g: '-', stallNext: false, fault: false, powerOff: false, z: '21.37 48.02 9.91' };
   window.__sim = S;
   function reply(cmd) {
     const c = cmd[0];
     if (cmd.startsWith(':')) { const m = cmd.slice(1, -1); if (m === 'GP') return S.pos.toString(16).toUpperCase().padStart(4, '0') + '#'; if (m === 'GI') return S.moving ? '01#' : '00#'; if (m === 'GV') return '10'; return null; }
     if (/^[A-Z]/.test(cmd)) { if (cmd === 'DEBUG') return 'ok reset=poweron dropped=0 move_rc=-'; if (cmd === 'LOG ON') return 'ok log=1 all=0'; return 'er nocap'; }
-    if (c === 'v') return '0.9';
+    if (c === 'v') return '1.3';
     if (c === 't') return `ext=1 present=${S.present ? 1 : 0} boot_state=${!S.present ? 'off' : S.fault ? 'fault' : S.busy === 'boot' ? 'powering' : 'ready'} busy=${S.busy} power_off=${S.powerOff ? 1 : 0} last_op=${S.fault ? 'boot:er:"lost"' : 'boot:ok'} mf=- oss=- ring=-`;
     if (c === 'g') return S.g;                     /* le résultat du dernier déplacement suivi (PROTOCOL.md § 2) */
+    if (cmd === 'z') return S.z;                   /* le capteur de la carte, dans tout état (PROTOCOL.md § 2) */
     if (c === 'p') { if (cmd.length === 1) return '1 1'; S.powerOff = cmd === 'p0'; return 'ok'; }   /* seul power_off de `t` suit */
     if (c === 'b') { S.busy = 'boot'; S.busyN = 10; S.limitsAfter = 13700; return 'ok'; }
     if (!S.present) return 'fread cs'.includes(c) ? 'nc' : 'er nolens';
@@ -105,6 +113,15 @@ async function open(browser, locale, ...init) {
   return { ctx, page };
 }
 
+/* Le capteur de la carte tel que la page l'affiche : [libellé du seuil, température, humidité, seuil], normalisé (norm).
+   La lecture de `z` est à 1 Hz : on attend que la page montre `want`, puis on le vérifie. */
+const climate = page => page.evaluate(() => ['k_cond', 's_temp', 's_rh', 's_cond'].map(id => document.getElementById(id).textContent)).then(a => a.map(norm));
+async function climateIs(page, want, what) {
+  for (let i = 0; i < 30 && JSON.stringify(await climate(page)) !== JSON.stringify(want); i++) await page.waitForTimeout(100);
+  const got = await climate(page);
+  check(JSON.stringify(got) === JSON.stringify(want), what + ' (« ' + got.join(' | ') + ' »)');
+}
+
 /* ---- la page, connexion et panneaux : les mêmes vérifications dans les deux langues ---- */
 async function scenario(browser, lang) {
   console.log('--- page en ' + lang.toUpperCase());
@@ -117,13 +134,14 @@ async function scenario(browser, lang) {
   check(await page.textContent('#connTxt') === X.connected, 'connexion');
   if (fails) { console.log(await page.textContent('#log')); }
   check((await page.textContent('#s_id')).includes('Samyang AF 135mm'), 'identite affichee (i)');
-  check((await page.textContent('#s_board')).startsWith('fw 0.9 · reset poweron · boot ready'), 'la carte, v et DEBUG (« ' + (await page.textContent('#s_board')) + ' »)');
+  check((await page.textContent('#s_board')).startsWith('fw 1.3 · reset poweron · boot ready'), 'la carte, v et DEBUG (« ' + (await page.textContent('#s_board')) + ' »)');
   check(await page.textContent('#s_caps') === X.caps, 'ext lu au lieu de caps');
   if (fails) { console.log(await page.textContent('#log')); console.log(await page.evaluate(() => JSON.stringify(window.__sent))); }
   check(await page.textContent('#s_focus') === '16384', 'position lue par f');
   check(norm(await page.textContent('#scMin')) === X.near, 'bornes lues par r, nombre au format de la langue (« ' + (await page.textContent('#scMin')) + ' »)');
   check(!(await page.isDisabled('#focusRange')), 'curseur focus actif (goto + bornes)');
   check(await page.textContent('#s_fnum') === 'f/1.8', 'ouverture courante par o');
+  await climateIs(page, X.dew, 'z, objectif monté : température, humidité, point de rosée');
   /* L09-16 : ce que la carte ne sert pas n'est plus sur la page */
   for (const id of ['btnHome', 'btnCalib', 'btnDump', 'dumpType', 'btnSniffOn', 'btnSniffOff', 'btnSdriveScan', 'btnSdriveStop', 'sdriveState', 's_mods', 's_fw', 's_focal', 's_dist'])
     check(await page.$('#' + id) === null, 'retiré de la page : #' + id);
@@ -191,9 +209,19 @@ async function scenario(browser, lang) {
   await page.waitForTimeout(1500);
   check((await page.textContent('#s_state')).includes(X.absent), 'objectif disparu : etat absent');
   check(await page.isDisabled('#btnFp100'), 'boutons focus desactives sans objectif');
+  await climateIs(page, X.dew, 'z, sans objectif : toujours lu et affiché');
+  await page.evaluate(() => { window.__sim.z = '-3.05 87.50 -4.27'; });
+  await climateIs(page, X.frost, 'z, sans objectif : un seuil négatif est un point de givre');
+  await page.evaluate(() => { window.__sim.z = '-0.50 0.00 -'; });
+  await climateIs(page, X.noCond, 'z, sans objectif : le seuil non défini (-) s\'affiche « — »');
+  await page.evaluate(() => { window.__sim.z = '-'; });
+  await climateIs(page, [X.noCond[0], '—', '—', '—'], 'z, sans objectif : la mesure inconnue (-) s\'affiche « — »');
+  await page.evaluate(() => { window.__sim.z = '-3.05 87.50 -4.27'; });
   await page.evaluate(() => { window.__sim.present = true; });
   await page.waitForTimeout(1500);
   check((await page.textContent('#s_state')).includes(X.ready), 'objectif revenu');
+  await climateIs(page, X.frost, 'z, objectif monté : un point de givre');
+  await page.evaluate(() => { window.__sim.z = '21.37 48.02 9.91'; });
   /* L09-14 : en fault, le statut le dit avec sa raison, et les panneaux qui ont besoin d'un objectif prêt sont inactifs */
   await page.evaluate(() => { window.__sim.fault = true; });
   await page.waitForTimeout(1500);
@@ -270,7 +298,7 @@ async function toggle(browser) {
   const logBefore = await shown(), linesBefore = await page.evaluate(() => lines.slice());
   const count = c => page.evaluate(c => window.__sent.filter(x => x === c).length, c);
   const nf = await count('f'), nv = await count('v');
-  check(linesBefore.some(l => l.endsWith('[app] carte : firmware 0.9')) && await page.textContent('#connTxt') === T.fr.connected, 'connectée en FR, le journal en FR');
+  check(linesBefore.some(l => l.endsWith('[app] carte : firmware 1.3')) && await page.textContent('#connTxt') === T.fr.connected, 'connectée en FR, le journal en FR');
   await page.click('#btnLang');
   const txt = s => page.textContent(s), attr = (s, a) => page.getAttribute(s, a);
   check(await page.evaluate(() => document.documentElement.lang) === 'en', 'la bascule : <html lang="en">');
@@ -279,6 +307,7 @@ async function toggle(browser) {
         && (await txt('#s_board')).endsWith(' · last op. boot:ok') && (await attr('#btnStop', 'title')).startsWith('q: stop')
         && (await attr('#cliIn', 'placeholder')).startsWith('command (') && await page.title() === 'emount-bench',
         'les textes d\'interface passent en EN sur place, états affichés compris (« ' + [await txt('#s_state'), await txt('#scMin'), await txt('#s_board')].join(' | ') + ' »)');
+  check(JSON.stringify(await climate(page)) === JSON.stringify(T.en.dew), 'le capteur de la carte passe en EN sur place (« ' + (await climate(page)).join(' | ') + ' »)');
   check(await page.evaluate(() => document.getElementById('connDot').classList.contains('on')) && !(await page.isDisabled('#btnDisconnect'))
         && await count('v') === nv && await count('DEBUG') === 1, 'la connexion reste ouverte : ni déconnexion, ni nouveau v, ni nouveau DEBUG');
   await page.waitForTimeout(1000);

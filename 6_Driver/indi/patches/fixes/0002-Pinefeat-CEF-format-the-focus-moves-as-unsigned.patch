@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: captain <captain@lcars.local>
+Date: Mon, 19 Oct 2026 18:54:35 +0200
+Subject: [PATCH 2/8] Pinefeat CEF: format the focus moves as unsigned
+
+moveFocusAbs() and moveFocusRel() wrote their uint32_t argument with %d.
+The format did not match the type: within the range of the properties
+(0 to 32767) nothing visible changed, but a value above INT32_MAX would
+have been sent negative. -Wformat does not see it without
+-Wformat-signedness. Both now use %u; the commands sent within the range
+of the properties are the same.
+---
+ drivers/focuser/pinefeat_cef.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
+index 1b0e095..a0b1f6b 100644
+--- a/drivers/focuser/pinefeat_cef.cpp
++++ b/drivers/focuser/pinefeat_cef.cpp
+@@ -270,7 +270,7 @@ bool PinefeatCEF::moveFocusAbs(uint32_t position)
+ {
+     char cmd[CEF_BUF] = {0};
+     char res[CEF_BUF] = {0};
+-    snprintf(cmd, CEF_BUF, "f%d\n", position);
++    snprintf(cmd, CEF_BUF, "f%u\n", position);
+ 
+     if (!sendCommand(cmd, res))
+         return false;
+@@ -288,7 +288,7 @@ bool PinefeatCEF::moveFocusRel(FocusDirection dir, uint32_t offset)
+ {
+     char cmd[CEF_BUF] = {0};
+     char res[CEF_BUF] = {0};
+-    snprintf(cmd, CEF_BUF, "f%s%d\n", (dir == FOCUS_INWARD) ? "-" : "+", offset);
++    snprintf(cmd, CEF_BUF, "f%s%u\n", (dir == FOCUS_INWARD) ? "-" : "+", offset);
+ 
+     if (!sendCommand(cmd, res))
+         return false;

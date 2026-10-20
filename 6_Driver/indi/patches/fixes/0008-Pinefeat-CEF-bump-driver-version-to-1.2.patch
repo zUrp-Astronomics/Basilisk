@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: captain <captain@lcars.local>
+Date: Mon, 19 Oct 2026 18:55:22 +0200
+Subject: [PATCH 8/8] Pinefeat CEF: bump driver version to 1.2
+
+For the fixes of this series.
+---
+ drivers/focuser/pinefeat_cef.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
+index 82baefb..0f611a2 100644
+--- a/drivers/focuser/pinefeat_cef.cpp
++++ b/drivers/focuser/pinefeat_cef.cpp
+@@ -37,7 +37,7 @@ static std::unique_ptr<PinefeatCEF> pinefeatCEF(new PinefeatCEF());
+ 
+ PinefeatCEF::PinefeatCEF()
+ {
+-    setVersion(1, 1);
++    setVersion(1, 2);
+ 
+     FI::SetCapability(FOCUSER_CAN_ABS_MOVE | FOCUSER_CAN_REL_MOVE | FOCUSER_HAS_VARIABLE_SPEED);
+ 

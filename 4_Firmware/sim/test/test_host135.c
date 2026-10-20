@@ -141,7 +141,7 @@ static void bench(void)
     bsk_session_init(&P);
     bsk_journal_init(phy_sim_now);
     bsk_journal_set(false, false);
-    bsk_host_init("0.9", "poweron");
+    bsk_host_init("1.3", "poweron");
     d2_due = 0;
     run_to(T0);
 }
@@ -193,7 +193,7 @@ static void t_boot(void)
 {
     printf("démarrage : v, t (present, boot_state, last_op), r (les bornes du faux 135), i\n");
     bench();
-    ASK("v", "0.9");
+    ASK("v", "1.3");
     T_HAS("present=0");
     T_HAS("boot_state=off");
     T_HAS("last_op=-:ok");
@@ -209,7 +209,7 @@ static void t_boot(void)
     ASK("c", "er busy boot");                        /* comme f<n> */
     ASK("e", "y");
     run_for(3600 * MS);
-    ASK("v", "0.9");
+    ASK("v", "1.3");
     T_HAS("present=1");
     T_HAS("boot_state=ready");
     T_HAS("last_op=boot:ok");

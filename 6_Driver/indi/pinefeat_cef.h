@@ -2,16 +2,11 @@
     Pinefeat EF / EF-S Lens Controller – Canon® Lens Compatible
     Copyright (C) 2025 Pinefeat LLP (support@pinefeat.co.uk)
 
+    Extended set of the Basilisk E-mount lens controller (`t` reports ext=1)
+    Copyright (C) 2026 zUrp Astronomics
+
     Based on Moonlite focuser
     Copyright (C) 2013-2019 Jasem Mutlaq (mutlaqja@ikarustech.com)
-
-    Basilisk E-mount lens controller: extended set (when `t` reports ext=1),
-    board major-version guard and a 15-character reply terminated, over indilib/indi 1dd9b34f24df6fd74ed45be17823fc937e192b47
-    drivers/focuser/pinefeat_cef.{h,cpp}, changed 2026-10-04; the reply's form given to sendCommand, the letters
-    not served remembered, the base properties seen without a cast under libindi 1.9.9, changed 2026-10-08; the
-    board's temperature and relative humidity (`z`), changed 2026-10-11; the bounds of `r` applied and CALIBRATE
-    answered by them against the board (ext=1), changed 2026-10-11
-    Copyright (C) 2026 zUrp Astronomics
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -32,7 +27,6 @@
 
 #include "indifocuser.h"
 #include <chrono>
-#include <string>
 
 class PinefeatCEF : public INDI::Focuser
 {
@@ -58,9 +52,7 @@ class PinefeatCEF : public INDI::Focuser
     private:
         void updateProperties(const int32_t pos, const int32_t max, const std::string dist, const std::string aper);
         bool readFocusPosition(int32_t &pos);
-        bool readFocusMaxPosition(int32_t &min, int32_t &max);
-        void applyLimits(int32_t min, int32_t max);
-        void resetLimits();
+        bool readFocusMaxPosition(int32_t &pos);
         bool readFocusDistance(std::string &result);
         bool readApertureRange(std::string &result);
         bool readFirmwareVersion();
@@ -71,29 +63,32 @@ class PinefeatCEF : public INDI::Focuser
         bool setApertureAbs(double value);
         bool setApertureRel(double value);
         bool calibrate();
-        void readExtended(bool now);
+
+        // Extended set
+        void applyLimits(int32_t min, int32_t max);
+        void resetLimits();
+        void readExtended();
+        void showExtText(INDI::PropertyText &property, const char * res);
         void readClimate();
         void climateProperties(bool define);
+        void dewPointProperty(bool define);
         void readLed(IPState state);
         std::string readMoveResult();
         IPState moveEnd(bool positionRead);
         void watchStop();
         void moveStarted(bool rel);
-        std::string extValue(const char * res, IPState &state);
 
         /**
          * @brief sendCommand Send a string command to the controller.
          * @param cmd Command to be sent, must already have the necessary delimiter ('\n')
-         * @param res If not nullptr, the reply: read up to the delimiter ('\n'), kept, then a terminating zero.
-         *        Must hold size + 1 bytes (CEF_RES for the default size). If nullptr, no read back is done and the
-         *        function returns true.
-         * @param size At most size bytes are read, the delimiter included.
-         * @param isReply If not nullptr, the form of the reply: a line it refuses (given without its line end) is
-         *        skipped, as a `* …` line is, until one it takes or CEF_TIMEOUT after the command.
+         * @param res If not nullptr, the function will read until it detects the default delimiter ('\n') up to
+         *        size length, and returns the reply as a string, without its line end. If nullptr, no read back is
+         *        done and the function returns true.
+         * @param size The size of res, CEF_BUF by default.
+         * @param version If true, only a line of the form of a version (`<major>.<minor>`) is the reply.
          * @return True if successful, false otherwise.
          */
-        bool sendCommand(const char * cmd, char * res = nullptr, int size = CEF_BUF,
-                         bool (*isReply)(const std::string &) = nullptr);
+        bool sendCommand(const char * cmd, char * res = nullptr, int size = CEF_BUF, bool version = false);
 
         INDI::PropertySwitch CalibrateSP {1};
 
@@ -113,15 +108,13 @@ class PinefeatCEF : public INDI::Focuser
         INDI::PropertySwitch MarkSP {3};        // `js` `jg` `jx`
         INDI::PropertyNumber LedNP {1};         // `k`
         INDI::PropertySwitch RebootSP {1};      // `b`
-        INDI::PropertyText LensTP {3};          // `i` `w` `n`
+        INDI::PropertyText LensTP {1};          // `i`
         INDI::PropertyNumber TemperatureNP {1}; // `z`: FOCUS_TEMPERATURE, the convention Ekos reads
-        INDI::PropertyNumber HumidityNP {1};    // `z`: this driver's own
+        INDI::PropertyNumber HumidityNP {1};    // `z`
+        INDI::PropertyNumber DewPointNP {1};    // `z`: the threshold the board computes
 
         // CEF Buffer Size
         static const uint8_t CEF_BUF { 16 };
-
-        // A reply of CEF_BUF bytes ('\n' included: 15 characters, PROTOCOL.md) and its terminating zero
-        static const uint8_t CEF_RES { CEF_BUF + 1 };
 
         // CEF Command Delimiter
         static const char CEF_DEL { '\n' };
@@ -129,69 +122,35 @@ class PinefeatCEF : public INDI::Focuser
         // CEF Command Timeout
         static const uint8_t CEF_TIMEOUT { 3 };
 
-        // Buffer for the extended replies longer than CEF_BUF (`t`, `i`)
+        // Buffer of the replies of the extended set, some longer than CEF_BUF (`t`, `i`)
         static const int EXT_BUF { 256 };
 
         std::chrono::steady_clock::time_point lastUpdate;
-        std::chrono::steady_clock::time_point extUpdate;
 
-        int firmwareMajor {-1};
+        uint16_t firmwareMinor {0};
+
+        // The last reply to `f` that was not a position, logged once; empty once a position is read
+        std::string positionError;
+
+        // Extended set: `t` reported ext=1 at the connection
         bool ext {false};
 
-        // ext=1: the bounds of `r` are the range of the absolute position and of FOCUS_MAX (applyLimits); set since
-        // the last resetLimits, put back to initProperties' range at the next connection
+        // The bounds of `r` are the range of the absolute position and of FOCUS_MAX (applyLimits), since the last
+        // resetLimits
         bool limitsApplied {false};
 
-        // Extended set: a BUSY it set, ended in TimerHit once `e` answers n
+        // A Busy the extended set has set, ended in TimerHit once `e` answers n
         bool tracked {false};       // a move the driver launched (absolute, relative, `jg`): its end is read by `g`
         bool relMove {false};       // that move was relative: FocusRelPosNP takes its end too
         bool rebooting {false};     // `b`: its end is `e` at n and `f` answering
 
-        // `i` `w` `n` of LensTP that answered `er nocap` in this connection: not served, not asked again
-        bool lensNocap[3] {};
-
-        // `z`: TemperatureNP and HumidityNP are defined only while the board reports a value (readClimate);
-        // `er nocap` (a board without `z`), not asked again in this connection
+        // `z`: TemperatureNP and HumidityNP are defined only while the board reports a value, DewPointNP only while it
+        // reports its threshold (readClimate)
         bool climateDefined {false};
-        bool climateNocap {false};
+        bool dewPointDefined {false};
 
         // After `stall` or `aborted`, `g` is read again until stopWatchEnd: the stop may turn `unconfirmed`
         bool stopWatch {false};
         std::string stopWatchFrom;
         std::chrono::steady_clock::time_point stopWatchEnd;
-
-#if INDI_VERSION_MAJOR < 2
-        // libindi 1.9.9: INDI::Focuser's own properties are plain INumberVectorProperty, without the
-        // accessors this file uses. Same names, same structs, seen through those accessors. A field is reached
-        // through NumberField, which holds the INumber itself: an INumber is not a WidgetView<INumber>, and a cast
-        // to one would be undefined behaviour (audit R9).
-        struct NumberField
-        {
-            INumber &n;
-            void setMinMax(double min, double max) { n.min = min; n.max = max; }
-            void setStep(double step) { n.step = step; }
-            void setValue(double value) { n.value = value; }
-            double getValue() const { return n.value; }
-            double getMin() const { return n.min; }
-            double getMax() const { return n.max; }
-            const char * getName() const { return n.name; }
-        };
-        struct NumberView
-        {
-            INumberVectorProperty &p;
-            NumberField operator[](size_t i) const
-            {
-                return NumberField { p.np[i] };
-            }
-            void setState(IPState s) { p.s = s; }
-            IPState getState() const { return p.s; }
-            void apply() const { IDSetNumber(&p, nullptr); }
-            void updateMinMax() { IUUpdateMinMax(&p); }
-            const char * getName() const { return p.name; }
-        };
-        NumberView FocusSpeedNP { INDI::FocuserInterface::FocusSpeedNP };
-        NumberView FocusAbsPosNP { INDI::FocuserInterface::FocusAbsPosNP };
-        NumberView FocusRelPosNP { INDI::FocuserInterface::FocusRelPosNP };
-        NumberView FocusMaxPosNP { INDI::FocuserInterface::FocusMaxPosNP };
-#endif
 };

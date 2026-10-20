@@ -25,13 +25,13 @@ async function fireSleeps(s) { for (let n = 0; n < 50; n++) { const t = [...s.ti
 const wait = ms => new Promise(r => global.setTimeout(r, ms));
 /* une promesse du transport, ou undefined apres 50 ms : un test ne reste jamais pendu (node sortirait en 0 sans verdict) */
 const got = p => Promise.race([p, wait(50)]);
-/* apres un timeout, le transport envoie `v` avant la commande suivante ; on lui repond la version de la carte (0.9)
+/* apres un timeout, le transport envoie `v` avant la commande suivante ; on lui repond la version de la carte (1.3)
    puis on laisse passer le silence requis */
-async function answerSync(s) { s.run("onLine('0.9')"); await wait(110); await fireSleeps(s); await flush(); }
+async function answerSync(s) { s.run("onLine('1.3')"); await wait(110); await fireSleeps(s); await flush(); }
 let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ') + m); if (!c) fails++; };
 (async () => {
-  { const s = setup(); s.run("writer={write:async()=>onLine('0.9')}");
-    check(await s.run("ask('v',true)") === '0.9', 'reponse immediate recue (attente installee avant l ecriture)'); }
+  { const s = setup(); s.run("writer={write:async()=>onLine('1.3')}");
+    check(await s.run("ask('v',true)") === '1.3', 'reponse immediate recue (attente installee avant l ecriture)'); }
   { const s = setup(); s.run("globalThis.sent=[]; writer={write:async b=>sent.push(new TextDecoder().decode(b))}");
     const a = s.run("ask('f',true)"), b = s.run("ask('e',true)"); await flush();
     check(s.run('sent.length') === 1, 'deux demandes : une seule en vol');
@@ -45,7 +45,7 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     s.run("onLine('16384')"); await flush();
     check(s.run("waiter!==null&&waiter.cmd==='v'"), 'la tardive 16384 est ignoree (forme invalide pour v), la resynchronisation attend toujours');
     await answerSync(s);
-    check(s.run('sent.length') === 3 && s.run('sent[2]') === 'e\n', '0.9 recu puis silence -> e part');
+    check(s.run('sent.length') === 3 && s.run('sent[2]') === 'e\n', '1.3 recu puis silence -> e part');
     s.run("onLine('n')"); check(await b === 'n', 'puis la vraie reponse n arrive a e'); }
   { /* deux goto de meme forme : f20000 expire, son « ok » tardif ne doit pas servir f21000 */
     const s = setup(); s.run("globalThis.sent=[]; writer={write:async b=>sent.push(new TextDecoder().decode(b))}"); const a = s.run("ask('f20000',true)"); await flush(); expire(s); check(await a === null, 'f20000 expire');
@@ -83,10 +83,10 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     const s = setup(); s.run("globalThis.sent=[]; writer={write:async b=>sent.push(new TextDecoder().decode(b))}");
     const a = s.run("ask('f',true)"); await flush(); expire(s); await a;
     const b = s.run("ask('e',true)"); await flush();
-    s.run("onLine('0.9')"); await flush();
+    s.run("onLine('1.3')"); await flush();
     const journal = () => s.run("onLine('* lens pos=5')");
     journal(); await fireSleeps(s);                                         /* 50 attentes tombent, bien moins de 100 ms reelles apres 1.3 */
-    check(s.run("sent[sent.length-1]") === 'v\n', 'moins de 100 ms apres 0.9, e n est pas parti (pas de plafond qui passe outre le silence)');
+    check(s.run("sent[sent.length-1]") === 'v\n', 'moins de 100 ms apres 1.3, e n est pas parti (pas de plafond qui passe outre le silence)');
     for (let n = 0; n < 25 && s.run("sent[sent.length-1]") !== 'e\n'; n++) { journal(); await wait(20); await fireSleeps(s); } /* journal a ~50 lignes/s, sans reponse, 500 ms au plus */
     check(s.run("sent[sent.length-1]") === 'e\n', 'sous un journal soutenu, e part apres 100 ms sans ligne de reponse');
     s.run("onLine('n')"); check(await Promise.race([b, wait(50)]) === 'n', 'et recoit sa reponse'); }
@@ -117,7 +117,7 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     s.run("onLine('ok')"); await flush();                                   /* le ok tardif de h */
     check(s.run("waiter!==null&&waiter.cmd==='v'") && s.run('sent[sent.length-1]') === 'v\n', 'le ok tardif de h n est pas pris, q n est pas parti');
     await answerSync(s);
-    check(s.run('sent[sent.length-1]') === 'q\n', '0.9 puis silence : q part, avant le f en attente');
+    check(s.run('sent[sent.length-1]') === 'q\n', '1.3 puis silence : q part, avant le f en attente');
     s.run("onLine('ok')"); check(await got(q2) === 'ok', 'q recoit SON ok'); await flush();
     check(s.run('sent[sent.length-1]') === 'f\n', 'puis f');
     s.run("onLine('16384')"); check(await got(f2) === '16384', 'f servie'); }
@@ -146,12 +146,12 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     await got(c);
     check(s.run("lines.some(l=>l.includes('carte muette'))") && txt('connTxt') === 'déconnecté' && s.elements.get('btnConnect').disabled === false, '4 echeances de v (12 s) -> « carte muette », deconnexion, bouton Connecter rendu');
     check(s.run("sent.every(x=>x==='v\\n')") && s.run('sent.length') === 4, 'rien d autre que 4 `v` n est parti (ni t ni poll) (' + s.run('sent.length') + ')');
-    port({ 'v\n': '0.9', 'DEBUG\n': 'ok reset=brownout dropped=0 move_rc=-', 't\n': 'ext=1 present=0 boot_state=off busy=- power_off=1 last_op=-:ok mf=- oss=-' });
+    port({ 'v\n': '1.3', 'DEBUG\n': 'ok reset=brownout dropped=0 move_rc=-', 't\n': 'ext=1 present=0 boot_state=off busy=- power_off=1 last_op=-:ok mf=- oss=-' });
     const c2 = s.run('connect()'); await flush(); await flush(); await got(c2);
     check(txt('connTxt') === 'connecté' && s.run("sent.join('')") === 'v\nDEBUG\nt\n', 'reconnexion a une carte qui repond : v, DEBUG, t, connectee, sans retard');
     /* `v` est la version de la carte, la cause du redemarrage vient de DEBUG, l'etat de `t` (ext, power_off) */
-    check(s.run("lines.some(l=>l.endsWith('[app] carte : firmware 0.9'))"), 'v lu comme la version du firmware de la carte');
-    check(txt('s_board') === 'fw 0.9 · reset brownout · boot off', 'la ligne de la carte : v, reset de DEBUG, boot_state de t (« ' + txt('s_board') + ' »)');
+    check(s.run("lines.some(l=>l.endsWith('[app] carte : firmware 1.3'))"), 'v lu comme la version du firmware de la carte');
+    check(txt('s_board') === 'fw 1.3 · reset brownout · boot off', 'la ligne de la carte : v, reset de DEBUG, boot_state de t (« ' + txt('s_board') + ' »)');
     check(txt('s_caps') === 'lot étendu (ext=1)' && txt('s_power') === 'alims coupées (p0) : p1 ou b pour rétablir', 'ext lu au lieu de caps, power_off'); }
   { /* Audit R5 : l'ouverture du port peut redemarrer la carte ; les lignes de la ROM de l'ESP32-S3 (son demarrage
        ordinaire) et des octets hors ASCII arrivent apres l'envoi du premier `v`, pendant l'attente de sa reponse. La
@@ -166,8 +166,8 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
       s.c.ROM = ROM; s.c.colle = colle;
       s.run("globalThis.sent=[]; globalThis.chunks=[]; globalThis.wake=null; globalThis.nv=0;"
         + "globalThis.push=b=>{ chunks.push(typeof b==='string'?new TextEncoder().encode(b):b); if(wake){ const w=wake; wake=null; w(); } };"
-        + "globalThis.repond=c=>{ if(c==='v\\n'&&nv++===0){ ROM.forEach(push); push(new Uint8Array([0x00,0xFF,0xFE,0x1B,0x0D,0x0A])); push(colle?'entry 0x40':''); push('0.9\\n'); }"
-        + "  else if(c==='v\\n') push('0.9\\n'); else if(c==='DEBUG\\n') push('ok reset=usb dropped=0 move_rc=-\\n');"
+        + "globalThis.repond=c=>{ if(c==='v\\n'&&nv++===0){ ROM.forEach(push); push(new Uint8Array([0x00,0xFF,0xFE,0x1B,0x0D,0x0A])); push(colle?'entry 0x40':''); push('1.3\\n'); }"
+        + "  else if(c==='v\\n') push('1.3\\n'); else if(c==='DEBUG\\n') push('ok reset=usb dropped=0 move_rc=-\\n');"
         + "  else if(c==='t\\n') push('ext=1 present=0 boot_state=off busy=- power_off=0 last_op=-:ok mf=- oss=-\\n'); };"
         + "navigator.serial={requestPort:async()=>({open:async()=>{},close:async()=>{},"
         + "writable:{getWriter:()=>({write:async b=>{ const c=new TextDecoder().decode(b); sent.push(c); repond(c); },releaseLock(){}})},"
@@ -178,17 +178,17 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
       carte(s, false);
       const c = s.run('connect()'); for (let n = 0; n < 20; n++) await flush(); await got(c);
       check(txt('connTxt') === 'connecté' && s.run("sent.join('')") === 'v\nDEBUG\nt\n',
-            'R5 : la ROM puis 0.9 pendant l attente de v : connectee, v, DEBUG, t (' + s.run("sent.join('|')").replace(/\n/g, '') + ')');
-      check(s.run("lines.filter(l=>l.includes('(réponse inattendue à « v », ignorée)')).length") === 9 && s.run('L.ver') === '0.9'
-            && s.run("lines.some(l=>l.endsWith('[app] carte : firmware 0.9'))") && txt('s_board').startsWith('fw 0.9 · reset usb'),
-            'R5 : les 8 lignes de la ROM et les octets hors ASCII ignores, aucune prise pour une reponse ; la version lue est 0.9'); }
+            'R5 : la ROM puis 1.3 pendant l attente de v : connectee, v, DEBUG, t (' + s.run("sent.join('|')").replace(/\n/g, '') + ')');
+      check(s.run("lines.filter(l=>l.includes('(réponse inattendue à « v », ignorée)')).length") === 9 && s.run('L.ver') === '1.3'
+            && s.run("lines.some(l=>l.endsWith('[app] carte : firmware 1.3'))") && txt('s_board').startsWith('fw 1.3 · reset usb'),
+            'R5 : les 8 lignes de la ROM et les octets hors ASCII ignores, aucune prise pour une reponse ; la version lue est 1.3'); }
     { const s = setup(); const txt = k => s.elements.get(k) ? s.elements.get(k).textContent : undefined;
       carte(s, true);
       const c = s.run('connect()'); for (let n = 0; n < 20; n++) await flush();
-      check(txt('connTxt') !== 'connecté' && s.run("waiter!==null&&waiter.cmd==='v'"), 'R5 : « entry 0x400.9 », hors forme, n est pas la reponse a v ; v attend');
+      check(txt('connTxt') !== 'connecté' && s.run("waiter!==null&&waiter.cmd==='v'"), 'R5 : « entry 0x401.3 », hors forme, n est pas la reponse a v ; v attend');
       expire(s); for (let n = 0; n < 20; n++) await flush();
       await wait(110); await fireSleeps(s); for (let n = 0; n < 20; n++) await flush(); await got(c);
-      check(txt('connTxt') === 'connecté' && s.run("sent.join('')") === 'v\nv\nv\nDEBUG\nt\n' && s.run('L.ver') === '0.9'
+      check(txt('connTxt') === 'connecté' && s.run("sent.join('')") === 'v\nv\nv\nDEBUG\nt\n' && s.run('L.ver') === '1.3'
             && s.run("lines.filter(l=>l.includes('(réponse inattendue à « v », ignorée)')).length") === 10,
             'R5 : v expire, la resynchronisation (v) puis le second v aboutissent : connectee (' + s.run("sent.join('|')").replace(/\n/g, '') + ')'); }
   }
@@ -199,7 +199,7 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     check(s.run('asked') === 1, 'deux clics pendant l ouverture : un seul port demande (' + s.run('asked') + ')'); }
   { /* L09-19 : une deconnexion pendant refreshAll de la connexion ; connect lancait quand meme startPoll */
     const s = setup();
-    s.run("globalThis.sent=[]; navigator.serial={requestPort:async()=>({open:async()=>{},close:async()=>{},writable:{getWriter:()=>({write:async b=>{ const c=new TextDecoder().decode(b); sent.push(c); const r={'v\\n':'0.9','DEBUG\\n':'ok reset=poweron dropped=0 move_rc=-'}[c]; if(r) Promise.resolve().then(()=>onLine(r)); },releaseLock(){}})},readable:{getReader:()=>({read:()=>new Promise(()=>{}),cancel:async()=>{},releaseLock(){}})}})}");
+    s.run("globalThis.sent=[]; navigator.serial={requestPort:async()=>({open:async()=>{},close:async()=>{},writable:{getWriter:()=>({write:async b=>{ const c=new TextDecoder().decode(b); sent.push(c); const r={'v\\n':'1.3','DEBUG\\n':'ok reset=poweron dropped=0 move_rc=-'}[c]; if(r) Promise.resolve().then(()=>onLine(r)); },releaseLock(){}})},readable:{getReader:()=>({read:()=>new Promise(()=>{}),cancel:async()=>{},releaseLock(){}})}})}");
     const c = s.run('connect()'); for (let n = 0; n < 4; n++) await flush();
     check(s.run("sent[sent.length-1]") === 't\n', 'connect en est a refreshAll (t en attente)');
     await s.run('disconnect()'); await got(c);
@@ -273,11 +273,11 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
   { /* la page n'attend plus les champs retires de `t` ; elle lit i, n, r, a par leur lettre ; la
        marque par j, le role de la bague dans t (ring=), plus aucun u. */
     const s = setup(); const txt = k => s.elements.get(k) ? s.elements.get(k).textContent : undefined;
-    s.run("globalThis.sent=[]; L.ver='0.9'; L.reset='poweron'; globalThis.rep={t:'ext=1 present=1 boot_state=ready busy=- power_off=0 last_op=boot:ok mf=1 oss=0 ring=focus',i:'SAMYANG AF 135mm F1.8',n:'er nocap',w:'er nocap',j:'16340',r:'13878-30733',a:'1.8-22',o:'1.8',l:'er nocap focal',d:'-',f:'20000',e:'n'}; ask=async c=>{ sent.push(c); return rep[c]; };");
+    s.run("globalThis.sent=[]; L.ver='1.3'; L.reset='poweron'; globalThis.rep={t:'ext=1 present=1 boot_state=ready busy=- power_off=0 last_op=boot:ok mf=1 oss=0 ring=focus',i:'SAMYANG AF 135mm F1.8',n:'er nocap',w:'er nocap',j:'16340',r:'13878-30733',a:'1.8-22',o:'1.8',l:'er nocap focal',d:'-',f:'20000',e:'n'}; ask=async c=>{ sent.push(c); return rep[c]; };");
     await s.run('refreshAll(false)');
     check(txt('s_id') === 'SAMYANG AF 135mm F1.8' && s.run('L.mark') === 16340 && s.run('L.min') === 13878 && s.run('L.max') === 30733,
           'identite par i, marque par j, bornes par r');
-    check(txt('s_t').endsWith(' ring=focus') && txt('s_board') === 'fw 0.9 · reset poweron · boot ready · dernière op. boot:ok' && txt('s_state') === '· prêt',
+    check(txt('s_t').endsWith(' ring=focus') && txt('s_board') === 'fw 1.3 · reset poweron · boot ready · dernière op. boot:ok' && txt('s_state') === '· prêt',
           'role de la bague lu dans t (« ' + txt('s_t') + ' ») ; ligne de la carte (« ' + txt('s_board') + ' »)');
     check(!s.run("sent.some(c=>/^(u.*|m.*|cm)$/.test(c))"), 'ni u…, ni m…, ni cm dans la lecture de l etat');
     /* L09-16 : n, w, l (er nocap) et d (toujours -) ne sont pas servis : la page ne les scrute plus */
@@ -288,7 +288,7 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
   /* ce que la page affiche : un etat scripte, `ask` remplace par les reponses de `rep` (PROTOCOL.md § 2, § 5) */
   const etat = () => {
     const s = setup(); const txt = k => s.elements.get(k) ? s.elements.get(k).textContent : undefined;
-    s.run("globalThis.sent=[]; L.ver='0.9'; globalThis.rep={t:'ext=1 present=1 boot_state=ready busy=- power_off=0 last_op=boot:ok mf=- oss=- ring=-',i:'SAMYANG AF 135mm F1.8',j:'16340',r:'13878-30733',a:'1.8-22',o:'2.8',f:'20000',e:'n',g:'ok'}; ask=async c=>{ sent.push(c); return rep[c]; };");
+    s.run("globalThis.sent=[]; L.ver='1.3'; globalThis.rep={t:'ext=1 present=1 boot_state=ready busy=- power_off=0 last_op=boot:ok mf=- oss=- ring=-',i:'SAMYANG AF 135mm F1.8',j:'16340',r:'13878-30733',a:'1.8-22',o:'2.8',f:'20000',e:'n',g:'ok'}; ask=async c=>{ sent.push(c); return rep[c]; };");
     return { s, txt };
   };
   { /* L09-14 : t porte boot_state=fault ; le statut affichait « prêt » et les panneaux restaient actifs */
@@ -340,6 +340,24 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     check(s.run('L.mark') === null && s.run('L.fnum') === null && s.run('L.fmin') === null && s.run('L.pos') === null, 'objectif retire : marque, ouverture, plage, position oubliees');
     check(txt('s_fnum') === 'f/—' && txt('focusRangeVal') === '—' && txt('irisRangeVal') === 'f/—' && txt('s_irange') === '—' && txt('s_focus') === '—' && s.elements.get('scMark').style.display === 'none',
           'objectif retire : « — » partout (' + ['s_fnum', 'focusRangeVal', 'irisRangeVal', 's_irange', 's_focus'].map(txt).join(' | ') + ')'); }
+  { /* `z` (PROTOCOL.md § 2, ticket #641) : lu a chaque pollSlow, objectif ou non ; la temperature, l'humidite et le seuil
+       affiches tels que la carte les rend (FR ici) ; ni l'ancienne forme sans seuil, ni une erreur ne sont lues */
+    const { s, txt } = etat(); const air = () => ['k_cond', 's_temp', 's_rh', 's_cond'].map(txt).join(' | ');
+    s.run("rep.t='ext=1 present=0 boot_state=off busy=- power_off=0 last_op=boot:ok mf=- oss=- ring=-'; rep.z='21.37 48.02 9.91'");
+    await s.run('pollSlow()');
+    check(s.run("sent[0]") === 'z' && air() === 'point de rosée | 21,37 °C | 48,02 %HR | 9,91 °C', 'sans objectif : z lu et affiche (« ' + air() + ' »)');
+    s.run("rep.z='-23.12 3.81 -50.60'"); await s.run('pollSlow()');
+    check(air() === 'point de givre | -23,12 °C | 3,81 %HR | -50,60 °C', 'un seuil negatif : point de givre (« ' + air() + ' »)');
+    s.run("rep.z='0.25 100.00 0.00'"); await s.run('pollSlow()');
+    check(air() === 'point de rosée | 0,25 °C | 100,00 %HR | 0,00 °C', 'un seuil nul : point de rosee (« ' + air() + ' »)');
+    s.run("rep.z='-0.50 0.00 -'"); await s.run('pollSlow()');
+    check(air() === 'point de rosée ou de givre | -0,50 °C | 0,00 %HR | —', 'le seuil non defini : « — » (« ' + air() + ' »)');
+    for (const z of ['-', '21.37 48.02', 'er nocap']) {
+      s.run("rep.z='21.37 48.02 9.91'"); await s.run('pollSlow()'); s.c.z = z; s.run('rep.z=z'); await s.run('pollSlow()');
+      check(air() === 'point de rosée ou de givre | — | — | —', '« ' + z + ' » : « — » partout (« ' + air() + ' »)');
+    }
+    s.run("rep.z='21.37 48.02 9.91'"); await s.run('pollSlow()'); await s.run('disconnect()');
+    check(air() === 'point de rosée ou de givre | — | — | —', 'deconnectee : « — » partout (« ' + air() + ' »)'); }
   { /* L09-17 : a la deconnexion, un glissement en cours (pointerdown sans change) est termine */
     const s = setup(); s.run("writer={write:async()=>{},releaseLock(){}}; port={close:async()=>{}}; focusDragging=true; irisDragging=true");
     await s.run('disconnect()');

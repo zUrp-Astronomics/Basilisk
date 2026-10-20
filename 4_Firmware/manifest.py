@@ -8,7 +8,7 @@
 #
 # Écrit sur la sortie standard le manifeste qu'ESP Web Tools lit pour installer le firmware : la release porte, à côté
 # de lui, une seule image, <image> (basilisk_<tag>_esp32c3.bin, l'image fusionnée de l'artefact, à écrire en 0), qu'il
-# désigne par son nom, relatif au manifeste. La version est le tag (v0.9.0), pas PROJECT_VER (0.9).
+# désigne par son nom, relatif au manifeste. La version est le tag (v1.0.0), pas PROJECT_VER (1.3).
 # new_install_prompt_erase : ESP Web Tools propose d'effacer la flash à une nouvelle installation ; l'image remet de
 # toute façon la NVS, donc la marque, à zéro.
 import json

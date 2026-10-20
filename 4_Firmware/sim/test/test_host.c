@@ -133,7 +133,7 @@ static bool replied;
 /* La version que la carte donne à bsk_host_init (PROJECT_VER, par esp_app_get_description), lue dans
  * CMakeLists.txt (second argument), sa seule source ; `v` la rend. L'attendu, lui, est écrit à la main : V. */
 static char VERSION[40];
-#define V "0.9"
+#define V "1.3"
 
 static bool load_version(const char *path)
 {
@@ -1520,46 +1520,67 @@ static const char *jnext(void)
 
 /* PROTOCOL.md § 2 (`z`), § 4 (`:GT#`), § 3 (`* sht40`) ; [D120] : une mesure inconnue n'est jamais un nombre, sauf le
  * 0000# de `:GT#`, que Moonlite impose (décision de l'humain). Les demi-degrés de `:GT#` sont ceux du driver moonlite de
- * libindi (int16_t lu en hexadécimal, divisé par 2), arrondis au plus proche, calculés à la main. */
+ * libindi (int16_t lu en hexadécimal, divisé par 2), arrondis au plus proche, calculés à la main.
+ * Le seuil de condensation de `z` (ticket #641 : le point de rosée, positif ou nul, ou de givre, négatif ; `-` non
+ * défini) : les attendus sont calculés à part, sans le code testé, d'après les formules du guide CIMO de l'OMM
+ * (WMO-No. 8, partie I, chapitre 4, annexe 4.B), L = ln(U/100) + 17,62 t/(243,12 + t), t_d = 243,12 L/(17,62 - L),
+ * t_f = 272,62 L/(22,46 - L), arrondis au centième ; la valeur avant l'arrondi est notée quand elle décide. */
 static void t_sensor(void)
 {
     static const bsk_sensor_st_t UNKNOWN[] = {BSK_SENSOR_NONE, BSK_SENSOR_NACK, BSK_SENSOR_CRC, BSK_SENSOR_BUS, BSK_SENSOR_STALE};
     static const uint8_t STATES[] = {SESSION_OFF, SESSION_POWERING, SESSION_RECOVERING, SESSION_FAULT};
     char t_none[BSK_HOST_REPLY_MAX];
     size_t n0;
-    printf("le capteur : z (°C %%RH, ou -), :GT# (demi-degrés, 0000# inconnue), dans tout état ; * sht40 ; t inchangé\n");
+    printf("le capteur : z (°C %%RH seuil, ou -), :GT# (demi-degrés, 0000# inconnue), dans tout état ; * sht40 ; t inchangé\n");
     ready135();
     n0 = n_cmds;
     ASK("z", "-");                                  /* aucune lecture encore */
     WIRE(":GT", "0000#");
     snprintf(t_none, sizeof t_none, "%s", ask("t"));
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 2137, 4802};
-    ASK("z", "21.37 48.02");
+    ASK("z", "21.37 48.02 9.91");                   /* rosée : 9,90997, arrondi, pas tronqué */
     WIRE(":GT", "002B#");                           /* 21,37 °C : 42,74 demi-degrés -> 43 */
     CHECK(!strcmp(ask("t"), t_none), "t ne dit rien du capteur : « %s »", R);
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -2312, 381};
-    ASK("z", "-23.12 3.81");
+    ASK("z", "-23.12 3.81 -50.60");                /* givre */
     WIRE(":GT", "FFD2#");                           /* -23,12 °C : -46,24 -> -46, 0xFFD2 ; le driver lit -23,0 */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -50, 0};
-    ASK("z", "-0.50 0.00");
+    ASK("z", "-0.50 0.00 -");                      /* U = 0 : ln 0, aucun seuil */
     WIRE(":GT", "FFFF#");                           /* -0,50 °C : -1 */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 25, 10000};
-    ASK("z", "0.25 100.00");
+    ASK("z", "0.25 100.00 0.25");                  /* saturé au-dessus de 0 °C : t_d = t */
     WIRE(":GT", "0001#");                           /* 0,25 °C : 0,5 -> 1 */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 24, 1};
-    ASK("z", "0.24 0.01");
+    ASK("z", "0.24 0.01 -");                       /* t_f -70,3, sous -65 °C : hors du domaine de e_i */
     WIRE(":GT", "0000#");                           /* 0,24 °C : 0,48 -> 0, que Moonlite ne distingue pas de l'inconnue */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -25, 999};
-    ASK("z", "-0.25 9.99");
+    ASK("z", "-0.25 9.99 -25.54");
     WIRE(":GT", "FFFF#");                           /* -0,25 °C : -0,5 -> -1 */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -24, 1000};
-    ASK("z", "-0.24 10.00");
+    ASK("z", "-0.24 10.00 -25.52");
     WIRE(":GT", "0000#");                           /* -0,24 °C : -0,48 -> 0 */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 13000, 5000};
-    ASK("z", "130.00 50.00");
+    ASK("z", "130.00 50.00 -");                    /* au-dessus de 60 °C : hors du domaine de e_w */
     WIRE(":GT", "0104#");                           /* 130 °C, le haut de l'échelle (DS § 4.5) : 260 */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -4500, 5000};
     WIRE(":GT", "FFA6#");                           /* -45 °C, le bas : -90, 0xFFA6 */
+    ASK("z", "-45.00 50.00 -47.14");
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -305, 8750};
+    ASK("z", "-3.05 87.50 -4.27");                  /* givre */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -1000, 10000};
+    ASK("z", "-10.00 100.00 -8.88");                /* saturé sur l'eau sous 0 °C : le givre se forme au-dessus de t */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 1000, 4990};
+    ASK("z", "10.00 49.90 0.01");                   /* de part et d'autre de 0 °C : rosée 0,0133 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 1000, 4980};
+    ASK("z", "10.00 49.80 -0.01");                  /* givre -0,0127 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 6000, 5000};
+    ASK("z", "60.00 50.00 45.83");                  /* le haut du domaine de e_w, compris */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 6001, 5000};
+    ASK("z", "60.01 50.00 -");
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -4000, 284};
+    ASK("z", "-40.00 2.84 -65.00");                 /* t_f -64,997 : dans le domaine de e_i, arrondi à -65,00 */
+    SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -4000, 283};
+    ASK("z", "-40.00 2.83 -");                      /* t_f -65,022 : hors du domaine, jugé avant l'arrondi */
     for (size_t i = 0; i < sizeof UNKNOWN / sizeof UNKNOWN[0]; i++) {
         SENSOR = (bsk_sensor_t){UNKNOWN[i], 2137, 4802};   /* des nombres que la couche HOTE ne doit pas lire */
         ASK("z", "-");
@@ -1569,7 +1590,7 @@ static void t_sensor(void)
         fresh();
         state(STATES[i]);
         SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 2137, 4802};
-        CHECK(is("z", "21.37 48.02"), "z en %s : « %s »", bsk_state_name(STATES[i]), R);
+        CHECK(is("z", "21.37 48.02 9.91"), "z en %s : « %s »", bsk_state_name(STATES[i]), R);
         CHECK(!strcmp(wire(":GT"), "002B#"), ":GT# en %s : « %s »", bsk_state_name(STATES[i]), W);
     }
     for (const char *const *l = (const char *const[]){"zz", "z1", "z ", "zx", NULL}; *l; l++) ASK(*l, "er nocap");
@@ -1695,7 +1716,7 @@ static bool matches(const char *re, const char *s)
 }
 
 /* Les lignes que la page envoie (ses `ask(…)`) ; `f20000` pour `'f'+t`, `a5.6` pour `'a'+f`. */
-static const char *const PAGE[] = {"v", "DEBUG", "t", "i", "n", "j", "f", "e", "r", "a", "o", "l", "d", "w", "f20000", "f+10", "f-10", "f+100", "f-100",
+static const char *const PAGE[] = {"v", "DEBUG", "t", "i", "n", "j", "f", "e", "r", "a", "o", "l", "d", "w", "z", "f20000", "f+10", "f-10", "f+100", "f-100",
                                    "c", "h", "q", "b", "p0", "p1", "jg", "js", "a5.6", "LOG ON",
                                    "LOG ALL", "LOG OFF", "DUMP", "DUMP 05", "SDRIVE", "SDRIVE SCAN", "SDRIVE STOP", "SNIFF ON",
                                    "SNIFF OFF"};
@@ -1723,6 +1744,16 @@ static void t_page(const char *page)
           "le motif de f admet « er busy boot » et refuse « ok » : il est bien appliqué");
     CHECK(expect_for("a") && matches(expect_for("a"), "1.8-22") && !matches(expect_for("a"), "1.8"),
           "le motif de a, [\\d.]+-[\\d.]+, admet « 1.8-22 » et refuse « 1.8 » : \\d traduit dans un ensemble");
+    CHECK(expect_for("z") && !matches(expect_for("z"), "21.37 48.02"), "z : le motif de la page refuse l'ancien z, sans seuil");
+    {   /* la rosée, le givre, le seuil non défini, la mesure inconnue */
+        static const bsk_sensor_t Z[] = {{BSK_SENSOR_OK, 2137, 4802}, {BSK_SENSOR_OK, -2312, 381}, {BSK_SENSOR_OK, -50, 0},
+                                         {BSK_SENSOR_NACK, 0, 0}};
+        for (size_t i = 0; i < sizeof Z / sizeof Z[0]; i++) {
+            SENSOR = Z[i];
+            ask("z");
+            CHECK(expect_for("z") && matches(expect_for("z"), R), "z : « %s » satisfait le motif de la page", R);
+        }
+    }
     ready135();
     ASK("v", V);
     page_state("ready");

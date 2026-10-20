@@ -10,8 +10,10 @@ name: CI
 #   - `test`  : les tests de la page de banc (5_App/run.sh — la première commande de `## Test` du
 #               CLAUDE.md) : test_app_vm.cjs, test_app.js ; puis le test de l'outil tool_station
 #               (5_App/tool_station/run.sh) ;
-#   - `indi`  : le driver INDI 6_Driver/indi/ compilé ET lié par son CMakeLists.txt, contre la libindi-dev
-#               d'Ubuntu 24.04 (1.9.9) ; rien n'y est testé ;
+#   - `indi`  : le driver INDI 6_Driver/indi/ compilé ET lié par son CMakeLists.txt (6_Driver/indi/build.sh),
+#               puis ce que démontre 6_Driver/indi/test.sh : l'amont et ses deux séries de patchs, le style
+#               d'indilib, les trois états joués contre un faux contrôleur Pinefeat et une fausse carte Basilisk ;
+#               contre la libindi-dev 2 du PPA d'INDI, sur Ubuntu 26.04 ;
 #   - `firmware` : le firmware : ses en-têtes partagés compilés, le faux
 #               Samyang AF 135 compilé, ses tests de comportements et de pannes, son rejeu contre
 #               les traces de l'objectif (4_Firmware/run.sh) ;
@@ -69,30 +71,44 @@ jobs:
         run: bash 5_App/tool_station/run.sh
 
   # ── Driver INDI ──
-  # Compile ET lie 6_Driver/indi/ par son CMakeLists.txt, tel que son README le prescrit (cmake puis make),
-  # par 6_Driver/indi/build.sh. Aucun test fonctionnel : « le driver compile et se lie » est tout ce que ce job affirme.
-  # ⚠ IMAGE `ubuntu:24.04`, PAS `catthehacker/ubuntu:act-latest` : act-latest est une étiquette
-  # mobile (Ubuntu 24.04 au 2026-09-26 : titre `act-24.04-amd64` de l'image du 2026-08-15), et la
-  # version de libindi-dev qu'apt y trouve changerait avec elle, sans commit. `ubuntu:24.04` fixe la version jugée : libindi 1.9.9
-  # (1.9.9+dfsg-3build3, universe de noble). Le prix : ni node ni git dans l'image, donc pas
-  # d'`actions/checkout` — git vient d'apt, puis un clone manuel (ci-dessous).
+  # 6_Driver/indi/build.sh compile ET lie le driver par son CMakeLists.txt, tel que son README le prescrit (cmake puis
+  # make) ; 6_Driver/indi/test.sh démontre ce que dit son README (§ Ce que la CI démontre) : le driver est l'amont nommé
+  # puis ses deux séries de patchs, au style d'indilib, et les trois états (l'amont, l'amont et les correctifs, le
+  # driver) joués sous libindi contre un faux contrôleur Pinefeat, le driver aussi contre une fausse carte Basilisk.
+  # Ce script n'est pas dans `## Test` du CLAUDE.md : la sonde (probe-test-relevance.yml) rejoue `## Test` dans l'image
+  # du job `test`, où libindi 2 n'existe pas.
+  # ⚠ INDI 2, PAR LE PPA D'INDI (ppa:mutlaqja/ppa), PAS LA libindi-dev D'UBUNTU (décision de l'humain, ticket #645 : on
+  # ne construit pas pour 1.9.9, on ne compile pas INDI). Le PPA ne publie libindi 2 (2.2.5 au 2026-10-19) que pour
+  # Ubuntu 26.04 (resolute) : d'où l'image `ubuntu:26.04`, étiquette fixe. Le PPA, lui, remplace ses paquets à chaque
+  # construction : la version jugée est celle qu'il sert le jour du run, écrite au journal. Sa clé est prise au serveur
+  # de clés d'Ubuntu et refusée si son empreinte n'est pas celle que Launchpad publie pour ce PPA (ci-dessous). Ni node
+  # ni git dans l'image, donc pas d'`actions/checkout` : git vient d'apt, puis un clone manuel (ci-dessous).
   indi:
     runs-on: shell
-    container: ubuntu:24.04
+    container: ubuntu:26.04
     defaults:
       run:
         shell: bash
     steps:
-      # pkg-config et make sont nommés : CMakeLists.txt passe par pkg-config (libindi-dev n'y
-      # dépend pas, et n'expédie pas de FindINDI.cmake), et make n'est qu'une recommandation de
-      # cmake, que --no-install-recommends ne tire pas.
-      - name: Outillage (git, cmake, make, g++, pkg-config, libindi-dev)
+      # pkg-config et make sont nommés : CMakeLists.txt passe par pkg-config (libindi-dev n'expédie pas de
+      # FindINDI.cmake), et make n'est qu'une recommandation de cmake, que --no-install-recommends ne tire pas.
+      - name: Outillage (git, cmake, make, g++, pkg-config, astyle, python3, libindi-dev 2 du PPA d'INDI)
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update -qq
-          apt-get install -y -qq --no-install-recommends ca-certificates git cmake make g++ pkg-config libindi-dev >/dev/null
-          echo "libindi $(pkg-config --modversion libindi), $(g++ --version | head -n 1), $(cmake --version | head -n 1)"
+          apt-get install -y -qq --no-install-recommends ca-certificates curl gpg git cmake make g++ pkg-config \
+            astyle python3 >/dev/null
+          empreinte=F81D4F8C16975C8882D7B38333E72D44A5F2E962
+          curl -fsS "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x$empreinte" -o /tmp/indi-ppa.asc
+          lue=$(gpg --show-keys --with-colons /tmp/indi-ppa.asc | awk -F: '$1 == "fpr" { print $10; exit }')
+          if [ "$lue" != "$empreinte" ]; then echo "clé du PPA : empreinte $lue, attendue $empreinte" >&2; exit 1; fi
+          gpg --dearmor < /tmp/indi-ppa.asc > /usr/share/keyrings/indi-ppa.gpg
+          printf '%s\n' 'Types: deb' 'URIs: https://ppa.launchpadcontent.net/mutlaqja/ppa/ubuntu' 'Suites: resolute' \
+            'Components: main' 'Signed-By: /usr/share/keyrings/indi-ppa.gpg' > /etc/apt/sources.list.d/indi-ppa.sources
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends libindi-dev >/dev/null
+          echo "libindi $(dpkg-query -W -f='${Version}' libindi-dev), $(g++ --version | head -n 1), $(cmake --version | head -n 1), $(astyle --version)"
       # Clone manuel avec le jeton du job (pas d'`actions/checkout`, action JS node20 : ni cette image
       # ni l'image espressif/idf ne garantissent node). Le jeton passe par un en-tête HTTP (comme le
       # fait actions/checkout), jamais dans l'URL : il n'est ni écrit dans .git/config ni recraché
@@ -120,6 +136,8 @@ jobs:
           git log -1 --oneline
       - name: Compiler et lier 6_Driver/indi/ (6_Driver/indi/build.sh)
         run: bash 6_Driver/indi/build.sh
+      - name: Démontrer le driver (6_Driver/indi/test.sh)
+        run: bash 6_Driver/indi/test.sh
 
   # ── Firmware, build ESP-IDF ──
   # 4_Firmware/build.sh : le projet ESP-IDF de 4_Firmware/ (PHY réelle, bench_core, app_main), pour
@@ -183,8 +201,8 @@ jobs:
   # 4_Firmware/run.sh : les en-têtes partagés du firmware compilés un par un, puis le faux
   # Samyang AF 135 compilé sans avertissement, ses tests (comportements de la référence, pannes
   # reçues et émises) et son rejeu contre les traces de l'objectif. gcc seul suffit.
-  # ⚠ IMAGE `ubuntu:24.04`, comme le job `indi` et pour la même raison : le compilateur jugé
-  # (gcc 13 de noble) ne change pas sans commit, et -Werror ne rougit pas sur une montée d'image.
+  # ⚠ IMAGE `ubuntu:24.04`, étiquette fixe : le compilateur jugé (gcc 13 de noble) ne change pas sans commit, et
+  # -Werror ne rougit pas sur une montée d'image.
   # Ni node ni git dans l'image : git vient d'apt, puis le même clone manuel que le job `indi`.
   firmware:
     runs-on: shell

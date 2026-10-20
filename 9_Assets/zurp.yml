@@ -10,13 +10,13 @@ tagline: >-
 slogan: Bend the glass to your will
 category: Adapter
 section: gadgets
-status: wip
+status: released
 basedOn: Pinefeat
 
 description:
   - >-
-    Basilisk is a Sony E adapter for astro cameras: put a Sony E lens on your astro camera and drive
-    it remotely. The glass bends to your will, and you never leave the warm room.
+    Basilisk is a Sony E adapter for astro cameras: it plays the camera body for a Sony E lens, and
+    drives its focus and aperture from Ekos/INDI or ASCOM over a single USB-C cable.
   - >-
     Based on the Pinefeat project, with the zUrp treatment. Open hardware like the rest of the
     catalog.

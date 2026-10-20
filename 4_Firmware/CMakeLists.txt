@@ -3,8 +3,9 @@
 # DATE: 2026-10-11
 # STATUS: actif — construit par 4_Firmware/build.sh (job `firmware-build` de .gitea/workflows/ci.yml) ;
 #         PROJECT_VER rendu tel quel par `v` ; ticket #574 : la cible esp32c3 ;
-#         ticket #602 : le projet s'appelle basilisk_FW ; ticket #606 : la cible esp32c3 seule, la version 0.9
+#         ticket #602 : le projet s'appelle basilisk_FW ; ticket #606 : la cible esp32c3 seule ;
+#         ticket #648 : la version 1.3, dont le mineur fait lire `r` au driver Pinefeat (décision de l'humain)
 cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-set(PROJECT_VER "0.9")   # la seule source de `v` (<maj>.<min>, sans suffixe : décision de l'humain)
+set(PROJECT_VER "1.3")   # la seule source de `v` (<maj>.<min>, sans suffixe : décision de l'humain)
 project(basilisk_FW)   # le nom du firmware : son binaire, l'en-tête de l'application, les fichiers livrés (build.sh)

@@ -96,6 +96,15 @@ details summary{cursor:pointer;color:var(--ink2);font-size:12px}
     </div>
   </section>
 
+  <section class="box" id="secAir">
+    <h2 data-i18n="box.sensor"></h2>
+    <div class="kv">
+      <b data-i18n="kv.temp"></b><span id="s_temp">—</span>
+      <b data-i18n="kv.rh"></b><span id="s_rh">—</span>
+      <b id="k_cond"></b><span id="s_cond">—</span>
+    </div>
+  </section>
+
   <section class="box" id="secFocus">
     <h2 data-i18n="box.focus"></h2>
     <div class="big"><span id="s_focus">—</span> <span class="hint" data-i18n="unit.steps"></span> <span class="hint" id="s_moving"></span></div>
@@ -188,6 +197,14 @@ const TEXTS={
  'kv.identity':["identité","identity"],
  'kv.letters':["lettres","commands"],
  'kv.board':["carte","board"],
+ 'box.sensor':["Capteur de la carte","Board sensor"],
+ 'kv.temp':["température","temperature"],
+ 'kv.rh':["humidité","humidity"],
+ 'kv.dew':["point de rosée","dew point"],
+ 'kv.frost':["point de givre","frost point"],
+ 'kv.cond':["point de rosée ou de givre","dew or frost point"],
+ 'unit.celsius':["{0} °C","{0} °C"],
+ 'unit.rh':["{0} %HR","{0} %RH"],
  'btn.reboot':["Redémarrer l'objectif","Restart lens"],
  'tip.reboot':["b : oublier l'objectif et refaire toute la séquence de démarrage, sans couper l'alim (en fault : coupée puis rétablie, si câblée)","b: forget the lens and redo the whole start-up sequence, without cutting power (in fault: cut then restored, if wired)"],
  'btn.powerOff':["Alim OFF","Power OFF"],
@@ -434,7 +451,7 @@ $('btnExport').onclick=()=>{ const blob=new Blob([lines.join('\n')+'\n'],{type:'
  * ignoree. Les reponses Moonlite (':…#' -> 'XXXX#', ':GV#' -> 2 octets) ont leur propre cadrage. ───────────── */
 let port=null, reader=null, writer=null, queue=[], pumping=false, waiter=null, connGen=0;
 const enc=new TextEncoder(), dec=new TextDecoder();
-const POLL_CMDS=/^([feold]|t)$/;
+const POLL_CMDS=/^([feoldz]|t)$/;
 /* forme attendue de la reponse a une commande : un « ok », un nombre, y/n... ; null = tout */
 function expectFor(cmd){
   const c=cmd[0];
@@ -451,6 +468,7 @@ function expectFor(cmd){
     if(c==='p') return /^(\d \d|er\b.*)$/;
     if(c==='g') return /^(ok|aborted|stall|unconfirmed|-)$/; /* PROTOCOL.md § 2 : repond dans tout etat */
     if(c==='q') return /^(ok|er\b.*)$/; /* PROTOCOL.md § 2 : ok, er nocap stop, er busy boot, er link … */
+    if(c==='z') return /^(-?\d+\.\d\d \d+\.\d\d (-?\d+\.\d\d|-)|-)$/; /* PROTOCOL.md § 2 : <°C> <%RH> <seuil|->, ou - */
     return null;
   }
   return /^(ok|er\b.*|nc)$/;
@@ -490,7 +508,7 @@ function send(cmd, quiet, gen){
   });
 }
 /* Resynchronisation : la carte traite les lignes dans l'ordre, donc quand elle a repondu sa version
- * (« 0.9 ») a un `v` envoye APRES la commande expiree, toute reponse tardive de celle-ci est deja
+ * (« 1.3 ») a un `v` envoye APRES la commande expiree, toute reponse tardive de celle-ci est deja
  * passee (et a ete ignoree par la forme « x.y » attendue). On exige ensuite 100 ms de silence (PROTOCOL.md § 6) :
  * sans ligne de reponse ; les lignes de journal « * » ne le rompent pas (sous LOG ON/ALL, jusqu'a
  * 30 par seconde, il n'arriverait jamais). Pas de plafond : la
@@ -618,7 +636,7 @@ async function disconnect(){
   try{ if(wr){ wr.releaseLock(); } }catch(e){}
   try{ if(p) await p.close(); }catch(e){}
   $('connDot').classList.remove('on'); setTr('connTxt',()=>tr('conn.off')); $('btnConnect').disabled=false; $('btnDisconnect').disabled=true;
-  L.present=L.fault=false; forgetLens(); setText('s_state','—');
+  L.present=L.fault=false; forgetLens(); setText('s_state','—'); showClimate(null);
 }
 $('btnConnect').onclick=connect; $('btnDisconnect').onclick=disconnect;
 if(!('serial' in navigator)){ $('serialNote').hidden=false; $('btnConnect').disabled=true; }
@@ -703,7 +721,7 @@ function applyLimits(){
   } else setText('s_irange','—');
 }
 
-/* ───────────── Poll : f/e a 5 Hz ; t, r, j, o a 1 Hz ───────────── */
+/* ───────────── Poll : f/e a 5 Hz ; z, t, r, j, o a 1 Hz ───────────── */
 let pollTimer=null, slowTick=0, busyPoll=false;
 /* Un rappel appartient a la connexion qui l'a lance : apres une (de)connexion, il ne continue pas (pas de pollSlow) et
  * ne rend pas busyPoll, qui est a la nouvelle. */
@@ -732,8 +750,20 @@ async function moveEnd(gen){
   moveReport(g);
 }
 function moveReport(g){ const stop=g==='aborted', w=()=>g===null?tr('move.noG'):stop?tr('move.stopped'):g; addLine(stop?'ev':'err','[app] '+tr('log.moveEnd',w())); setTr('s_move',()=>tr('move.last',w())); $('s_move').style.color=stop?'':'var(--bad)'; }
+/* `z` (PROTOCOL.md § 2) : la temperature, l'humidite et le seuil de condensation que la carte calcule, affiches tels
+ * quels (le seuil n'est pas recalcule ici : le meme chiffre que le driver INDI) ; le seuil est un point de rosee s'il est
+ * positif ou nul, de givre s'il est negatif. Ce que la carte ne connait pas (`-`), ou une autre reponse, s'affiche « — ».
+ * Lu a 1 Hz, objectif ou non. */
+function showClimate(z){
+  const m=/^(-?\d+\.\d\d) (\d+\.\d\d) (-?\d+\.\d\d|-)$/.exec(z||''), c=m&&m[3]!=='-'?m[3]:null;
+  const n=v=>(+v).toLocaleString(loc(),{minimumFractionDigits:2,maximumFractionDigits:2});
+  if(m){ setTr('s_temp',()=>tr('unit.celsius',n(m[1]))); setTr('s_rh',()=>tr('unit.rh',n(m[2]))); } else { setText('s_temp','—'); setText('s_rh','—'); }
+  if(c!==null) setTr('s_cond',()=>tr('unit.celsius',n(c))); else setText('s_cond','—');
+  setTr('k_cond',()=>c===null?tr('kv.cond'):+c<0?tr('kv.frost'):tr('kv.dew'));
+}
 async function pollSlow(){
   const gen=connGen;
+  const z=await ask('z',true); if(gen!==connGen) return; showClimate(z);
   const t=parseKV(await ask('t',true)); if(gen!==connGen) return;
   const wasPresent=L.present, wasBusy=L.busy, hadLimits=L.min!==null;
   L.busy=t.busy||'-';
@@ -815,6 +845,7 @@ $('btnLogOn').onclick=()=>ask('LOG ON'); $('btnLogAll').onclick=()=>ask('LOG ALL
 /* ───────────── Langue : les textes de depart, la bascule ───────────── */
 setTr('connTxt',()=>tr('conn.off')); setTr('scMin',()=>tr('scale.unknown')); setTr('focusHint',()=>tr('focus.hint'));
 $('btnLang').onclick=()=>setLang(LANG==='fr'?'en':'fr');
+showClimate(null);
 applyLang();
 </script>
 </body>

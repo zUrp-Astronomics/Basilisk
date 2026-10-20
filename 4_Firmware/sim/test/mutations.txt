@@ -7130,3 +7130,78 @@
 = la ligne `* sht40` sans son instant en millisecondes (t_sensor : 123456)
 -     line(false, t, "* sht40 %llu %s%s", (unsigned long long)(t / 1000), why ? "lost why=" : "ok", why ? why : "");
 +     line(false, t, "* sht40 %llu %s%s", (unsigned long long)t, why ? "lost why=" : "ok", why ? why : "");
+
+@ test_host | components/host/host.c | condensation
+= le terme de la température de L pris avec les coefficients de Magnus d'Alduchov au lieu de ceux du guide CIMO (t_sensor : 9.91)
+-     l = log(v->rh_c / 10000.0) + 17.62 * t / (243.12 + t);
++     l = log(v->rh_c / 10000.0) + 17.625 * t / (243.04 + t);
+
+@ test_host | components/host/host.c | condensation
+= l'humidité prise en % au lieu d'une fraction dans L (t_sensor : 9.91)
+-     l = log(v->rh_c / 10000.0) + 17.62 * t / (243.12 + t);
++     l = log(v->rh_c / 100.0) + 17.62 * t / (243.12 + t);
+
+@ test_host | components/host/host.c | condensation
+= le point de rosée sans le coefficient du guide CIMO (t_sensor : 45.83)
+-     x = l >= 0 ? 243.12 * l / (17.62 - l) : 272.62 * l / (22.46 - l);
++     x = l >= 0 ? 243.04 * l / (17.625 - l) : 272.62 * l / (22.46 - l);
+
+@ test_host | components/host/host.c | condensation
+= le point de givre avec les coefficients de l'eau (t_sensor : -50.60, -8.88)
+-     x = l >= 0 ? 243.12 * l / (17.62 - l) : 272.62 * l / (22.46 - l);
++     x = l >= 0 ? 243.12 * l / (17.62 - l) : 243.12 * l / (17.62 - l);
+
+@ test_host | components/host/host.c | condensation
+= le point de givre pris pour un point de rosée sous 0 °C : la glace jamais employée (t_sensor : -4.27)
+-     x = l >= 0 ? 243.12 * l / (17.62 - l) : 272.62 * l / (22.46 - l);
++     x = 1 ? 243.12 * l / (17.62 - l) : 272.62 * l / (22.46 - l);
+
+@ test_host | components/host/host.c | condensation
+= le point de rosée calculé sur la glace au-dessus de 0 °C (t_sensor : 9.91)
+-     x = l >= 0 ? 243.12 * l / (17.62 - l) : 272.62 * l / (22.46 - l);
++     x = 0 ? 243.12 * l / (17.62 - l) : 272.62 * l / (22.46 - l);
+
+@ test_host | components/host/host.c | condensation
+= une humidité nulle rend un nombre, ln 0 (t_sensor : -0.50 0.00 -)
+-     if (v->rh_c == 0 || v->t_c > 6000) return false;
++     if (v->t_c > 6000) return false;
+
+@ test_host | components/host/host.c | condensation
+= 60 °C hors du domaine de e_w, qui le comprend (t_sensor : 60.00 50.00 45.83)
+-     if (v->rh_c == 0 || v->t_c > 6000) return false;
++     if (v->rh_c == 0 || v->t_c >= 6000) return false;
+
+@ test_host | components/host/host.c | condensation
+= un seuil rendu au-dessus de 60 °C, hors du domaine de e_w (t_sensor : 60.01, 130.00)
+-     if (v->rh_c == 0 || v->t_c > 6000) return false;
++     if (v->rh_c == 0) return false;
+
+@ test_host | components/host/host.c | condensation
+= un point de givre rendu sous -65 °C, hors du domaine de e_i (t_sensor : 0.24 0.01 -, -40.00 2.83 -)
+-     if (x < -65.0) return false;
++     if (0) return false;
+
+@ test_host | components/host/host.c | condensation
+= le domaine de e_i jugé sur l'arrondi, ou plus bas : -65,022 rendu (t_sensor : -40.00 2.83 -)
+-     if (x < -65.0) return false;
++     if (x < -65.03) return false;
+
+@ test_host | components/host/host.c | condensation
+= le domaine de e_i jugé trop haut : -64,997 refusé (t_sensor : -40.00 2.84 -65.00)
+-     if (x < -65.0) return false;
++     if (x < -64.99) return false;
+
+@ test_host | components/host/host.c | condensation
+= le seuil tronqué au lieu d'arrondi au plus proche (t_sensor : 9,90997 -> 9.91)
+-     *c = lround(100.0 * x);
++     *c = (long)(100.0 * x);
+
+@ test_host | components/host/host.c | climate
+= le signe d'un point de givre oublié (t_sensor : -4.27)
+-     snprintf(out + n, cap - n, " %s%ld.%02ld", c < 0 ? "-" : "", labs(c) / 100, labs(c) % 100);
++     snprintf(out + n, cap - n, " %s%ld.%02ld", "", labs(c) / 100, labs(c) % 100);
+
+@ test_host | components/host/host.c | climate
+= un seuil non défini rendu vide au lieu de `-` (t_sensor : -0.50 0.00 -)
+-         snprintf(out + n, cap - n, " -");
++         snprintf(out + n, cap - n, " ");

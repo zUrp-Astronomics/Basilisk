@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: captain <captain@lcars.local>
+Date: Mon, 19 Oct 2026 18:54:41 +0200
+Subject: [PATCH 4/8] Pinefeat CEF: refresh the state once a second
+
+TimerHit() refreshes the state only once a second has passed since
+lastUpdate, but lastUpdate was set only by the constructor and by
+CALIBRATE. A second after either, the test held at every pass of the
+timer, every 50 ms with the default polling period: `e` twenty times a
+second, and, while the focuser is still, `e f r d a`, a hundred commands
+a second.
+
+lastUpdate is now set at each refresh: `e`, and while still `e f r d a`,
+once a second. CALIBRATE keeps its delay.
+---
+ drivers/focuser/pinefeat_cef.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
+index b335f09..afdb1dc 100644
+--- a/drivers/focuser/pinefeat_cef.cpp
++++ b/drivers/focuser/pinefeat_cef.cpp
+@@ -473,6 +473,10 @@ void PinefeatCEF::TimerHit()
+     auto now = std::chrono::steady_clock::now();
+     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastUpdate).count();
+ 
++    // Once a second: the next refresh is a second after this one
++    if (elapsed >= 1)
++        lastUpdate = now;
++
+     if (elapsed >= 1 && isNotMoving())
+     {
+         int32_t pos, max;

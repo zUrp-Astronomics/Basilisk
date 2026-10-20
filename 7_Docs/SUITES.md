@@ -1,7 +1,8 @@
 # Les suites hôte — ce qu'elles jouent, ce qu'elles imposent à qui y écrit
 
 **Date** : 2026-10-10
-**Dernière révision** : 2026-10-11 (ticket #606 : la table de broches du C3 seule ; `sensor_none.c`, le
+**Dernière révision** : 2026-10-19 (ticket #641 : le seuil de condensation de `z` dans `test_host`, ses attendus
+calculés à part ; `z` dans les tests de la page) ; 2026-10-11 (ticket #606 : la table de broches du C3 seule ; `sensor_none.c`, le
 capteur avant sa première lecture) ; 2026-10-11 (ticket #594 : le capteur SHT40, `test_sht40` et son faux capteur, `z`, `:GT#` et
 `* sht40` dans `test_host`) ; 2026-10-11 (ticket #590 : les FAULT des rails, dans les deux PHY de test et les suites qui
 les jouent) ; 2026-10-10
@@ -39,7 +40,9 @@ l'objectif, `4_Firmware/CMakeLists.txt` et `5_App/emount-bench.html` lus en plac
    session scriptée : chaque lettre en READY et dans chaque colonne du tableau d'état de la spec § 4.5.1,
    `last_op`, `move_rc`, `t`, et les motifs `expectFor` lus dans `5_App/emount-bench.html`, appliqués à
    chaque réponse ; `z`, `:GT#` et la ligne `* sht40` contre une mesure scriptée, connue, négative, aux arrondis du
-   demi-degré, inconnue pour chaque raison, dans chaque état), `test_host135` (des lignes à travers HOTE, SESSION, MOUVEMENT et le faux 135 ; les lignes `* rail` et les compteurs
+   demi-degré, inconnue pour chaque raison, dans chaque état ; le seuil de condensation de `z`, point de rosée et point
+   de givre de part et d'autre de 0 °C, aux bords du domaine de ses formules, non défini, ses attendus calculés à part
+   d'après les formules du guide CIMO de l'OMM, sans le code testé), `test_host135` (des lignes à travers HOTE, SESSION, MOUVEMENT et le faux 135 ; les lignes `* rail` et les compteurs
    de `DEBUG` d'un FAULT de rail levé dans la PHY simulée),
    `test_std` (SESSION, TRANSACTION et HOTE contre le faux F051) ;
 5. chaque programme de 3 et 4 recompilé sous `-fsanitize=address,undefined -fno-sanitize-recover=all` et
@@ -132,7 +135,8 @@ Ce que la suite de `firmware` impose à qui y écrit :
   ouvert et leur demi-période, la tâche de lecture, sa priorité, la copie de la dernière lecture sous section critique).
 
 `bash 5_App/run.sh` est la même commande que le job `test` de la CI : `5_App/test/test_app_vm.cjs` (qui
-reçoit le répertoire des traces de l'objectif) et `5_App/test/test_app.js`, les tests de la page de banc. Le
+reçoit le répertoire des traces de l'objectif) et `5_App/test/test_app.js`, les tests de la page de banc (le capteur de
+la carte, `z`, affiché en FR et en EN, objectif monté ou non, compris). Le
 même job joue ensuite `bash 5_App/tool_station/run.sh`, le test de l'outil `tool_station` (python3,
 `5_App/tool_station/test_tool_station.py`). Les traces de l'objectif sont dans `4_Firmware/traces`, lues en
 place par `4_Firmware/run.sh` et par `5_App/run.sh`.

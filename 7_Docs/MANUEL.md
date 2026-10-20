@@ -1,7 +1,12 @@
 # emount-bench — une carte pour piloter un objectif Sony E depuis un PC
 
 **Date** : 2026-10-06
-**Dernière révision** : 2026-10-16 (ticket #635 : la page de banc en français ou en anglais, et les navigateurs qui
+**Dernière révision** : 2026-10-20 (ticket #653 : le README et le manuel de `9_Assets/manual/` sont au projet,
+l'affiche et les images de `9_Assets/` à l'org) ; 2026-10-20 (ticket #648 : le firmware en 1.3, le driver INDI en
+1.2) ; 2026-10-20 (ticket #651 : le matériel v1.0, `2_Hardware/` et `3_3D-Models/`) ; 2026-10-19 (ticket #645 : le
+driver INDI du dépôt est celui d'INDI, `pinefeat_cef`, avec ses
+correctifs et notre extension en deux séries de patchs ; démontré en CI) ; 2026-10-19 (ticket #641 : le point de rosée ou de givre, calculé par la carte dans `z`, affiché
+par la page de banc et publié par le driver INDI) ; 2026-10-16 (ticket #635 : la page de banc en français ou en anglais, et les navigateurs qui
 l'ouvrent) ; 2026-10-16 (ticket #633 : la release porte aussi la page de banc) ; 2026-10-16 (ticket
 #630 : le flash en un clic depuis la page produit d'abord, les voies manuelles en secours) ; 2026-10-16 (ticket
 #626 : la procédure de flash sur les trois fichiers de la release, dont deux voies qui gardent la marque ; le site
@@ -60,7 +65,9 @@ Et encore :
 ## Le firmware
 
 Le firmware est dans `4_Firmware/` (ESP-IDF 5.3.2, C, aucune dépendance hors ESP-IDF). `v` rend sa version,
-`<majeur>.<mineur>` : celle de `PROJECT_VER`, dans `4_Firmware/CMakeLists.txt`.
+`<majeur>.<mineur>` : celle de `PROJECT_VER`, dans `4_Firmware/CMakeLists.txt`, `1.3` (son mineur fait lire les
+bornes aux drivers INDI, § S'en servir avec INDI / Ekos). Elle est indépendante du numéro de la
+release, son tag.
 
 ### Le récupérer
 
@@ -78,7 +85,7 @@ Le firmware est dans `4_Firmware/` (ESP-IDF 5.3.2, C, aucune dépendance hors ES
 
 **Pour qui développe**, la CI de la forge construit le firmware à chaque run (job `firmware-build`) et publie
 l'artefact **`firmware-esp32c3`** : les mêmes fichiers séparés, `flash_args` et les scripts, plus l'image unique
-`…-full.bin`. Les noms portent la version et la cible, par exemple en 0.9 `basilisk_FW-v0.9-esp32c3.bin`. On le
+`…-full.bin`. Les noms portent la version et la cible, par exemple en 1.3 `basilisk_FW-v1.3-esp32c3.bin`. On le
 télécharge depuis la page du run, ou par l'API de la forge (`GET /api/v1/repos/fleet/basilisk/actions/artifacts`, puis
 `…/artifacts/<id>/zip`).
 
@@ -150,9 +157,12 @@ pas une réponse.
   dit la cause. Les motifs et leurs valeurs sont en tête de `4_Firmware/components/led/led.c`. `k` lit son
   intensité maximale, `k<n>` la règle (0 à 100 %, `k0` l'éteint) ; elle revient à 100 % à chaque démarrage de la carte.
 - **La température et l'humidité** : la carte v1.0 lit son capteur SHT40 une fois par seconde ; `z` rend la température
-  en °C et l'humidité relative en %RH (`21.37 48.02`), ou `-` quand elles sont inconnues (pas encore lues, capteur
-  muet, lecture fausse, bus bloqué, dernière lecture de plus de 3 s), jamais un nombre. La carte n'en fait
-  rien d'autre : elle ne compense pas la mise au point, c'est Ekos qui décide. Le capteur est sur la carte, contre
+  en °C, l'humidité relative en %RH et le seuil de condensation sur l'optique que la carte en calcule, en °C : le point
+  de rosée quand il est positif ou nul, le point de givre quand il est négatif (`21.37 48.02 9.91`, `-3.05 87.50 -4.27`) ;
+  le seuil est `-` quand il n'est pas défini (l'humidité à 0, l'air au-dessus de 60 °C, un point de givre sous -65 °C),
+  et `z` rend `-` seul quand la mesure est inconnue (pas encore lue, capteur muet, lecture fausse, bus bloqué, dernière
+  lecture de plus de 3 s) : jamais un nombre. La carte n'en fait rien d'autre : elle ne compense pas la mise au point,
+  c'est Ekos qui décide, et elle n'agit pas sur le seuil, elle le donne. Le capteur est sur la carte, contre
   l'arrière de l'objectif : ce qu'il mesure de l'air dépend du boîtier.
 - **`DEBUG`** donne une ligne de diagnostic : la cause du dernier redémarrage de la carte, les lignes du journal perdues,
   le résultat du dernier déplacement ; combien de fois la protection de chaque rail de l'objectif
@@ -165,15 +175,21 @@ majuscules que la carte ne sert pas répond `er nocap`.
 
 ## S'en servir avec INDI / Ekos
 
-**Le driver du dépôt, `6_Driver/indi/`** (« Basilisk E-mount Lens », `indi_basilisk_focus`) : le driver Pinefeat
-d'INDI, avec en plus l'ouverture relue, l'arrêt, la marque, la LED de statut, le redémarrage de l'objectif et son nom,
-et, sur la carte v1.0, la température (`FOCUS_TEMPERATURE`, celle qu'Ekos lit pour refocaliser sur un écart de
-température) et l'humidité, publiées seulement quand la carte les connaît. Sa compilation, son installation et ses
-propriétés : `6_Driver/indi/README.md`.
+**Le driver du dépôt, `6_Driver/indi/`** : le driver Pinefeat d'INDI, sous son nom (`indi_pinefeat_cef_focus`, « Pinefeat
+CEF » dans un profil Ekos, le périphérique « Pinefeat EF Lens Controller »), avec deux séries de patchs proposables à INDI : des correctifs, puis notre extension. Il se déclare en version 1.2, celle que lui donnent les
+correctifs ; l'extension ne la change pas.
+Contre la carte, qui annonce l'extension, il ajoute l'ouverture relue, l'arrêt, la marque, la LED de statut, le
+redémarrage de l'objectif et son nom, les bornes de l'objectif comme plage de la position, et, sur la carte v1.0, la
+température (`FOCUS_TEMPERATURE`, celle qu'Ekos lit pour refocaliser sur un écart de température), l'humidité et le point
+de rosée ou de givre que la carte calcule, publiés seulement quand la carte les connaît. Il s'installe à côté du driver
+du paquet d'INDI, sans l'écraser. Sa compilation, son installation et ses propriétés : `6_Driver/indi/README.md`.
 
 **Le driver Pinefeat d'origine** (`indi_pinefeat_cef_focus`, livré avec INDI) : la carte le sert aussi, sur la position,
-le mouvement et l'ouverture, sans rien configurer sur la carte ; la distance y reste inconnue (`d` rend `-`). Il ne lit les
-bornes (`r`) que si le mineur de `v` est au moins 3 : avec la version actuelle de la carte (`0.9`), il les lit.
+le mouvement et l'ouverture, sans rien configurer sur la carte ; la distance y reste inconnue (`d` rend `-`).
+
+Les deux ne lisent les bornes (`r`) que si le mineur de `v` est au moins 3, la règle d'INDI, que notre driver garde : avec
+la version de la carte (`1.3`, choisie pour cela : décision de l'humain), ils les lisent ; sous un mineur 3, ils ne les liraient plus, notre driver
+extension comprise.
 
 Dans les deux cas : le port série de la carte (la vitesse est sans effet, c'est un port USB).
 
@@ -198,6 +214,8 @@ Si le navigateur refuse Web Serial sur `file://` : `python3 -m http.server` dans
 - **Connecter** : la page envoie `v` jusqu'à une réponse (l'ouverture du port peut redémarrer la carte), puis lit l'état ;
   elle relit ensuite la position et le mouvement 5 fois par seconde, le reste une fois par seconde.
 - **Objectif** : identité (`i`), état de la carte (`t`) ; Redémarrer l'objectif (`b`), Alim OFF / ON (`p0` / `p1`).
+- **Capteur de la carte** (`z`, une fois par seconde, objectif monté ou non) : la température, l'humidité, et le point de
+  rosée, ou de givre quand il est négatif, tels que la carte les calcule ; « — » pour ce qu'elle ne connaît pas.
 - **Focus** : ±10 / ±100 pas, curseur entre les bornes avec la marque, « Aller à », Stop (`q`), Marquer (`js`), Aller à
   la marque (`jg`).
 - **Ouverture** : curseur au tiers de diaphragme entre les bornes lues (`a`), ±⅓, pleine ouverture ; la valeur affichée
@@ -256,32 +274,35 @@ ce qui touche au matériel) contre deux faux objectifs, un Samyang AF 135 et un 
 du 135 (`4_Firmware/traces`), puis des mutants qui doivent tous la faire échouer. Pour `5_App/test/test_app.js` :
 `npm install` à la racine (Playwright épinglé dans `package.json`) et un Chromium sous
 `/opt/pw-browsers/chromium-*/chrome-linux/chrome` ou désigné par `CHROMIUM_PATH`. Le driver INDI est compilé et lié par
-`bash 6_Driver/indi/build.sh`, sans test.
+`bash 6_Driver/indi/build.sh`, et démontré par `bash 6_Driver/indi/test.sh` (libindi 2, astyle, python3 : son README,
+§ « Ce que la CI démontre »).
 
-La CI (`.gitea/workflows/ci.yml`) joue ces trois commandes, construit le firmware, et compile et lie le driver INDI.
+La CI (`.gitea/workflows/ci.yml`) joue ces trois commandes, construit le firmware, et compile, lie et démontre le driver
+INDI.
 
 ## Arborescence
 
 ```
-README.md          la vitrine du projet, en anglais
+README.md          la vitrine du projet, tenue par le projet (l'org y fait une passe de style)
 CLAUDE.md          l'environnement de travail du dépôt : conventions, commandes, pièges (pour qui le modifie)
 0_Datasheets/      les datasheets des composants de la carte
 1_Board/           la carte v1.0 : schéma, vues, modèle 3D (le STEP, zippé), Gerbers, BoM, placement (son README)
-2_Hardware/        le boîtier : STEP du dessus, du dessous et de la pièce USB ; son rendu (PNG) ; la nomenclature de la
-                   quincaillerie (vide)
-3_3D-Models/       le boîtier à imprimer (3MF)
+2_Hardware/        la mécanique hors carte : le boîtier v1.0 (un STEP, toutes ses pièces), la nomenclature hors carte (CSV),
+                   une capture du boîtier v1.0b ; les caméras compatibles, le remplacement des vis (son README)
+3_3D-Models/       le boîtier v1.0 à imprimer (3MF) ; matières, tolérances, état de validation (son README)
 4_Firmware/        le firmware (ESP-IDF) ; sim/, les faux objectifs et les tests ; traces/, les traces du 135 ; run.sh,
                    build.sh ; gen_lens_names.py, le générateur de la table des noms d'objectifs
 5_App/             la page de banc (emount-bench.html) et ses tests (run.sh)
   tool_station/    le commutateur Custom du Samyang AF 135
-6_Driver/indi/     le driver INDI « Basilisk E-mount Lens » (LGPL 2.1, son README)
+6_Driver/indi/     le driver INDI : `pinefeat_cef` d'INDI, ses correctifs et notre extension (LGPL 2.1, son README)
 7_Docs/
   PROTOCOL.md      le contrat série de la carte : lettres, réponses, erreurs, journal
   DOCTRINE.md      pourquoi le code est écrit comme il l'est
   MANUEL.md        ce fichier
 8_References/      ce que le projet consulte, pas ce qu'il produit (la documentation d'interopérabilité des
                    objectifs ira dans 7_Docs/)
-9_Assets/          le dossier de l'humain : la fiche et l'affiche lues par le site zUrp, les images du README
+9_Assets/          la fiche (au format du site) et l'affiche lues par le site zUrp, les images du README ; l'affiche
+                   et les images sont tenues par l'org
 ```
 
 ## Licence

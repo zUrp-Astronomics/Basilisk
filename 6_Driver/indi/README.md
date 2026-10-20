@@ -1,182 +1,227 @@
-# indi_basilisk_focus — driver INDI pour la carte Basilisk
+# Driver INDI `pinefeat_cef` — l'amont, ses correctifs, l'extension Basilisk
 
 **Date** : 2026-09-24
-**Dernière révision** : 2026-10-11 (ticket #606 : driver 0.9, comme la carte ; la XIAO de banc retirée) ; 2026-10-11 (ticket #600 : les bornes de `r` et `CALIBRATE` contre notre carte, `ext=1`) ; 2026-10-11 (ticket #594 : la température et l'humidité de la carte, `z`) ; 2026-10-08
-**Statut** : actif — driver 0.9
-**Référencé par** : `README.md` (§ Software), `7_Docs/MANUEL.md`, `6_Driver/indi/CMakeLists.txt`, `6_Driver/indi/UPSTREAM.md`, job `indi` de `.gitea/workflows/ci.yml`
+**Dernière révision** : 2026-10-20 (ticket #648 : le driver en 1.2, l'extension ne monte plus la version, vérifiée
+après chaque série ; le firmware en 1.3) ; 2026-10-19 (ticket #645, reprise de la revue de la PR #646 : le relatif et les fins illisibles
+sous `ext=1` joués, le symptôme de chaque correctif vérifié sur l'amont, la réponse à `v` hors forme fixée) ; 2026-10-19
+(ticket #645 : le driver redevient l'amont, plus deux séries de patchs proposables à
+indilib, les correctifs puis l'extension ; le nom, l'identité et la numérotation de l'amont ; INDI 2 ; démontré en CI) ;
+2026-10-19 (ticket #641 : le point de rosée ou de givre de la carte) ; 2026-10-11 (tickets #594, #600, #606) ; 2026-10-08
+**Statut** : actif — l'amont `1dd9b34f24df6fd74ed45be17823fc937e192b47`, puis `patches/fixes`, puis `patches/basilisk`
+**Référencé par** : `README.md` (§ Software), `7_Docs/MANUEL.md`, `CLAUDE.md` (§ Gotchas), `6_Driver/indi/UPSTREAM.md`,
+`6_Driver/indi/CMakeLists.txt`, `6_Driver/indi/test.sh`, job `indi` de `.gitea/workflows/ci.yml`
 
-Focuser INDI (Ekos) pour la carte Basilisk et un objectif E-mount. C'est le driver Pinefeat d'origine
-(`pinefeat_cef` du cœur d'INDI) avec un lot « étendu » par-dessus. Les défauts du code d'origine sont notés
-dans [`UPSTREAM.md`](UPSTREAM.md). Sur décision de l'humain, notre fourche en corrige une partie : la réponse
-de 15 caractères (2026-10-04), puis les points R9 de l'audit statique du 2026-10-06 (2026-10-07, plan de
-robustesse de l'atelier), puis, contre notre carte seulement (`ext=1`), les bornes de `r` (L09-03, 2026-10-11) ; les
-autres restent tels quels. `UPSTREAM.md` dit lesquels.
+Le driver de ce répertoire est le focuser Pinefeat d'INDI, `pinefeat_cef`, pris dans `indilib/indi`, enrichi de deux
+séries de patchs, chacune proposable telle quelle à indilib comme une pull request distincte :
 
-## Base : le driver Pinefeat d'origine
+1. **`patches/fixes/`, les correctifs** : sept défauts de l'amont, un patch par défaut, et la version du driver
+   montée à 1.2 ; ils valent pour tout contrôleur ;
+2. **`patches/basilisk/`, l'extension Basilisk** : un patch, par-dessus, qui ajoute le lot de notre carte, défini
+   seulement pour une carte qui l'annonce (`ext=1`) ; elle ne change pas la version, 1.2 (décision de l'humain).
 
-`pinefeat_cef.h` et `pinefeat_cef.cpp` sont les fichiers d'`indilib/indi`,
-`drivers/focuser/pinefeat_cef.{h,cpp}`, au commit `1dd9b34f24df6fd74ed45be17823fc937e192b47`. Leurs
-propriétés, leurs noms et leur comportement sur `v f r e a d s c` sont repris tels quels, sauf, contre notre carte
-(`ext=1`), les bornes de `r` et `CALIBRATE` (« Les bornes de `r` », plus bas) :
-`FIRMWARE_VERSION`, `FOCUS_DISTANCE`, `CALIBRATE`, `ABS_APERTURE`, `REL_APERTURE`, `RANGE_APERTURE`,
-et les propriétés standard des focusers INDI (position absolue et relative, `FOCUS_MAX`, vitesse).
-Sans `ext=1`, `CALIBRATE` est celui d'origine : il envoie `c`, passe la position absolue et `FOCUS_MAX` à `Busy`, et
-le maximum de `r` n'entre dans `FOCUS_MAX` qu'à la relecture qui suit (`UPSTREAM.md`, L09-03). La
-carte ne connaît pas la distance de mise au point : `FOCUS_DISTANCE` affiche sa réponse à `d`, `-`.
+Il n'y a pas de troisième couche : `pinefeat_cef.h` et `pinefeat_cef.cpp` sont exactement l'amont, puis les correctifs,
+puis l'extension, et la CI le vérifie à chaque run (§ « Ce que la CI démontre »). Sur décision de l'humain
+(2026-10-19), le driver garde le nom, l'identité et la numérotation de l'amont : le binaire `indi_pinefeat_cef_focus`,
+le périphérique « Pinefeat EF Lens Controller », la version de `setVersion` montée comme le fait indilib : 1.2 par
+les correctifs, en supposant qu'indilib les accepte ; l'extension ne la monte pas (décision de l'humain, 2026-10-20). Il n'a pas
+de garde-fou de version : une carte se connecte quelle que soit la sienne. Rien n'est soumis chez indilib : l'humain
+contactera Pinefeat avant d'ouvrir les deux pull requests, dont les descriptions sont prêtes dans
+`patches/fixes/PULL_REQUEST.md` et `patches/basilisk/PULL_REQUEST.md`.
 
-Les écarts au comportement d'origine :
+## L'amont
 
-- **`r` est toujours lu.** L'amont ne le lit que si le mineur de `v` est au moins 3 ; ce contrôle est
-  retiré.
-- **Garde-fou de version.** À la connexion, le majeur de `v` doit égaler celui du driver (0). Sinon
-  la connexion est refusée, avec les deux versions dans le message
-  (`Board firmware 1.0 does not match driver 0.9: …`).
-- **La réponse à `v` est jugée sur sa forme** (audit R5). L'ouverture du port peut redémarrer la carte, et
-  les lignes de sa ROM (`ESP-ROM:…`, `SPIWP:0xee`…) arriver après l'envoi de `v`. Une ligne qui n'a pas la
-  forme `<maj>.<min>` n'est pas la réponse : elle est sautée, comme une ligne `* …`, jusqu'à la réponse ou
-  3 s après la commande (lue dans `EXT_BUF`, une longue ligne de la ROM est sautée entière). Sans réponse,
-  la connexion essaie `v` encore, trois fois en tout ; un `v` perdu dans le redémarrage est rattrapé par le
-  suivant. Sans aucune ligne de cette forme, la carte n'est pas détectée.
-- **Une ligne `* …` n'est jamais une réponse.** La page de banc peut laisser la carte en `LOG ON` ou
-  `LOG ALL`, qui émet des lignes `* …` (`PROTOCOL.md` § 3). Chaque commande saute celles qui arrivent
-  avant sa réponse, chacune jusqu'à son `\n`, quelle que soit sa longueur, et prend la ligne suivante ;
-  le saut s'arrête 3 s après la commande : une carte qui journalise sans jamais répondre échoue comme
-  une carte muette. L'entrée en attente avant une commande est lue et jetée
-  (l'amont la vidait par `tcflush`) : si elle finit au milieu d'une ligne, une ligne du journal coupée
-  entre deux paquets USB, la suite de cette ligne est sautée aussi. Le driver n'envoie jamais `LOG OFF`
-  (les majuscules ne sont pas pour un driver). Une carte Pinefeat n'émet, à notre connaissance, aucune
-  ligne `*` : rien n'y change pour elle.
-- **Une réponse de 15 caractères est lue en entier et terminée.** L'amont la lit dans un tampon de 16
-  octets que son `\n` remplit, sans zéro final : le journal, `strstr` et `sscanf` lisent au-delà
-  (`er range limits`, à `f<n>` ou `f±n` hors des bornes). Les tampons des réponses de l'amont ont un
-  octet de plus, et chaque réponse est terminée par un zéro ; le `\n` y reste rangé, comme avant
-  (`UPSTREAM.md`), et ce qui l'affiche le retire (ci-dessous).
-- **`a` est lu dans `EXT_BUF`, comme `t`** (audit S2). La carte répond à `a` en 15 caractères au plus ;
-  une carte plus ancienne rendait `er nocap aperture` (17), que le tampon de 16 octets de l'amont coupait
-  en erreur de lecture, la connexion et chaque relecture échouant avec lui.
-- **Les points R9 de l'audit** (`UPSTREAM.md`) : `nc` comparé en entier (L09-05) ; les déplacements
-  formatés `%u` (L09-08) ; l'état relu une fois par seconde, `e` et, à l'arrêt, `e f r d a` (L09-09 :
-  l'amont les envoyait à chaque passage du minuteur, 50 ms) ; `FIRMWARE_VERSION`, `FOCUS_DISTANCE`,
-  `RANGE_APERTURE` et le journal sans la fin de ligne de la réponse.
+`drivers/focuser/pinefeat_cef.{h,cpp}` d'`indilib/indi` au commit `1dd9b34f24df6fd74ed45be17823fc937e192b47`, la
+v2.2.5 (driver 1.1), identiques au `master` d'indilib le 2026-10-19. Leurs identifiants de blob git, que `test.sh`
+vérifie : `8ba29fef695e36f8c2267e27fbfea8a28556e03b` (`.cpp`), `4d99784cafa6f8375a65a096b11f42e1dc200449` (`.h`).
+Ses défauts, ceux que la série corrige et ceux qui restent, sont dans [`UPSTREAM.md`](UPSTREAM.md).
 
-## Le lot étendu : seulement si `t` porte `ext=1`
+## Les correctifs — `patches/fixes/`
 
-Après `v`, le driver envoie `t`. Si la ligne porte le jeton `ext=1` (comparé en entier), le lot est
-défini ; sinon (`er` d'une carte Pinefeat, pas de réponse, pas de jeton), le driver est l'amont plus le
-garde-fou de version : aucune propriété du lot, aucune de ses lettres n'est envoyée, pas même si un
-client écrit une de ses propriétés par son nom.
+Un correctif ne change que ce que décrit le défaut qu'il nomme, vers le comportement que l'amont visait ; tout autre
+changement visible est de l'extension (arbitrage de l'architecte, ticket #645). L'entrée d'`UPSTREAM.md` de chacun dit
+le défaut, et pourquoi il est un correctif.
+
+| Patch | Défaut corrigé (`UPSTREAM.md`) |
+|---|---|
+| `0001` | la réponse rendue telle que lue : sans zéro final à 15 caractères, sa fin de ligne dans les textes affichés et le journal, `nc` comparé par `strcmp(…) > 0` (L09-05) |
+| `0002` | `%d` pour les déplacements, des `uint32_t` (L09-08) |
+| `0003` | l'ouverture affichée sans décimale (L09-07) |
+| `0004` | l'état relu à chaque passage du minuteur, 50 ms, au lieu d'une fois par seconde (L09-09) |
+| `0005` | un `Busy` de déplacement ou de `CALIBRATE` sans fin quand l'état ne se lit plus |
+| `0006` | la même erreur de position au journal à chaque relecture, tant que l'objectif manque |
+| `0007` | le reste d'une ligne en retard pris pour la réponse suivante (L09-04, en partie) |
+| `0008` | la version du driver, 1.2 |
+
+Contre un adaptateur Pinefeat, sans `ext=1`, le driver de ce répertoire est l'amont avec ces seules différences.
+
+## L'extension — `patches/basilisk/`
+
+Notre carte sert le protocole Pinefeat sur `v f r e a d s c` (`7_Docs/PROTOCOL.md`), et le driver d'origine la pilote
+telle quelle. L'extension ajoute ce que la carte sert de plus. **Elle est optionnelle** : rien d'observable ne change
+pour un Pinefeat (arbitrage de l'architecte, ticket #645), le focus marche sans elle.
+
+**Le lot n'existe que si `t` porte `ext=1`.** Après `v`, le driver envoie `t`. Si la ligne porte le jeton `ext=1`
+(comparé en entier), le lot est défini ; sinon (`er` d'un adaptateur Pinefeat, pas de réponse, pas de jeton), aucune
+propriété du lot, aucune de ses lettres n'est envoyée, pas même si un client écrit une de ses propriétés par son nom.
 
 | Fonction | Lettres | Propriété | Note |
 |---|---|---|---|
 | ouverture relue | `o` | `APERTURE` (`FNUMBER`, lecture) | relue chaque seconde à l'arrêt : suit la bague de l'objectif ; `Idle` si l'objectif ne sert pas d'ouverture |
-| arrêt | `q` | `FOCUS_ABORT_MOTION` | la capacité « abort » standard (`FOCUSER_CAN_ABORT`), posée au handshake |
-| marque | `j` `js` `jg` `jx` | `FOCUS_MARK` (`MARK`, lecture) ; `FOCUS_MARK_CTL` (`MARK_SET`, `MARK_GOTO`, `MARK_CLEAR`) | rangée dans la carte ; la valeur est relue chaque seconde à l'arrêt (le bouton du fût la change aussi) |
+| arrêt | `q` | `FOCUS_ABORT_MOTION` | la capacité « abort » standard (`FOCUSER_CAN_ABORT`), posée à la connexion |
+| marque | `j` `js` `jg` `jx` | `FOCUS_MARK` (`MARK`, lecture) ; `FOCUS_MARK_CTL` (`MARK_SET`, `MARK_GOTO`, `MARK_CLEAR`) | rangée dans la carte ; relue chaque seconde à l'arrêt (le bouton du fût la change aussi) |
 | LED de statut | `k` `k<n>` | `LED_BRIGHTNESS` (`LEVEL`, 0 à 100 %, onglet Options) | la carte ne la garde pas : rangée dans la config INDI et renvoyée à chaque connexion ; la valeur affichée est celle que `k` relit |
 | fin d'un déplacement | `g` | la position absolue (et relative, pour un déplacement relatif) | lue quand `e` répond `n` après un déplacement lancé par le driver (absolu, relatif, `jg`), puis pendant la fenêtre de l'arrêt (ci-dessous) |
 | redémarrer l'objectif | `b` | `LENS_REBOOT` (`REBOOT`) | le dernier recours |
-| température et humidité de la carte | `z` | `FOCUS_TEMPERATURE` (`TEMPERATURE`, °C, lecture) ; `FOCUS_HUMIDITY` (`HUMIDITY`, %RH, lecture) | relues chaque seconde à l'arrêt ; **définies seulement tant que la carte les connaît** (ci-dessous). Avec une carte dont le firmware ne sert pas `z` (`er nocap`, plus envoyée de la connexion), ni l'une ni l'autre n'existe |
-| onglet « Lens » | `i` `w` `n` | `LENS_INFO` (`LENS_NAME`, `LENS_FIRMWARE`, `LENS_MODULE`, lecture) | relu chaque seconde à l'arrêt ; une réponse `er …` laisse son champ vide (ci-dessous). Une lettre qui répond `er nocap` n'est pas servie, dans tout état (`PROTOCOL.md` § 2) : elle n'est plus envoyée de la connexion. Le firmware actuel de la carte ne sert ni `w` ni `n` : chacune part une fois par connexion, `LENS_FIRMWARE` et `LENS_MODULE` sont vides |
+| nom de l'objectif | `i` | `LENS_INFO` (`LENS_NAME`, lecture, onglet « Lens ») | relu chaque seconde à l'arrêt |
+| température, humidité, point de rosée ou de givre | `z` | `FOCUS_TEMPERATURE` (`TEMPERATURE`, °C) ; `FOCUS_HUMIDITY` (`HUMIDITY`, %RH) ; `FOCUS_DEW_POINT` (`DEW_POINT`, °C), en lecture | relues chaque seconde à l'arrêt ; **définies seulement tant que la carte les connaît** (ci-dessous) |
+| bornes de la position | `r` | la plage de la position absolue et de `FOCUS_MAX` ; `CALIBRATE` | ci-dessous |
 
-Le protocole est celui de `PROTOCOL.md`.
-
-**La fin d'un déplacement se lit par `g`**, jamais par `DEBUG` (les majuscules ne sont pas pour un
-driver). Quand `e` répond `n` après un déplacement lancé par le driver, il lit `g` :
+**La fin d'un déplacement se lit par `g`**, jamais par `DEBUG` (les majuscules ne sont pas pour un driver) :
 
 | `g` | état de la position |
 |---|---|
 | `ok` | `Ok` |
-| `aborted` (le `q` de `FOCUS_ABORT_MOTION`, seul à l'envoyer : le bouton du fût n'en envoie pas) | `Idle`, l'état qu'`INDI::Focuser` donne à un abandon réussi (libindi 1.9.9 et 2.1.0) : une annulation n'est pas un échec |
+| `aborted` (le `q` de `FOCUS_ABORT_MOTION`, seul à l'envoyer : le bouton du fût n'en envoie pas) | `Idle`, l'état qu'`INDI::Focuser` donne à un abandon réussi : une annulation n'est pas un échec |
 | `stall`, `unconfirmed`, `-`, pas de réponse | `Alert`, et le résultat au journal du driver |
 
-Une position que `f` ne lit pas (`nc`, `er fault`) donne `Alert`, quel que soit `g`. Cet état reste
-jusqu'au déplacement suivant : la relecture de la position à l'arrêt ne le remet pas à `Ok` (l'amont le
-fait, à chaque relecture).
-
-**La fenêtre de l'arrêt.** Après `stall` ou `aborted`, le driver relit `g` à chaque passage du minuteur
-pendant 5 s (`unconfirmed` arrive au plus 4,5 s après le premier envoi du `0x1C`, `PROTOCOL.md` § 3). S'il
-passe à `unconfirmed`, la position passe à `Alert`, et le journal dit `Stop not confirmed: the motor state
-is unknown.` ; s'il change autrement, ou à la fin des 5 s, le suivi s'arrête et l'état reste. Un
-déplacement lancé dans la fenêtre l'arrête aussi.
-
-**Tout `Busy` posé par le lot étendu se termine**, quand `e` répond `n` : un déplacement par `g` (ci-dessus),
-`b` par `f` (`Ok` s'il rend une position, `Alert` sinon). Un objectif retiré ou en `FAULT` (`e` à `n`, `f`
-en erreur) donne donc `Alert`, jamais un `Busy` sans fin. `CALIBRATE` n'en pose aucun contre notre carte (ci-dessous) ;
-sans `ext=1`, son `Busy` est celui de l'amont (`UPSTREAM.md`).
+Une position que `f` ne lit pas (`nc`, `er fault`) donne `Alert`, quel que soit `g`. Cet état reste jusqu'au
+déplacement suivant : la relecture de la position à l'arrêt ne le remet pas à `Ok`. Après `stall` ou `aborted`, le
+driver relit `g` à chaque passage du minuteur pendant 5 s (`unconfirmed` arrive au plus 4,5 s après le premier envoi du
+`0x1C`, `PROTOCOL.md` § 3) : s'il passe à `unconfirmed`, la position passe à `Alert` et le journal dit `Stop not
+confirmed: the motor state is unknown.` ; s'il change autrement, ou à la fin des 5 s, le suivi s'arrête. Un déplacement
+lancé dans la fenêtre l'arrête aussi. **Tout `Busy` posé par le lot se termine** quand `e` répond `n` : un déplacement
+par `g`, `b` par `f` (`Ok` s'il rend une position, `Alert` sinon).
 
 **Les bornes de `r` sont la plage de la position.** Contre notre carte, ce sont celles que l'objectif publie
-(`PROTOCOL.md`, ligne `r`) : rien n'est mesuré, il n'y a rien à calibrer (décision de l'humain, ticket #600). Le driver
-lit les deux nombres de `r` et pose, à la connexion et à chaque lecture réussie (une fois par seconde à l'arrêt, après
-`f`), la plage de la position absolue et celle de `FOCUS_MAX` sur `<min>..<max>`, et la valeur de `FOCUS_MAX` sur
-`<max>` ; il ne les envoie aux clients que si elles ont changé, et le journal le dit (`Lens focus range 13873-30738.`).
-Une cible hors de la plage, absolue ou relative, est refusée par `INDI::Focuser` avant d'atteindre la carte (`Requested
-position out of bound…`, libindi 1.9.9). Un nouvel objectif apporte ses bornes à la première lecture réussie ; une
-lecture qui échoue (objectif retiré, `nc`) ne change rien : les dernières bornes connues restent. Chaque connexion
-repart de la plage d'origine, 0 à 32767, jusqu'à sa première lecture. Un `FOCUS_MAX` écrit par un client, dont
-`INDI::Focuser` fait une plage depuis 0, est remis aux bornes de `r` à la lecture suivante. **`CALIBRATE` rend ces
-bornes** : il relit `r` et les pose, sans `Busy`, sans envoyer `c` (la carte y répond `ok` sans rien faire), sans rien
-déplacer ; `Ok`, ou `Alert` si `r` échoue, les bornes connues gardées. Contre un adaptateur Pinefeat (sans `ext=1`),
-dont `r` porte une plage calibrée, rien de cela : les bornes et `CALIBRATE` sont ceux de l'amont (`UPSTREAM.md`,
-L09-03).
+(`PROTOCOL.md`, ligne `r`) : rien n'est mesuré, il n'y a rien à calibrer (décision de l'humain, ticket #600). À chaque
+lecture réussie de `r` (la connexion, puis une fois par seconde à l'arrêt), le driver pose la plage de la position
+absolue et celle de `FOCUS_MAX` sur `<min>..<max>`, et la valeur de `FOCUS_MAX` sur `<max>` ; il ne les envoie aux
+clients que si elles ont changé, et le journal le dit (`Lens focus range 13873-30738.`). Une cible hors de la plage est
+refusée par `INDI::Focuser` avant d'atteindre la carte. Une lecture qui échoue ne change rien : les dernières bornes
+connues restent. Chaque connexion repart de la plage de l'amont, 0 à 32767. **`CALIBRATE` rend ces bornes** : il relit
+`r` et les pose, sans `Busy`, sans envoyer `c` (la carte y répond `ok` sans rien faire), sans rien déplacer ; `Ok`, ou
+`Alert` si `r` échoue. Contre un adaptateur Pinefeat, rien de cela : les bornes et `CALIBRATE` sont ceux de l'amont,
+parce que personne ici ne sait ce que rend son `r` avant une calibration (`UPSTREAM.md`, L09-03).
 
-Joué une fois, hors de la CI (2026-10-11, un essai du ticket #600 sur le runner, non gardé dans le dépôt) : sous
-`indiserver` (libindi 1.9.9), contre une fausse carte sur un pty. Avec `ext=1` : la plage 13873..30738 posée à la
-connexion ; un goto à 5000 et un déplacement relatif au-delà du maximum refusés, sans qu'aucun `f` parte ; `CALIBRATE`
-sans `c` ni déplacement, `FOCUS_MAX` sur le maximum de `r`, pas sur la position ; l'objectif retiré (`nc`), les bornes
-gardées et `CALIBRATE` en `Alert` ; un nouvel objectif (1000-9000) appliqué à la lecture suivante ; un `FOCUS_MAX` écrit
-par le client, remis à la lecture suivante ; reconnecté à une carte sans `ext=1`, la plage 0..32767. Sans `ext=1` : les
-états d'`ABS_FOCUS_POSITION`, `FOCUS_MAX` et `CALIBRATE` et les commandes envoyées, étape par étape, identiques à ceux
-du driver d'avant. Le même essai a compilé et lié le driver contre libindi 2.2.5, construite depuis ses sources.
+**Le mineur de `v` décide toujours si `r` est lu** : c'est la règle de l'amont, que l'extension ne contourne pas. Notre
+firmware répond `1.3` (décision de l'humain, pour cette règle), `r` est lu. Une carte dont le mineur serait sous 3 ferait perdre les bornes à ce driver aussi,
+extension comprise : la plage resterait celle de l'amont, et `CALIBRATE` répondrait `Ok` sans rien lire.
 
-**Une erreur n'est pas une valeur.** Dans `FOCUS_MARK` et `LENS_INFO`, une réponse `er …` laisse son
-champ vide. L'état de la propriété : `Alert` si une lettre est refusée pour l'instant (`er nolens`,
-`er busy boot`, `er fault` : la valeur existe, elle ne se lit pas) ; sinon `Ok` si un champ porte une
-valeur ; sinon `Idle` (`er nocap` : la carte ne la sert pas, comme `w` et `n` aujourd'hui).
+**Une erreur n'est pas une valeur.** Dans `FOCUS_MARK` et `LENS_INFO`, une réponse `er …` laisse le champ vide ; l'état
+est `Alert` si la valeur existe mais ne se lit pas pour l'instant (`er nolens`, `er busy boot`, `er fault`), `Idle` si
+la carte ne la sert pas (`er nocap` : pas d'identité d'objectif pour la marque), `Ok` avec une valeur.
 
-**La température et l'humidité ne sont jamais publiées inconnues.** `FOCUS_TEMPERATURE`, élément `TEMPERATURE`, en °C,
-en lecture seule, est la propriété de convention que lit Ekos, pour refocaliser sur un écart de température (« Refocus
-if ΔT° > ») et pour l'Adaptive Focus ; il prend toute valeur publiée telle quelle, sans regarder l'état de la propriété.
-`FOCUS_HUMIDITY` (`HUMIDITY`, %RH, lecture seule) est propre à ce driver : INDI n'a pas de convention pour l'humidité
-d'un focuser ; elle n'est qu'affichée. Les deux viennent de la même réponse de `z` (`21.37 48.02`) : la carte rend `-`
-quand elle ne les connaît pas (pas encore lues, capteur muet, lecture fausse, bus bloqué, dernière lecture de plus de
-3 s ; `PROTOCOL.md` § 2). Le driver ne publie donc les deux propriétés que tant que la carte rend deux nombres : il les
-définit à la première valeur, les met à jour ensuite, et les **supprime** dès que la carte rend `-`, ne répond pas, ou
-répond autre chose ; un client ne voit alors aucun nombre, plutôt qu'un nombre ancien qu'Ekos prendrait pour frais. Le
-journal du driver le dit (`Board temperature and humidity known.` / `… unknown: not published.`). Le driver ne calcule
-rien (pas de point de rosée) et ne compense rien.
+**La température, l'humidité et le point de rosée ne sont jamais publiés inconnus.** `FOCUS_TEMPERATURE` est la
+propriété de convention que lit Ekos, pour refocaliser sur un écart de température et pour l'Adaptive Focus ; il prend
+toute valeur publiée telle quelle, sans regarder l'état de la propriété. `FOCUS_HUMIDITY` et `FOCUS_DEW_POINT` sont
+propres à ce driver, affichés seulement. Les trois viennent de `z` (`21.37 48.02 9.91`) : la température, l'humidité,
+puis le seuil de condensation que la carte calcule, le point de rosée s'il est positif ou nul, le point de givre s'il
+est négatif ; le driver le publie tel quel, sans rien calculer ni compenser. La carte rend `-` seul quand elle ne connaît
+pas la mesure, et le seuil `-` quand elle ne le définit pas (`PROTOCOL.md` § 2). Chaque propriété n'existe que tant que
+la carte en rend la valeur : définie à la première, mise à jour ensuite, **supprimée** dès que la carte ne la rend plus,
+ne répond pas, ou répond autre chose ; un client ne voit alors aucun nombre plutôt qu'un nombre ancien. Le journal le
+dit (`Board temperature and humidity known.` / `… unknown: not published.`, `Board dew or frost point known.` / `…`).
 
-Joué une fois, hors de la CI (2026-10-11, un essai du ticket #594 sur le runner, non gardé dans le dépôt) : sous
-`indiserver` (libindi 1.9.9), contre une fausse carte sur un pty dont `z` change : `21.37 48.02` → les deux propriétés
-lues par `indi_getprop` (21,37 et 48,02) ; `-` → les deux absentes ; `-3.05 87.50` → de nouveau là ; `er nocap` →
-absentes, et `z` n'est plus envoyée.
+### Ce qu'un Pinefeat en voit
 
-## Compilation
+Avant que `t` réponde, le driver ne sait pas à qui il parle ; l'extension a donc trois effets sur tout contrôleur, et
+c'est tout ce qu'un adaptateur Pinefeat en voit :
+
+- **`t`, une fois par connexion.** Un adaptateur Pinefeat y répond `er` (`PROTOCOL.md` § 2 ; c'est ce qui le
+  distingue) ; s'il ne répondait rien, la connexion attendrait 3 s de plus et le journal dirait une erreur de lecture.
+- **Une ligne qui commence par `*` n'est jamais une réponse** : la page de banc peut laisser notre carte en `LOG ON`, qui
+  émet des lignes `* …` (`PROTOCOL.md` § 3). Elle est sautée jusqu'à sa fin de ligne, quelle que soit sa longueur, et la
+  réponse est la ligne suivante, jusqu'à 3 s après la commande. Aucune réponse de Pinefeat ne commence par `*`.
+- **À `v`, seule une ligne de la forme d'une version est la réponse** (`<majeur>.<mineur>`, ce que l'amont lit déjà
+  comme version), lue dans un grand tampon. L'ouverture du port peut redémarrer notre carte, et les lignes de sa ROM
+  (`ESP-ROM:…`, `SPIWP:0xee`…) arrivent après l'envoi de `v` : sautées jusqu'à la version ou 3 s après la commande ;
+  l'amont essaie `v` trois fois. Sans elles, notre carte retrouve le refus de connexion de l'audit R5. Un adaptateur
+  Pinefeat répond à `v` par sa version : il n'y voit rien. S'il répondait autre chose, il ne se connecterait plus.
+
+Ces deux dernières sont de l'extension, pas des correctifs : elles ne corrigent aucun défaut de l'amont face à un
+Pinefeat.
+
+## Compiler, installer à côté du paquet
 
 ```
-sudo apt install libindi-dev cmake make g++ pkg-config
-cd indi && mkdir build && cd build && cmake .. && make && sudo make install
+sudo apt install cmake make g++ pkg-config libindi-dev     # libindi 2 : le PPA d'INDI, ppa:mutlaqja/ppa
+cmake -S 6_Driver/indi -B build && make -C build
+sudo make -C build install
 ```
 
-`bash 6_Driver/indi/build.sh`, depuis n'importe quel répertoire, compile et lie dans `6_Driver/indi/build` (recréé à chaque fois), sans
-installer.
+`bash 6_Driver/indi/build.sh`, depuis n'importe quel répertoire, fait les deux premières lignes dans
+`6_Driver/indi/build`, sans installer. Le driver se construit contre libindi 2 seulement (2.2.5 en CI) ; contre 1.9.9,
+`cmake` le refuse.
 
-Vérifié en CI (job `indi` de `.gitea/workflows/ci.yml`) : compilé et lié contre libindi 1.9.9
-(Ubuntu 24.04). Le fichier amont est écrit pour libindi 2.x ; sous 1.9.9, les propriétés de la classe
-de base `INDI::Focuser` n'ont pas encore les accesseurs qu'il emploie : `pinefeat_cef.h` les leur
-donne, sous `#if INDI_VERSION_MAJOR < 2`, sans toucher au reste ; un champ y est atteint par une petite
-vue qui tient l'`INumber` lui-même (`NumberField`), pas par une conversion en `WidgetView<INumber>`, qu'il
-n'est pas (audit R9).
+**Le binaire porte le nom de l'amont, `indi_pinefeat_cef_focus`, que le paquet `indi-bin` installe aussi**, dans
+`/usr/bin`. `make install` installe le nôtre sous le préfixe de `cmake`, `/usr/local` par défaut : à côté, sans écraser
+celui du paquet, ni être écrasé par une mise à jour du paquet. Ne pas passer `-DCMAKE_INSTALL_PREFIX=/usr` : ce serait
+remplacer en silence le fichier du paquet. `indiserver`, que lance Ekos, trouve un driver par le `PATH`, où
+`/usr/local/bin` vient avant `/usr/bin` sur une installation Ubuntu ordinaire : `command -v indi_pinefeat_cef_focus` dit
+lequel sera pris. Pour revenir au driver du paquet, `sudo rm /usr/local/bin/indi_pinefeat_cef_focus`. Dans Ekos, le
+driver est déjà déclaré par INDI (`drivers.xml`) : dans le profil, Focuser → « Pinefeat CEF » ; le périphérique se nomme
+« Pinefeat EF Lens Controller » dans le panneau INDI ; port série de la carte, la vitesse est sans effet (un port USB).
 
-Joué une fois, hors de la CI (2026-10-08, un essai du ticket #545 sur le runner, non gardé dans le dépôt) : sous
-`indiserver` (libindi 1.9.9), contre une fausse carte sur un pty — la ROM puis la réponse à `v`, le premier `v` perdu,
-une ligne courte de la ROM en tête (le driver d'avant y refusait la connexion) : connecté, la version lue, `a` de 17
-caractères lu en entier, `w` et `n` une fois, `e` une fois par seconde. Aucune suite ne joue le driver. `pkg-config` est nécessaire :
-`libindi-dev` ne fournit pas de `FindINDI.cmake`.
+## Ce que la CI démontre
 
-Puis dans Ekos : Focusers → « Basilisk E-mount Lens », port série de la carte, 115200. Le nom
-d'installation est `indi_basilisk_focus` : il ne rentre pas en collision avec `indi_pinefeat_cef_focus`.
+Le job `indi` de `.gitea/workflows/ci.yml` (Ubuntu 26.04, libindi-dev 2 du PPA d'INDI) joue `build.sh`, puis
+`test.sh`, qui, dans `6_Driver/indi/build-test` :
+
+1. **retire les deux séries** des fichiers de ce répertoire, dans l'ordre inverse, et vérifie que restent les fichiers
+   de l'amont (leurs identifiants de blob) ; puis **applique chaque série par `git am`** sur l'état qui la précède, et
+   vérifie que l'amont, puis les correctifs, puis l'extension rendent les fichiers de ce répertoire, octet pour octet ;
+2. vérifie que **les lignes touchées par chaque série suivent le style d'indilib** : passées à `astyle` avec les options
+   du `README.md` d'indilib, comme le fait son `scripts/check-codestyle.sh` ;
+3. **compile les trois états**, l'amont, l'amont et les correctifs, le driver, et les joue par
+   [`test/test_driver.py`](test/test_driver.py) : chaque binaire lancé seul, parlé en XML INDI sur son entrée et sa
+   sortie standard, contre un faux contrôleur sur un pty.
+   - **Contre un faux Pinefeat** (`v f r e a d s c`, `er` à toute autre lettre), les trois états. La version que chacun
+     déclare (`DRIVER_INFO`) : 1.1 l'amont, 1.2 après les correctifs, 1.2 encore après l'extension. Les contrôles du
+     comportement de l'amont (la connexion à `v` = 1.3, 1.2, 0.9 et 2.0, `r` lu selon le mineur ; le goto, le
+     déplacement relatif, la vitesse, l'ouverture, `CALIBRATE` d'origine ; aucune propriété du lot et aucune de ses
+     lettres, même écrites par leur nom ; libindi 2 refuse lui-même une propriété non définie,
+     avant le driver, comme pour l'amont) passent sur les trois : sans `ext=1`, l'extension ne se voit que par un `t` par
+     connexion. Une exception, fixée par son propre contrôle : une réponse à `v` qui n'a pas la forme `<maj>.<min>`
+     (`abc`) est prise pour la version par l'amont et par les correctifs, et le contrôleur n'est pas détecté par le
+     driver (§ « Ce qu'un Pinefeat en voit »). Chaque contrôle d'un correctif passe sur les correctifs et sur le driver,
+     et échoue sur l'amont **avec le symptôme qu'il déclare** (un fragment de son message d'échec : `'1.3\n'`,
+     « lens is not attached » pour `oops`, `%.f`, deux `e` à moins de 0,1 s, l'attente d'`Alert` qui expire, l'erreur
+     journalisée plus d'une fois, `e` suivi de `e` après la ligne en retard) : un échec d'une autre cause est un échec du
+     jeu. Seul celui de la réponse de 15 caractères n'est pas joué sur l'amont, dont la lecture au-delà du tampon ne
+     donne pas de symptôme certain. La ligne en retard est écrite après la dernière commande d'une relecture, et sa
+     suite arrive devant le `e` de la suivante : la confusion avec la cadence de l'amont (L09-09) est écartée.
+   - **Contre une fausse Basilisk** (`ext=1`), le driver : la connexion à travers le redémarrage (les lignes de la ROM
+     au premier `v`) et un journal `LOG ON` devant chaque réponse, une ligne coupée autour d'une commande ; le lot
+     défini, `w` et `n` jamais envoyées ; les bornes de `r` et `CALIBRATE` ; la fin d'un déplacement absolu **et
+     relatif** par `g` (`ok`, `stall`, `aborted` par `q`, puis `unconfirmed`, sur `ABS_FOCUS_POSITION` comme sur
+     `REL_FOCUS_POSITION`) ; une fin dont `f` ne se lit plus, `Alert` malgré `g` à `ok`, et un redémarrage (`b`) après
+     lequel `f` ne répond pas, `Alert` ; la marque ; la LED, posée, sauvée dans la config INDI et renvoyée (`k40`, relue)
+     à une carte neuve à la connexion suivante ; le redémarrage ; `o`, `i`, `z` et ses formes inconnues ;
+     puis un Pinefeat sur le même driver, sans lot et sur la plage de l'amont.
+
+   Les contrôles attendent des événements (une commande reçue, un état publié), pas des durées : un runner lent ne les
+   fait qu'attendre plus. Quand un contrôle vérifie une absence (aucune lettre envoyée), il attend que le driver ait
+   traité tout ce qui précède : `FOCUS_SPEED` posé et relu. La cadence se juge sur l'écart entre deux `e` consécutifs
+   (au moins 0,9 s), qu'une charge ne peut qu'allonger.
+
+Ce que ces faux contrôleurs font est écrit dans `test/test_driver.py` : le protocole de `PROTOCOL.md` pour la carte, la
+lecture que fait l'amont de ses réponses pour le Pinefeat, des durées inventées (un déplacement dure 1 s). Aucun
+adaptateur Pinefeat n'a été branché sur ce driver ; sur matériel, rien de ce qui précède n'est démontré par la CI.
+`test.sh` n'est pas dans `## Test` du `CLAUDE.md` : la sonde de pertinence rejoue `## Test` dans une image où libindi 2
+n'existe pas.
+
+## Refaire une série
+
+Les fichiers de ce répertoire et les patchs changent ensemble, dans le même commit, et `test.sh` refuse qu'ils
+divergent. Pour changer un correctif ou l'extension : dans un dépôt où `drivers/focuser/pinefeat_cef.{h,cpp}` sont ceux
+de l'amont (un clone d'indilib au commit nommé, ou l'arbre `build-test/upstream` que laisse `test.sh`), `git am` les
+deux séries, modifier le commit voulu (`git rebase -i`), puis `git format-patch --zero-commit --no-signature` de chaque
+série dans son répertoire, et copier les deux fichiers du driver ici. Le message de chaque commit est la description du
+défaut corrigé ; `PULL_REQUEST.md` de chaque série se met à jour avec lui.
 
 ## Licence
 
-Le driver est sous LGPL 2.1 ou ultérieure, comme le fichier d'origine, dont l'en-tête (Pinefeat LLP,
-puis le Moonlite de Jasem Mutlaq) est conservé, suivi de la ligne des modifications. Le texte intégral
-de la LGPL 2.1 est dans [`LICENSE`](LICENSE), à côté de ce fichier. Il ne couvre que `6_Driver/indi/`.
+Le driver est sous LGPL 2.1 ou ultérieure, comme le fichier d'origine, dont l'en-tête (Pinefeat LLP, puis le Moonlite de
+Jasem Mutlaq) est conservé ; l'extension y ajoute sa ligne (zUrp Astronomics, 2026). Les fichiers sont modifiés par les
+patchs de `patches/`, datés dans leur en-tête. Le texte intégral de la LGPL 2.1 est dans [`LICENSE`](LICENSE), à côté de
+ce fichier ; il couvre `6_Driver/indi/`.

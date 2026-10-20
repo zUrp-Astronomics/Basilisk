@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: captain <captain@lcars.local>
+Date: Mon, 19 Oct 2026 18:54:49 +0200
+Subject: [PATCH 5/8] Pinefeat CEF: end a Busy move or calibration when the
+ state can't be read
+
+A move sets the absolute (and relative) position Busy, and an accepted
+CALIBRATE sets the absolute position and FOCUS_MAX Busy. Only
+updateProperties() ends them, and TimerHit() calls it only when `f`, `r`,
+`d` and `a` all answer once `e` reports the focuser still. A lens
+removed, or a controller that can't read it (`f` answering `nc`), left
+them Busy for ever: a client waiting for the end of the move or of the
+calibration waited for ever too.
+
+Once `e` reports the focuser still, a read that fails now turns each of
+these properties that is still Busy to Alert. A successful read ends
+them as before.
+---
+ drivers/focuser/pinefeat_cef.cpp | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
+index afdb1dc..5b2da96 100644
+--- a/drivers/focuser/pinefeat_cef.cpp
++++ b/drivers/focuser/pinefeat_cef.cpp
+@@ -489,6 +489,28 @@ void PinefeatCEF::TimerHit()
+         {
+             updateProperties(pos, max, dist, aper);
+         }
++        else
++        {
++            // Stopped, and the state can't be read (no lens, a fault): a move or a calibration still Busy has
++            // failed. Only a successful read ends it otherwise.
++            if (FocusAbsPosNP.getState() == IPS_BUSY)
++            {
++                FocusAbsPosNP.setState(IPS_ALERT);
++                FocusAbsPosNP.apply();
++            }
++
++            if (FocusRelPosNP.getState() == IPS_BUSY)
++            {
++                FocusRelPosNP.setState(IPS_ALERT);
++                FocusRelPosNP.apply();
++            }
++
++            if (FocusMaxPosNP.getState() == IPS_BUSY)
++            {
++                FocusMaxPosNP.setState(IPS_ALERT);
++                FocusMaxPosNP.apply();
++            }
++        }
+     }
+ 
+     SetTimer(getCurrentPollingPeriod());

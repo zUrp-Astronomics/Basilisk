@@ -3,10 +3,12 @@
  * DATE: 2026-10-11
  * STATUS: actif — déclarations seulement ; sur la carte components/sensor/sensor_board.c, en test sim/sensor_none.c (le
  *         capteur avant sa première lecture) ou le test lui-même (sim/test/test_host.c) ; ticket #606 : la carte v1.0
- *         seule, toujours un capteur
+ *         seule, toujours un capteur ; ticket #641 : le seuil de condensation, calculé hors de la tâche du capteur
  *
- * La température et l'humidité relative de l'air autour de la carte, lues sur son SHT40. La carte les rapporte (PROTOCOL.md, `z` et `:GT#`) ; elle n'en fait rien d'autre, aucune
- * compensation (décision de l'humain, [D120]).
+ * La température et l'humidité relative de l'air autour de la carte, lues sur son SHT40. La carte les rapporte
+ * (PROTOCOL.md, `z` et `:GT#`), avec le seuil de condensation qu'elle en calcule (le point de rosée ou de givre, `z` ;
+ * components/host/host.c, sur la tâche de SESSION) ; elle n'en fait rien d'autre, aucune compensation (décisions de
+ * l'humain, [D120] et ticket #641).
  *
  * Invariants :
  *   - une valeur inconnue n'est jamais rendue comme un nombre : `st` le dit, et t_c, rh_c ne valent que sous
