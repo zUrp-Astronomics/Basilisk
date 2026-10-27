@@ -3,7 +3,7 @@
  * DATE: 2026-10-03
  * STATUS: actif — C pur, sans ESP-IDF : compilé pour la carte et par les tests hôte
  *
- * Le codec de trame, la réception en flux et la présence de D2 (voir phy_common.h). */
+ * Le codec de trame, la réception en flux, la présence de D2 et les événements des FAULT (voir phy_common.h). */
 #include "phy_common.h"
 
 #include <string.h>
@@ -129,6 +129,12 @@ void rx_flush(rx_t *r, bsk_phy_raw_t *raw)
     r->n = 0;
 }
 
+void rx_clear(rx_t *r)
+{
+    r->n = 0;
+    r->junk.n = r->junk.len = 0;
+}
+
 bool pres_sample(pres_t *p, bool present, uint64_t t)
 {
     if (present != p->raw) {
@@ -154,4 +160,16 @@ bool pres_next(pres_t *p, uint64_t before, bsk_phy_event_t *e)
     if (drop) p->drop = false;
     else p->ins = false;
     return true;
+}
+
+uint8_t fault_events(fault_ev_t k, bsk_rail_t rail, bool on, uint64_t t, bsk_phy_event_t e[2])
+{
+    e[0] = (bsk_phy_event_t){.kind = BSK_PHY_FAULT, .t_us = t};
+    e[0].u.fault.rail = rail;
+    e[0].u.fault.on = on;
+    e[0].u.fault.active = k != FAULT_OFF && k != FAULT_REON;   /* le premier : l'activation, sauf après une retombée */
+    if (k != FAULT_PULSE && k != FAULT_REON) return 1;
+    e[1] = e[0];
+    e[1].u.fault.active = !e[0].u.fault.active;               /* le second, au même instant */
+    return 2;
 }

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: captain <captain@lcars.local>
 Date: Mon, 19 Oct 2026 18:55:18 +0200
-Subject: [PATCH 7/8] Pinefeat CEF: don't take the rest of a stale line for the
+Subject: [PATCH 8/9] Pinefeat CEF: don't take the rest of a stale line for the
  next reply
 
 A reply that comes after its command's timeout (CEF_TIMEOUT) stays on
@@ -18,6 +18,13 @@ the reply. The input is no longer flushed after the reply: what follows
 it is left to the next command, which discards it the same way. The
 output is flushed before each command, as before.
 
+Neither read can hold the driver longer than the reply could: the
+pending input is read only as far as it was received when the command
+starts, and the rest of its line is read within the reply's deadline,
+CEF_TIMEOUT after the command. A controller that keeps sending without
+a delimiter makes the command fail after CEF_TIMEOUT, as when no reply
+comes.
+
 This fixes the case of a late reply partly received when the next
 command is sent. A late reply that arrives whole after the next command
 was sent is still taken for its reply: the protocol carries nothing that
@@ -28,11 +35,11 @@ that stopped mid-line), the next command's reply is taken for that rest
 and discarded, and the command fails after CEF_TIMEOUT, as when no reply
 comes. The line is clean again for the command after it.
 ---
- drivers/focuser/pinefeat_cef.cpp | 33 +++++++++++++++++++++++++++++---
- 1 file changed, 30 insertions(+), 3 deletions(-)
+ drivers/focuser/pinefeat_cef.cpp | 37 +++++++++++++++++++++++++++++---
+ 1 file changed, 34 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
-index 5f9d01b..82baefb 100644
+index a14d69b..0eab4c1 100644
 --- a/drivers/focuser/pinefeat_cef.cpp
 +++ b/drivers/focuser/pinefeat_cef.cpp
 @@ -24,9 +24,12 @@
@@ -48,36 +55,40 @@ index 5f9d01b..82baefb 100644
  
  #define ERR_NC(res) (strcmp(res, "nc") == 0 ? "lens is not attached" : res)
  
-@@ -526,7 +529,20 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
+@@ -537,7 +540,23 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
  {
      int nbytes_written = 0, nbytes_read = 0, rc = -1;
  
 -    tcflush(PortFD, TCIOFLUSH);
 +    // The input still pending is stale (a reply that came after its command's timeout): it is read and discarded,
 +    // as tcflush did, and if it ends inside a line, the rest of that line, still to come, is not this command's
-+    // reply either
++    // reply either. Only what is already received is read: a controller that keeps sending can't hold the driver here.
 +    bool midLine = false;
 +    int pending = 0;
-+    while (ioctl(PortFD, FIONREAD, &pending) == 0 && pending > 0)
++    if (ioctl(PortFD, FIONREAD, &pending) != 0)
++        pending = 0;
++    while (pending > 0)
 +    {
 +        char stale[CEF_BUF];
 +        ssize_t n = read(PortFD, stale, std::min(pending, int(sizeof(stale))));
 +        if (n <= 0)
 +            break;
++        pending -= n;
 +        midLine = stale[n - 1] != CEF_DEL;
 +    }
 +    tcflush(PortFD, TCOFLUSH);
  
      LOGF_DEBUG("CMD <%s>", cmd);
  
-@@ -544,6 +560,19 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
-         return true;
-     }
- 
+@@ -559,6 +578,20 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
+     // each byte is waited for only until the deadline, so that a controller that sends without a delimiter, however
+     // slowly, can't hold the driver longer
+     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(int(CEF_TIMEOUT));
++    // The rest of a stale line first, within the same deadline
 +    char c = 0;
 +    while (midLine)
 +    {
-+        if ((rc = tty_read(PortFD, &c, 1, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
++        if ((rc = readByte(PortFD, &c, deadline)) != TTY_OK)
 +        {
 +            char errstr[MAXRBUF] = {0};
 +            tty_error_msg(rc, errstr, MAXRBUF);
@@ -87,10 +98,10 @@ index 5f9d01b..82baefb 100644
 +        midLine = c != CEF_DEL;
 +    }
 +
-     if ((rc = tty_nread_section(PortFD, res, CEF_BUF, CEF_DEL, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
+     nbytes_read = 0;
+     do
      {
-         char errstr[MAXRBUF] = {0};
-@@ -559,7 +588,5 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
+@@ -578,7 +611,5 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
  
      LOGF_DEBUG("RES <%s>", res);
  

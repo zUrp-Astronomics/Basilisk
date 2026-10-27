@@ -10,7 +10,8 @@
  * Ce fichier implémente bsk_session_status, bsk_session_command et bsk_session_ack, et ce que `DEBUG` lit : le compteur de
  * refus de bench_core (bsk_bench_refused, la valeur que le test pose : REFUSED), les compteurs du temps réel
  * (bsk_session_debug, ceux que le test pose : DBG) et les marges de pile des tâches (bsk_host_stacks, celles que le test
- * pose : STACKS), et la mesure du capteur de la carte (bsk_sensor_read, celle que le test pose : SENSOR). L'instantané est
+ * pose : STACKS), et la mesure du capteur de la carte (bsk_sensor_read, celle que le test pose : SENSOR) ; il donne à
+ * bsk_host_init l'horloge de la carte que lit `x` (celle que le test pose : CLOCK). L'instantané est
  * celui que le
  * test pose (ST) ; une commande déposée est notée (CMDS) et reçoit l'accusé que le test a prévu (RULE, comme la
  * session : ACK_ACCEPTED, et ACK_COMPLETED tout de suite pour ce qui finit dans l'appel) ; les accusés finaux
@@ -35,9 +36,17 @@
 
 static int checks, fails;
 
+/* La garde de durée, en secondes : 10 ; la passe sous sanitizers de 4_Firmware/run.sh et les mutants en -O0
+ * (sim/test/mutants.sh) la relèvent (-DGARDE_S). */
+#ifndef GARDE_S
+#define GARDE_S 10
+#endif
+#define TEXTE_(x) #x
+#define TEXTE(x) TEXTE_(x)
+
 static void too_long(int sig)
 {
-    static const char m[] = "  ECHEC : le programme ne termine pas en 10 s (boucle sans fin)\n";
+    static const char m[] = "  ECHEC : le programme ne termine pas en " TEXTE(GARDE_S) " s (boucle sans fin)\n";
     (void)sig;
     (void)!write(1, m, sizeof m - 1);
     _exit(1);
@@ -64,7 +73,10 @@ static bsk_ack_t Q[32];
 static size_t q_head, q_n;
 
 /* Ce que reçoit la prochaine commande : accept (et, pour ATTACH, DETACH, STOP, CLEAR_FAULT, ACK_COMPLETED
- * tout de suite, comme la session), ou le refus `why`. Remis à « accepter » après chaque dépôt. */
+ * tout de suite, comme la session ; pour SET_MARK et CLEAR_MARK aussi, comme la session quand le magasin rend l'écriture
+ * dans l'appel), ou le refus `why`. Remis à « accepter » après chaque dépôt. Acceptées, DETACH pose le maintien publié
+ * (held) et ATTACH le lève, comme la session (session_detach, session_attach) ; l'état, lui, reste celui que le test
+ * pose. */
 static bsk_err_t RULE;
 /* Accusés que la session ajoute pendant un dépôt, après le premier (l'accusé du goto que q arrête). */
 static bsk_ack_t EXTRA[4];
@@ -72,6 +84,11 @@ static size_t n_extra;
 /* La fin de la prochaine CMD_FOCUS_STOP acceptée, ACK_FAILED avec cette raison (le 0x1C pas émis) ; E_OK :
  * ACK_COMPLETED. Remise à E_OK après chaque dépôt. */
 static bsk_err_t STOP_END;
+/* La fin de la prochaine CMD_SET_MARK ou CMD_CLEAR_MARK acceptée : ACK_FAILED avec cette raison (l'écriture ratée) ;
+ * E_OK : ACK_COMPLETED ; MARK_HOLD, aucune dans l'appel (l'écriture rendue plus tard, par le test). Remises après chaque
+ * dépôt. */
+static bsk_err_t MARK_END;
+static bool MARK_HOLD;
 
 static void push(uint32_t seq, bsk_ack_result_t r, bsk_err_t why)
 {
@@ -88,6 +105,11 @@ void bsk_session_debug(bsk_session_debug_t *d) { *d = DBG; }
 static bsk_host_stacks_t STACKS;
 void bsk_host_stacks(bsk_host_stacks_t *s) { *s = STACKS; }
 
+/* L'horloge de la carte donnée à bsk_host_init (le temps écoulé depuis son redémarrage, en µs), celle que le test pose :
+ * CLOCK ; 0 à chaque fresh. */
+static uint64_t CLOCK;
+static uint64_t clock_us(void) { return CLOCK; }
+
 /* La mesure du capteur de la carte, telle que bsk_sensor_read la rend (bsk_sensor.h) ; inconnue (NONE) à chaque fresh,
  * comme avant la première lecture. */
 static bsk_sensor_t SENSOR;
@@ -102,13 +124,20 @@ void bsk_session_command(const bsk_cmd_t *c)
         push(c->seq, ACK_REJECTED, RULE);
     } else {
         push(c->seq, ACK_ACCEPTED, E_OK);
+        if (c->op == CMD_DETACH) ST.held = true;
+        if (c->op == CMD_ATTACH) ST.held = false;
         for (size_t i = 0; i < n_extra; i++) push(EXTRA[i].seq, EXTRA[i].result, EXTRA[i].reason);
         if (c->op == CMD_FOCUS_STOP && STOP_END != E_OK) push(c->seq, ACK_FAILED, STOP_END);
-        else if (c->op == CMD_ATTACH || c->op == CMD_DETACH || c->op == CMD_FOCUS_STOP || c->op == CMD_CLEAR_FAULT)
+        else if ((c->op == CMD_SET_MARK || c->op == CMD_CLEAR_MARK) && MARK_HOLD) {}
+        else if ((c->op == CMD_SET_MARK || c->op == CMD_CLEAR_MARK) && MARK_END != E_OK) push(c->seq, ACK_FAILED, MARK_END);
+        else if (c->op == CMD_ATTACH || c->op == CMD_DETACH || c->op == CMD_FOCUS_STOP || c->op == CMD_CLEAR_FAULT ||
+                 c->op == CMD_SET_MARK || c->op == CMD_CLEAR_MARK)
             push(c->seq, ACK_COMPLETED, E_OK);
     }
     RULE = E_OK;
     STOP_END = E_OK;
+    MARK_END = E_OK;
+    MARK_HOLD = false;
     n_extra = 0;
 }
 
@@ -190,18 +219,22 @@ static void fresh(void)
     q_n = 0;
     RULE = E_OK;
     STOP_END = E_OK;
+    MARK_END = E_OK;
+    MARK_HOLD = false;
     n_extra = 0;
     SENSOR = (bsk_sensor_t){.st = BSK_SENSOR_NONE};
+    CLOCK = 0;
     bsk_journal_set(false, false);
-    bsk_host_init(VERSION, "poweron");
+    bsk_host_init(VERSION, "poweron", clock_us);
 }
 
 static void ready135(void)
 {
     fresh();
     state(SESSION_READY);
-    ST.motion_state = MOTION_IDLE;
+    ST.motion_state = MOTION_IDLE; ST.moving = false;
     ST.position_valid = true;
+    ST.limits_valid = true;
     ST.focus_position = 20000;
     ST.focus_min = 13808;
     ST.focus_max = 30946;
@@ -279,7 +312,7 @@ static void t_ready_reads(void)
     ASK("pl1", "er nocap");
     ASK("pm0", "er nocap");
     ASK("pm1", "er nocap");
-    ASK("x", "er nocap");
+    ASK("x", "poweron 0");                          /* le dernier redémarrage de la carte (t_boot) */
     ASK("h", "er nocap");                           /* le homing au démarrage seulement */
     ASK("c", "ok");                                 /* rien déposé (le compte ci-dessous), puis e et r */
     ASK("e", "n");
@@ -290,24 +323,23 @@ static void t_ready_reads(void)
         ASK(*l, "er nocap");                        /* une ligne est reconnue exactement */
     ASK("  v", V);
     CHECK(n_cmds == 0, "aucune commande déposée (%zu)", n_cmds);
-    ST.motion_state = MOTION_COMMANDED;
+    ST.motion_state = MOTION_COMMANDED; ST.moving = true;
     ASK("e", "y");
-    ST.motion_state = MOTION_MOVING;
+    ST.motion_state = MOTION_MOVING; ST.moving = true;
     ASK("e", "y");
-    ST.motion_state = MOTION_SETTLING;
+    ST.motion_state = MOTION_SETTLING; ST.moving = true;
     ASK("e", "y");
-    ST.motion_state = MOTION_PLANNING;
-    ASK("e", "y");
-    ST.motion_state = MOTION_ARRIVED;
+    ST.motion_state = MOTION_ARRIVED; ST.moving = false;
     ASK("e", "n");
-    ST.motion_state = MOTION_STALLED;
+    ST.motion_state = MOTION_STALLED; ST.moving = false;
     ASK("e", "n");
-    ST.motion_state = MOTION_ABORTED;
+    ST.motion_state = MOTION_ABORTED; ST.moving = false;
     ASK("e", "n");
     ST.mark_valid = true;
     ST.mark_position = 16340;
     ASK("j", "16340");
     ST.position_valid = false;
+    ST.limits_valid = false;
     ASK("r", "er link limits");   /* aucun 0x06 lu : ni position ni bornes, PROTOCOL.md § 2 */
 }
 
@@ -333,7 +365,7 @@ static void t_ready_commands(void)
     n0 = n_cmds; ASK("q", "ok");
     CHECK(deposited(n0, CMD_FOCUS_STOP, 0), "q : CMD_FOCUS_STOP");
     n0 = n_cmds; ASK("p1", "ok");
-    CHECK(deposited(n0, CMD_ATTACH, 0), "p1 : CMD_ATTACH");
+    CHECK(n_cmds == n0, "p1 en READY : ok, rien déposé (les alimentations établies : sans effet, ticket #686)");
     n0 = n_cmds; ASK("b", "ok");
     CHECK(deposited(n0, CMD_ATTACH, 0), "b : CMD_ATTACH");
     n0 = n_cmds; ASK("p0", "ok");
@@ -405,12 +437,14 @@ static void t_text(void)
 
 static void t_refusals(void)
 {
+    size_t n0;
     printf("READY, les refus du contrat : E_BUSY, E_LIMIT, E_NOCAP, E_FORBIDDEN, E_TIMEOUT ; q en HOMING\n");
     ready135();
     RULE = E_BUSY; ASK("f20000", "er busy");        /* une commande en vol jusqu'à son accusé final */
     RULE = E_BUSY; ASK("f+10", "er busy");
     RULE = E_BUSY; ASK("p0", "er busy");
-    RULE = E_BUSY; ASK("p1", "er busy");
+    n0 = n_cmds; RULE = E_BUSY; ASK("p1", "ok");   /* sans effet en READY : rien déposé, rien à refuser (#686) */
+    CHECK(n_cmds == n0, "p1 en READY pendant un mouvement : ok, rien déposé");
     RULE = E_BUSY; ASK("js", "er busy");
     RULE = E_BUSY; ASK("m20000", "er busy");       /* comme f<n> */
     RULE = E_BUSY; ASK("b", "er busy move");       /* b pendant un mouvement */
@@ -491,30 +525,29 @@ static void t_aperture(void)
     ASK("a", "er fault");
 }
 
-/* L'ouverture inconnue (L03-02, L07-03). Le domaine des codes que la carte convertit, 0x0E00 (f/0,5, Av -2) à 0x2000
- * (f/256, Av 16), bornes comprises (bsk_contract.h) : un code hors de lui n'est jamais converti. Une ouverture relue
- * hors du domaine — 0, la session sans 0x05 ou son flux arrêté ; 0x0DFF ; 0x2001 ; 0xFFFF — est inconnue : `o` rend
- * `er link aperture`, jamais une valeur ramenée à la plage ; `a+x` et `a-x`, qui partent d'elle, `er nocap ap`
- * (arbitrage de l'architecte), rien déposé ; `a`, `a<f>` absolu ne la lisent pas. Une plage dont un code est hors du
- * domaine est inconnue : `a`, `a<f>`, `o` -> `er nocap ap`. Aux bornes du domaine, la conversion, à la main :
- * 0x0E00 -> f/0,5, 5 ; 0x2000 -> f/256, 2560. */
+/* L'ouverture inconnue (L03-02, L07-03). La session ne publie que des codes du domaine que la carte convertit, 0x0E00
+ * (f/0,5, Av -2) à 0x2000 (f/256, Av 16), bornes comprises, ou 0 (bsk_contract.h) : un code reçu hors de lui est publié 0,
+ * une plage du 0x08 hors de lui ou inversée sans CAP_APERTURE, et c'est la session qui le juge (lens_rx.c ; ses cas hors
+ * du domaine, à travers HOTE, dans t_aperture_domain et t_aperture_inverted de test_session_script). Ici, ce qu'HOTE fait
+ * de ce qu'elle publie. Une ouverture relue inconnue, 0 (la session sans 0x05, son flux arrêté, un code hors du domaine) :
+ * `o` rend `er link aperture`, jamais une valeur ramenée à la plage ; `a+x` et `a-x`, qui partent d'elle, `er nocap ap`
+ * (arbitrage de l'architecte), rien déposé ; `a`, `a<f>` absolu ne la lisent pas. Aux bornes du domaine, la conversion, à
+ * la main : 0x0E00 -> f/0,5, 5 ; 0x2000 -> f/256, 2560. */
 static void t_aperture_unknown(void)
 {
     size_t n0;
-    printf("ouverture inconnue : o -> er link aperture, a±x -> er nocap ap ; une plage hors du domaine, inconnue\n");
+    printf("ouverture inconnue : o -> er link aperture, a±x -> er nocap ap ; les bornes du domaine converties\n");
     ready135();
     aperture135();
-    for (const uint16_t *c = (const uint16_t[]){0, 0x0DFF, 0x2001, 0xFFFF, 1}; *c != 1; c++) {
-        ST.aperture_current = *c;
-        n0 = n_cmds;
-        CHECK(is("o", "er link aperture"), "relue 0x%04X : o -> « %s », attendu er link aperture", *c, R);
-        CHECK(is("a+1", "er nocap ap"), "relue 0x%04X : a+1 -> « %s », attendu er nocap ap", *c, R);
-        CHECK(is("a-0.3", "er nocap ap"), "relue 0x%04X : a-0.3 -> « %s »", *c, R);
-        CHECK(n_cmds == n0, "relue 0x%04X : rien déposé", *c);
-        ASK("a", "1.8-22");
-        n0 = n_cmds; ASK("a5.6", "ok");
-        CHECK(deposited(n0, CMD_APERTURE_SET, 0x14F9), "a5.6 absolu : déposé, 0x14F9");
-    }
+    ST.aperture_current = 0;
+    n0 = n_cmds;
+    CHECK(is("o", "er link aperture"), "relue inconnue, 0 : o -> « %s », attendu er link aperture", R);
+    CHECK(is("a+1", "er nocap ap"), "relue inconnue : a+1 -> « %s », attendu er nocap ap", R);
+    CHECK(is("a-0.3", "er nocap ap"), "relue inconnue : a-0.3 -> « %s »", R);
+    CHECK(n_cmds == n0, "relue inconnue : rien déposé");
+    ASK("a", "1.8-22");
+    n0 = n_cmds; ASK("a5.6", "ok");
+    CHECK(deposited(n0, CMD_APERTURE_SET, 0x14F9), "a5.6 absolu : déposé, 0x14F9");
     ASK("a+abc", "er range num");                    /* le texte d'abord */
     state(SESSION_FAULT);
     ASK("o", "er link aperture");                    /* FAULT, identité établie : la même lecture */
@@ -530,15 +563,6 @@ static void t_aperture_unknown(void)
     ASK("o", "0.5");
     ST.aperture_current = 0x2000;
     ASK("o", "256.0");
-    for (const uint16_t *r = (const uint16_t[]){0, 0x11BF, 0x0DFF, 0x1900, 0x11BF, 0x2001, 0x11BF, 0xFFFF, 1}; *r != 1; r += 2) {
-        ST.aperture_min = r[0];
-        ST.aperture_max = r[1];
-        ST.aperture_current = 0x11B2;
-        n0 = n_cmds;
-        CHECK(is("a", "er nocap ap"), "plage 0x%04X-0x%04X : a -> « %s », attendu er nocap ap", r[0], r[1], R);
-        CHECK(is("a5.6", "er nocap ap") && is("o", "er nocap ap") && n_cmds == n0,
-              "plage 0x%04X-0x%04X : a5.6, o -> er nocap ap, rien déposé", r[0], r[1]);
-    }
 }
 
 static void t_aperture_text(void)
@@ -596,16 +620,16 @@ static const struct {
     {"v", V, V, V, V},
     {"DEBUG", "ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 "
      "tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0",
+     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0 nvs=ok",
      "ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 "
      "tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0",
+     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0 nvs=ok",
      "ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 "
      "tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0",
+     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0 nvs=ok",
      "ok reset=poweron dropped=0 move_rc=- refused=0 evq_drop=0 ev_back=0 ev_back_us=0 "
      "tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0"},
+     "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0 nvs=ok"},
     {"s3", "ok", "ok", "ok", "ok"},
     {"cm", "er nocap", "er nocap", "er nocap", "er nocap"},
     {"l", "er nocap focal", "er nocap focal", "er nocap focal", "er nocap focal"},
@@ -621,6 +645,9 @@ static const struct {
     {"gx", "er nocap", "er nocap", "er nocap", "er nocap"},
     {"z", "-", "-", "-", "-"},                       /* le capteur de la carte, dans tout état ; inconnu ici */
     {"zx", "er nocap", "er nocap", "er nocap", "er nocap"},
+    {"x", "poweron 0", "poweron 0", "poweron 0", "poweron 0"},   /* le dernier redémarrage de la carte, dans tout état */
+    {"x0", "er nocap", "er nocap", "er nocap", "er nocap"},
+    {"xa", "er nocap", "er nocap", "er nocap", "er nocap"},
 };
 static const uint8_t SEQ_STATES[] = {SESSION_POWERING, SESSION_IDENTIFYING, SESSION_HOMING, SESSION_RESTORING, SESSION_RECOVERING};
 
@@ -661,7 +688,7 @@ static void t_states(void)
 static void t_state_commands(void)
 {
     size_t n0;
-    printf("hors READY : q, b, p0, p1 ; le maintien de p0, tenu par la couche HOTE\n");
+    printf("hors READY : q, b, p0, p1 ; le maintien de p0, lu dans l'instantané\n");
     fresh();                                        /* OFF, D2 absent, pas de maintien */
     n0 = n_cmds; ASK("b", "er nolens");
     CHECK(n_cmds == n0, "b en OFF sans p0 : er nolens, rien déposé");
@@ -692,7 +719,8 @@ static void t_state_commands(void)
         CHECK(deposited(n0, CMD_ATTACH, 0), "%s : b -> CMD_ATTACH (b redémarre depuis tout état)", bsk_state_name(SEQ_STATES[i]));
         RULE = E_BUSY;
         ASK("p0", "er busy boot");
-        ASK("p1", "ok");
+        n0 = n_cmds; ASK("p1", "ok");
+        CHECK(n_cmds == n0, "%s : p1 -> ok, rien déposé (la séquence en cours continue, ticket #686)", bsk_state_name(SEQ_STATES[i]));
         if (SEQ_STATES[i] != SESSION_HOMING) ASK("q", "ok");
     }
     fresh();
@@ -766,10 +794,10 @@ static void t_move_rc(void)
     ASK("g", "-");
     ASK("f25000", "ok");
     g = seq_of_last();
-    ST.motion_state = MOTION_MOVING; bsk_host_observe();
+    ST.motion_state = MOTION_MOVING; ST.moving = true; bsk_host_observe();
     DKEY("move_rc", "-");
     ASK("g", "-");
-    push(g, ACK_COMPLETED, E_OK); ST.motion_state = MOTION_ARRIVED; bsk_host_observe();
+    push(g, ACK_COMPLETED, E_OK); ST.motion_state = MOTION_ARRIVED; ST.moving = false; bsk_host_observe();
     DKEY("move_rc", "ok");
     ASK("g", "ok");
     TKEY("last_op", "boot:ok");                     /* un goto n'est pas une opération de last_op */
@@ -852,9 +880,9 @@ static void t_move_rc(void)
     ASK("f20000", "ok");
     push(seq_of_last(), ACK_FAILED, E_STALL); bsk_host_observe();
     ASK("f21000", "ok");
-    ST.motion_state = MOTION_MOVING; bsk_host_observe();
+    ST.motion_state = MOTION_MOVING; ST.moving = true; bsk_host_observe();
     ASK("g", "stall");                              /* en vol : le résultat du précédent */
-    push(seq_of_last(), ACK_COMPLETED, E_OK); ST.motion_state = MOTION_ARRIVED; bsk_host_observe();
+    push(seq_of_last(), ACK_COMPLETED, E_OK); ST.motion_state = MOTION_ARRIVED; ST.moving = false; bsk_host_observe();
     state(SESSION_RECOVERING); bsk_host_observe();
     ASK("g", "ok");                                 /* fini en READY, puis la perte : gardé */
     state(SESSION_READY); bsk_host_observe();
@@ -873,9 +901,9 @@ static void t_move_rc(void)
     bsk_host_observe();
     ASK("g", "unconfirmed");
     ASK("f21000", "ok");
-    ST.motion_state = MOTION_MOVING; bsk_host_observe();
+    ST.motion_state = MOTION_MOVING; ST.moving = true; bsk_host_observe();
     ASK("g", "unconfirmed");                        /* en vol : le résultat du précédent */
-    push(seq_of_last(), ACK_COMPLETED, E_OK); ST.motion_state = MOTION_ARRIVED; bsk_host_observe();
+    push(seq_of_last(), ACK_COMPLETED, E_OK); ST.motion_state = MOTION_ARRIVED; ST.moving = false; bsk_host_observe();
     ASK("g", "ok");                                 /* le compteur n'a pas changé : la fin suivante l'emporte */
     ASK("f22000", "ok");
     push(seq_of_last(), ACK_FAILED, E_STALL); bsk_host_observe();
@@ -897,6 +925,7 @@ static void t_move_rc(void)
 
 static void t_line_t(void)
 {
+    size_t n0;
     /* Les clés que `t` ne porte pas : doublons d'une autre lettre (fw : v ; id : i ; mark : la marque ; min, max : r ;
      * module : n), clés sans source dans la carte (caps, limits_focal, limits_src, home, focal_nom, session,
      * boot_step, boot_reason, power, stored, sw, uptime), diagnostic de DEBUG (reset, dropped, move_rc). */
@@ -947,21 +976,36 @@ static void t_line_t(void)
     TKEY("power_off", "1");                         /* un p1 refusé ne lève rien */
     ASK("b", "ok");
     TKEY("power_off", "0");
+
+    printf("  power_off et b : le maintien publié par la session, sans p0 de HOTE\n");
+    fresh();
+    ST.held = true;
+    TKEY("power_off", "1");
+    n0 = n_cmds; ASK("b", "ok");
+    CHECK(deposited(n0, CMD_ATTACH, 0), "b en OFF, maintien publié sans p0 : CMD_ATTACH, ok");
+    TKEY("power_off", "0");
+    ASK("p0", "ok");
+    ST.held = false;                                /* levé hors HOTE */
+    TKEY("power_off", "0");
+    n0 = n_cmds; ASK("b", "er nolens");
+    CHECK(n_cmds == n0, "b en OFF, maintien levé hors HOTE : er nolens, rien déposé");
 }
 
 /* Les compteurs du temps réel de `DEBUG`, tous à zéro (bsk_session_debug), puis les marges de pile, à zéro
- * (bsk_host_stacks), puis les FAULT des rails, à zéro (bsk_session_debug). */
+ * (bsk_host_stacks), puis les FAULT des rails, à zéro (bsk_session_debug), puis la pile du capteur, à zéro, puis la NVS
+ * saine (bsk_session_debug). */
 #define ZERO " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 tx_timeout=0 pair_late=0 pair_late_us=0" STK0
 #define STK0 " stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 stack_journal=0" FLT0
 #define FLT0 " fault_motor=0 fault_logic=0" SNS0
-#define SNS0 " stack_sensor=0"
+#define SNS0 " stack_sensor=0" NVS0
+#define NVS0 " nvs=ok"
 
 /* `DEBUG` : le diagnostic, hors de `t`, une ligne `ok clé=valeur…`, dans tout état (t_states), rien déposé. */
 static void t_debug(void)
 {
     size_t n0;
     printf("DEBUG : reset, dropped, move_rc, refused, les compteurs du temps réel, les marges de pile, les FAULT des "
-           "rails, la pile du capteur ; v rend la version donnée à bsk_host_init\n");
+           "rails, la pile du capteur, la NVS ; v rend la version donnée à bsk_host_init\n");
     ready135();
     n0 = n_cmds;
     ASK("DEBUG", "ok reset=poweron dropped=0 move_rc=- refused=0" ZERO);
@@ -994,16 +1038,84 @@ static void t_debug(void)
     STACKS = (bsk_host_stacks_t){.sensor = 4294967295u};
     ASK("DEBUG", "ok reset=poweron dropped=2 move_rc=- refused=0" " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 "
                  "tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
-                 "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=4294967295");
+                 "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=4294967295" NVS0);
     STACKS = (bsk_host_stacks_t){0};
+    /* l'état de la NVS, en fin de ligne, après la pile du capteur (PROTOCOL.md § 3) : chacun des trois */
+    DBG = (bsk_session_debug_t){.nvs = BSK_STORE_NVS_ERASED};
+    ASK("DEBUG", "ok reset=poweron dropped=2 move_rc=- refused=0" " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 "
+                 "tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
+                 "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0 nvs=erased");
+    DBG = (bsk_session_debug_t){.nvs = BSK_STORE_NVS_BROKEN};
+    ASK("DEBUG", "ok reset=poweron dropped=2 move_rc=- refused=0" " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 "
+                 "tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
+                 "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0 nvs=er");
+    DBG = (bsk_session_debug_t){.nvs = BSK_STORE_NVS_OK};
+    ASK("DEBUG", "ok reset=poweron dropped=2 move_rc=- refused=0" " evq_drop=0 ev_back=0 ev_back_us=0 tx_wait_us=0 "
+                 "tx_timeout=0 pair_late=0 pair_late_us=0 stack_session=0 stack_phy=0 stack_usb_rx=0 stack_store=0 "
+                 "stack_journal=0 fault_motor=0 fault_logic=0 stack_sensor=0 nvs=ok");
+    DBG = (bsk_session_debug_t){0};
     ASK("DEBUG ", "er nocap");                       /* une ligne reconnue exactement */
     ASK("DEBUG ALL", "er nocap");
     ASK("DEBUGX", "er nocap");
     ASK("Debug", "er nocap");
     CHECK(n_cmds == n0, "DEBUG : rien déposé (%zu)", n_cmds - n0);
-    bsk_host_init("7.3", "task_wdt");                /* une autre carte : v et reset sont ceux qu'on lui donne */
+    bsk_host_init("7.3", "task_wdt", clock_us);      /* une autre carte : v et reset sont ceux qu'on lui donne */
     ASK("v", "7.3");
     ASK("DEBUG", "ok reset=task_wdt dropped=2 move_rc=- refused=0" ZERO);
+}
+
+/* ─────────────────────────── `x`, le dernier redémarrage de la carte (PROTOCOL.md § 2) ─────────────────────────── */
+
+/* `x` : la cause que la carte donne à bsk_host_init, chacun des dix jetons de PROTOCOL.md, puis le temps écoulé depuis ce
+ * redémarrage, en ms, lu à l'horloge donnée à bsk_host_init au moment de la ligne ; dans chaque état, objectif ou non
+ * (aussi t_states), rien déposé. Les attendus sont écrits à la main : ms entières, tronquées ; au-delà de 2^32 ms (49,7
+ * jours), sans retour à 0. `t` et `DEBUG` n'en changent pas (t_line_t, t_debug, attendus exacts). */
+static void t_boot(void)
+{
+    static const struct {
+        const char *reset;
+        uint64_t us;
+        const char *want;
+    } BOOTS[] = {
+        {"poweron", 0, "poweron 0"},
+        {"sw", 999, "sw 0"},
+        {"panic", 1000, "panic 1"},
+        {"int_wdt", 1999, "int_wdt 1"},
+        {"task_wdt", 73412000, "task_wdt 73412"},
+        {"wdt", 4294967295000u, "wdt 4294967295"},
+        {"brownout", 4294967296000u, "brownout 4294967296"},
+        {"usb", 4320000000000u, "usb 4320000000"},                /* 50 jours */
+        {"jtag", 18446744073709551615u, "jtag 18446744073709551"},
+        {"unknown", 2500, "unknown 2"},
+    };
+    static const uint8_t STATES[] = {SESSION_OFF, SESSION_POWERING, SESSION_IDENTIFYING, SESSION_HOMING, SESSION_RESTORING,
+                                     SESSION_READY, SESSION_RECOVERING, SESSION_FAULT};
+    size_t n0;
+    printf("x : la cause du dernier redémarrage de la carte et le temps écoulé depuis, en ms, dans tout état, rien déposé\n");
+    for (size_t i = 0; i < sizeof BOOTS / sizeof BOOTS[0]; i++) {
+        for (size_t k = 0; k < sizeof STATES; k++) {
+            fresh();
+            bsk_host_init(VERSION, BOOTS[i].reset, clock_us);
+            state(STATES[k]);
+            CLOCK = BOOTS[i].us;
+            n0 = n_cmds;
+            CHECK(is("x", BOOTS[i].want), "%s : « x » -> « %s », attendu « %s »", bsk_state_name(STATES[k]), R,
+                  BOOTS[i].want);
+            CHECK(n_cmds == n0, "%s : « x » ne dépose rien", bsk_state_name(STATES[k]));
+        }
+    }
+    /* le temps est lu à chaque ligne, pas à l'init ; deux redémarrages de même cause : le temps recule */
+    ready135();
+    bsk_host_init(VERSION, "task_wdt", clock_us);
+    CLOCK = 5000;
+    ASK("x", "task_wdt 5");
+    CLOCK = 61005000;
+    ASK("x", "task_wdt 61005");
+    bsk_host_init(VERSION, "task_wdt", clock_us);    /* la carte redémarre, même cause : son horloge repart de 0 */
+    CLOCK = 812000;
+    ASK("x", "task_wdt 812");
+    ASK("x ", "er nocap");                           /* une ligne reconnue exactement */
+    ASK("X", "er nocap");                            /* une majuscule : le labo, qui ne la connaît pas */
 }
 
 /* ─────────────────────────── la bague, et les lignes inconnues `u…`, `cm`, `m…` ─────────────────────────── */
@@ -1092,14 +1204,14 @@ static void t_ascom(void)
     ASK("f", "20000");
     n0 = n_cmds; ASK("m25000", "ok");
     CHECK(deposited(n0, CMD_FOCUS_GOTO, 25000), "m25000 : CMD_FOCUS_GOTO 25000");
-    ST.motion_state = MOTION_MOVING;
+    ST.motion_state = MOTION_MOVING; ST.moving = true;
     ST.focus_position = 21500;
     ASK("e", "y");
-    ST.motion_state = MOTION_SETTLING;
+    ST.motion_state = MOTION_SETTLING; ST.moving = true;
     ST.focus_position = 25000;
     ASK("e", "y");
     push(seq_of_last(), ACK_COMPLETED, E_OK);
-    ST.motion_state = MOTION_ARRIVED;
+    ST.motion_state = MOTION_ARRIVED; ST.moving = false;
     bsk_host_observe();
     ASK("e", "n");
     ASK("f", "25000");
@@ -1251,7 +1363,7 @@ static void t_custom(void)
     }
     {
         static const struct { bsk_err_t why; const char *want; } REFUSALS[] = {
-            {E_NOCAP, "er nocap custom"}, {E_BUSY, "er busy"}, {E_FORBIDDEN, "er refused"}};
+            {E_NOCAP, "er nocap custom"}, {E_BUSY, "er busy"}, {E_FORBIDDEN, "er refused"}, {E_DESYNC, "er link desync"}};
         for (size_t i = 0; i < sizeof REFUSALS / sizeof REFUSALS[0]; i++) {
             ready135();
             RULE = REFUSALS[i].why;
@@ -1270,6 +1382,30 @@ static void t_custom(void)
             CHECK(n_cmds == n0, "%s : rien déposé", bsk_state_name(STATES[i].st));
         }
     }
+}
+
+/* Le seq que HOTE alloue reboucle après 2^32 − 1 commandes : posé juste sous le rebouclage (host_seq_set, sim/test/host_seq.c),
+ * la commande suivante porte 0xFFFFFFFF, puis la suivante 1, jamais 0, BSK_SEQ_BOARD (bsk_contract.h), le seq du goto du
+ * bouton du fût. Une commande de l'hôte sous 0 serait prise pour lui : son ACK_ACCEPTED ne la suivrait plus comme la
+ * sienne, et `CUSTOM READ` rendrait `ok` tout de suite au lieu d'attendre son accusé final (t_custom). */
+void host_seq_set(uint32_t seq);
+static void t_seq_wrap(void)
+{
+    printf("le seq de l'hôte reboucle de 0xFFFFFFFF à 1, jamais 0 (le bouton du fût) : CUSTOM READ attend toujours son "
+           "accusé final\n");
+    ready135();
+    memset(CDATA, 0, sizeof CDATA);
+    host_seq_set(0xFFFFFFFEu);
+    CHECK(later("CUSTOM READ") && last_cmd()->seq == 0xFFFFFFFFu, "0xFFFFFFFE posé : CUSTOM READ déposée sous 0xFFFFFFFF, "
+          "différée (%08lX)", (unsigned long)last_cmd()->seq);
+    push(0xFFFFFFFFu, ACK_COMPLETED, E_OK);
+    CHECK(later_is("ok 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"), "son accusé final : ok (« %s »)", R);
+    CHECK(later("CUSTOM READ"), "la suivante : différée");
+    CHECK(last_cmd()->seq == 1u, "... déposée sous 1, pas sous 0 (%08lX)", (unsigned long)last_cmd()->seq);
+    CHECK(later_is(NULL), "sans accusé final : toujours différée");
+    push(last_cmd()->seq, ACK_COMPLETED, E_OK);
+    CHECK(later_is("ok 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"), "son accusé final : ok, la commande suivie comme "
+          "celle de l'hôte (« %s »)", R);
 }
 
 /* ─────────────────────────── Moonlite (§ 4.5.4) ─────────────────────────── */
@@ -1294,6 +1430,41 @@ static const char *wire(const char *line)
 
 /* La session publie un nouvel instantané, que HOTE lit après le pas (app_main : bsk_host_observe). */
 static void step(void) { bsk_host_observe(); }
+
+/* `js`, `jx` : `ok` une fois l'écriture rangée, son accusé final rendu pendant le dépôt (le magasin des tests) ou plus
+ * tard (la carte) : la réponse l'attend, l'accusé final d'une autre commande ne la finit pas ; l'écriture ratée, ou pas
+ * rendue à son échéance (E_STORE) : `er store` (PROTOCOL.md § 2, ligne `j`) ; la ligne suivante est servie. */
+static void t_mark_later(void)
+{
+    static const struct { const char *line; bsk_cmd_op_t op; int32_t arg; } L[] = {
+        {"js", CMD_SET_MARK, BSK_MARK_HERE}, {"jx", CMD_CLEAR_MARK, 0}};
+    static const char *const LINES[] = {"js", "jx"};
+    uint32_t seq;
+    size_t n0;
+    printf("js, jx : ok une fois rangée, la réponse différée jusqu'à l'écriture ; er store\n");
+    for (size_t i = 0; i < 2; i++) {
+        ready135();
+        MARK_END = E_STORE;
+        n0 = n_cmds;
+        ASK(LINES[i], "er store");
+        CHECK(deposited(n0, L[i].op, L[i].arg), "« %s » : la commande déposée", LINES[i]);
+        MARK_HOLD = true;
+        CHECK(later(LINES[i]), "« %s », l'écriture en attente : différée", LINES[i]);
+        seq = last_cmd() ? last_cmd()->seq : 0;
+        CHECK(later_is(NULL), "« %s » sans accusé final : toujours différée", LINES[i]);
+        push(BSK_SEQ_BOARD, ACK_COMPLETED, E_OK);
+        push(seq + 1, ACK_FAILED, E_STORE);
+        CHECK(later_is(NULL), "« %s » : l'accusé final d'une autre commande, toujours différée", LINES[i]);
+        push(seq, ACK_COMPLETED, E_OK);
+        CHECK(later_is("ok"), "« %s » rangée : ok (« %s »)", LINES[i], R);
+        ASK("v", V);
+        MARK_HOLD = true;
+        CHECK(later(LINES[i]), "« %s » : différée", LINES[i]);
+        push(last_cmd() ? last_cmd()->seq : 0, ACK_FAILED, E_STORE);
+        CHECK(later_is("er store"), "« %s » pas rangée : er store (« %s »)", LINES[i], R);
+        ASK("j", "-");
+    }
+}
 
 static void t_moonlite(void)
 {
@@ -1447,9 +1618,9 @@ static void t_moonlite(void)
     printf("  :GI# : comme e, 01# / 00#\n");
     ready135();
     WIRE(":GI", "00#");
-    ST.motion_state = MOTION_MOVING;
+    ST.motion_state = MOTION_MOVING; ST.moving = true;
     WIRE(":GI", "01#");
-    ST.motion_state = MOTION_ARRIVED;
+    ST.motion_state = MOTION_ARRIVED; ST.moving = false;
     WIRE(":GI", "00#");
     state(SESSION_HOMING);                          /* e : y dans les états de séquence */
     WIRE(":GI", "01#");
@@ -1510,7 +1681,7 @@ static uint64_t now_clock(void) { return NOW_US; }
 static const char *jnext(void)
 {
     static char b[640];
-    uint8_t g;
+    uint32_t g;
     size_t n = bsk_journal_take(b, sizeof b - 1, &g);
     b[n] = 0;
     return b;
@@ -1551,7 +1722,7 @@ static void t_sensor(void)
     ASK("z", "0.25 100.00 0.25");                  /* saturé au-dessus de 0 °C : t_d = t */
     WIRE(":GT", "0001#");                           /* 0,25 °C : 0,5 -> 1 */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, 24, 1};
-    ASK("z", "0.24 0.01 -");                       /* t_f -70,3, sous -65 °C : hors du domaine de e_i */
+    ASK("z", "0.24 0.01 -");                       /* t_f -79,18, sous -65 °C : hors du domaine de e_i */
     WIRE(":GT", "0000#");                           /* 0,24 °C : 0,48 -> 0, que Moonlite ne distingue pas de l'inconnue */
     SENSOR = (bsk_sensor_t){BSK_SENSOR_OK, -25, 999};
     ASK("z", "-0.25 9.99 -25.54");
@@ -1759,7 +1930,7 @@ static void t_page(const char *page)
     page_state("ready");
     ready135();
     ST.position_valid = false;
-    ST.motion_state = MOTION_MOVING;
+    ST.motion_state = MOTION_MOVING; ST.moving = true;
     page_state("ready, sans 0x06, en mouvement");
     ready135();
     RULE = E_BUSY;
@@ -1787,7 +1958,7 @@ int main(int argc, char **argv)
         return 2;
     }
     signal(SIGALRM, too_long);
-    alarm(10);
+    alarm(GARDE_S);
     CHECK(load_version(argv[2]), "PROJECT_VER lu dans %s", argv[2]);
     printf("v : la version de la carte, PROJECT_VER (« %s »)\n", VERSION);
     t_ready_reads();
@@ -1803,11 +1974,14 @@ int main(int argc, char **argv)
     t_move_rc();
     t_line_t();
     t_debug();
+    t_boot();
     t_retired();
     t_ascom();
     t_led_ceiling();
     t_upper();
     t_custom();
+    t_seq_wrap();
+    t_mark_later();
     t_moonlite();
     t_no_position();
     t_sensor();

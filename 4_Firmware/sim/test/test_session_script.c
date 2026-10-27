@@ -2,6 +2,8 @@
  * AUTHOR: engineer
  * DATE: 2026-09-27
  * STATUS: actif — joué par 4_Firmware/run.sh (job `firmware` de la CI), chaque transition tenue par sim/test/mutations.txt
+ *         ticket #689 : les délais minimaux sous des pas de session en retard (t_lag_*)
+ *         ticket #691 : les fenêtres de la poignée de main et le démarrage par commande sous retard (t_lag_hs_*, t_lag_attach)
  *
  * SESSION, TRANSACTION, MOUVEMENT et HOTE contre un répondeur minimal (sim/test/phy_script.c), chaque transition isolée ;
  * le mouvement contre un moteur scripté (motor()).
@@ -27,6 +29,7 @@
 #include "bsk_bench_core.h"
 #include "bsk_host.h"
 #include "bsk_journal.h"
+#include "bsk_led.h"
 #include "bsk_session.h"
 #include "bsk_txn.h"
 #include "../../components/session/drive.h"   /* 0x1D, bit AF, 0x1C */
@@ -41,11 +44,19 @@
 
 static int checks, fails;
 
+/* La garde de durée, en secondes : 10 ; la passe sous sanitizers de 4_Firmware/run.sh et les mutants en -O0
+ * (sim/test/mutants.sh) la relèvent (-DGARDE_S). */
+#ifndef GARDE_S
+#define GARDE_S 10
+#endif
+#define TEXTE_(x) #x
+#define TEXTE(x) TEXTE_(x)
+
 /* Une machine qui ne rend plus la main est un échec, pas un plantage : la garde de durée le dit comme
  * une vérification (sortie 1), et mutants.sh le compte tué. */
 static void too_long(int sig)
 {
-    static const char m[] = "  ECHEC : le programme ne termine pas en 10 s (boucle sans fin)\n";
+    static const char m[] = "  ECHEC : le programme ne termine pas en " TEXTE(GARDE_S) " s (boucle sans fin)\n";
     (void)sig;
     (void)!write(1, m, sizeof m - 1);
     _exit(1);
@@ -180,13 +191,11 @@ static bool ap03_all(size_t from, uint16_t code)
     return n > 0;
 }
 
-/* Un objectif muet, D2 présent à T0 : la session démarre. `cut` : la coupure des rails de RECOVERING activée
- * (cut_rails, désactivée par défaut). */
-static void boot_cut(bool cut)
+/* Un objectif muet, D2 présent à T0 : la session démarre. */
+static void boot(void)
 {
     ps_init(T0);
     bsk_session_params_default(&P);
-    if (cut) P.cut_rails = true;                   /* sinon la valeur par défaut, jouée telle quelle */
     store_sim_reset();                             /* aucune marque rangée */
     bsk_session_init(&P);
     n_chg = 0;
@@ -196,8 +205,6 @@ static void boot_cut(bool cut)
     last_mv = MOTION_IDLE;
     refused0 = bsk_bench_refused();
 }
-
-static void boot(void) { boot_cut(false); }
 
 static void answer_src(uint8_t type, src_id_t id, uint64_t delay_us)
 {
@@ -286,6 +293,58 @@ static void t_txn_done(void)
     CHECK(bsk_txn_deadline() == UINT64_MAX, "hors WAIT, pas d'échéance");
     bsk_txn_ack();
     CHECK(bsk_txn_state() == TXN_IDLE, "lue : IDLE");
+}
+
+/* La réponse jugée sur son contenu (bsk_txn.h), sur des trames posées à la main : ce que la trame porte au-delà de sa
+ * longueur n'est jamais lu (la PHY ne copie que ses octets, phy_common.c, fr_decode : le reste du tampon est d'avant) ; un
+ * 0x0B ou un 0x0A plus long que la requête n'en est pas la réponse ; un 0x0A masqué l'est, un 0x0A qui porte un bit hors de
+ * la requête ne l'est pas. Les requêtes sont celles de la carte (cmd.c, init.c), écrites à la main. */
+static void t_txn_answers(void)
+{
+    static const uint8_t q40[19] = {0x40, 'P', 0xFA};
+    static const uint8_t q0b[3] = {0x0B, 0x60, 0x00};
+    static const uint8_t q0a[17] = {0x0A, 0xFF, 0x7F, 0, 0, 0, 0, 0, 0, 0x3F};
+    bsk_phy_event_t e = {.kind = BSK_PHY_FRAME};
+    printf("TRANSACTION : la réponse jugée sur son contenu (0x40, 0x0B, 0x0A), rien de lu au-delà de la trame\n");
+    txn_boot();
+    bsk_txn_samyang(BSK_BENCH_SAMYANG135);
+    e.u.frame.cls = 2;
+    CHECK(bsk_txn_request(q40, sizeof q40, 1000, ps_now()) == TXN_WAIT, "40 50 FA : WAIT");
+    e.t_us = ps_now() + 1 * MS;
+    memcpy(e.u.frame.msg, q40, 3);
+    e.u.frame.len = 2;
+    bsk_txn_on_event(&e);
+    CHECK(bsk_txn_state() == TXN_WAIT, "0x40 de 2 octets, 'P' FA dans le tampon au-delà : pas la réponse, WAIT");
+    e.u.frame.len = 3;
+    bsk_txn_on_event(&e);
+    CHECK(bsk_txn_state() == TXN_DONE, "40 50 FA, 3 octets : la réponse (sa longueur est jugée par CMD_LENS_CUSTOM)");
+    bsk_txn_ack();
+    CHECK(bsk_txn_request(q0b, sizeof q0b, 300, ps_now()) == TXN_WAIT, "0B 60 00 : WAIT");
+    memcpy(e.u.frame.msg, (const uint8_t[]){0x0B, 0x60, 0x00, 0x00}, 4);
+    e.u.frame.len = 4;
+    bsk_txn_on_event(&e);
+    CHECK(bsk_txn_state() == TXN_WAIT, "0B 60 00 00 : un octet de plus, pas l'écho exact, WAIT");
+    e.u.frame.len = 3;
+    bsk_txn_on_event(&e);
+    CHECK(bsk_txn_state() == TXN_DONE, "0B 60 00 : l'écho, DONE");
+    bsk_txn_ack();
+    CHECK(bsk_txn_request(q0a, sizeof q0a, 400, ps_now()) == TXN_WAIT, "0A FF 7F … 3F : WAIT");
+    memcpy(e.u.frame.msg, q0a, sizeof q0a);
+    e.u.frame.msg[17] = 0x00;
+    e.u.frame.len = 18;
+    bsk_txn_on_event(&e);
+    CHECK(bsk_txn_state() == TXN_WAIT, "l'écho et un octet nul de plus : plus long que la requête, WAIT");
+    e.u.frame.len = 17;
+    e.u.frame.msg[3] = 0x01;
+    bsk_txn_on_event(&e);
+    CHECK(bsk_txn_state() == TXN_WAIT, "l'écho et un bit de l'offset 2, absent de la requête : WAIT");
+    e.u.frame.msg[3] = 0x00;
+    e.u.frame.msg[2] = 0x03;
+    e.u.frame.msg[9] = 0x00;
+    bsk_txn_on_event(&e);
+    CHECK(bsk_txn_state() == TXN_DONE, "0A FF 03 … 00 : la requête masquée, ses bits dans la requête, DONE");
+    bsk_txn_ack();
+    bsk_txn_samyang(BSK_BENCH_OTHER);
 }
 
 static void t_txn_timeout(void)
@@ -458,8 +517,9 @@ static void t_txn_phase(void)
     bsk_phy_vd(0);
 }
 
-/* Entre le 0x03 et le 0x04, rien ne part : le 0x1C (bsk_txn_send) et une requête retenus, le message accroché sur le
- * 0x04 en attente ; tous derrière le 0x04, dans l'ordre, avant le compte rendu. */
+/* Entre le 0x03 et le 0x04, rien ne part : le 0x1C (bsk_txn_send) et une requête retenus, derrière le 0x04, dans l'ordre,
+ * avant le compte rendu ; le message accroché après eux part après eux, avec la paire suivante (ticket #680 : avant, il
+ * partait dans ce 0x04, devant le 0x1C). */
 static void t_txn_held(void)
 {
     static const uint8_t q[] = {0x07, 0x00}, stop[] = {0x1C}, m1d[] = {0x1D, 0x56, 0x34, 0x00, 0x00};
@@ -484,9 +544,9 @@ static void t_txn_held(void)
     pump(VD1 + 9600);
     CHECK(bsk_txn_state() == TXN_WAIT && g_ps_n == 1 && obs_n == 0, "une erreur de PHY non plus ; toujours rien d'émis");
     pump(VD1 + 10100);
-    CHECK(g_ps_n == 4 && g_ps_log[1].frame.msg[0] == 0x04 && g_ps_log[1].frame.len == 19 &&
-              !memcmp(g_ps_log[1].frame.msg + 14, m1d, sizeof m1d) && g_ps_log[1].frame.seq == g_ps_log[0].frame.seq,
-          "+10100 µs : le 0x04 et le 1D accroché dans l'intervalle, sous le numéro du 0x03");
+    CHECK(g_ps_n == 4 && g_ps_log[1].frame.msg[0] == 0x04 && g_ps_log[1].frame.len == 14 &&
+              g_ps_log[1].frame.seq == g_ps_log[0].frame.seq,
+          "+10100 µs : le 0x04, sous le numéro du 0x03, sans le 1D accroché après le 0x1C et la requête");
     CHECK(g_ps_n == 4 && g_ps_log[2].frame.msg[0] == 0x1C && g_ps_log[2].frame.cls == 1 &&
               g_ps_log[2].frame.seq == (uint8_t)(g_ps_log[0].frame.seq + 1) && g_ps_log[3].frame.msg[0] == 0x07 &&
               g_ps_log[3].frame.cls == 2 && g_ps_log[3].frame.seq == (uint8_t)(g_ps_log[0].frame.seq + 2) &&
@@ -513,6 +573,8 @@ static void t_txn_held(void)
         CHECK(g_ps_n == n0 + 3 && g_ps_log[n0].frame.msg[0] == 0x04 && g_ps_log[n0 + 1].frame.msg[0] == 0x08 &&
                   g_ps_log[n0 + 2].frame.msg[0] == 0x1C && bsk_txn_deadline() == VD1 + 16666 + 10100 + 400 * MS,
               "le 0x04, la dernière requête à la place de la première, le 0x1C ; son échéance à elle");
+        CHECK(g_ps_log[n0].frame.len == 19 && !memcmp(g_ps_log[n0].frame.msg + 14, m1d, sizeof m1d),
+              "ce 0x04 porte le 1D accroché à la paire d'avant, déposé avant ce qui y est retenu");
     }
     /* La file des retenues : quatre, au-delà refusées (E_BUSY), rien de perdu de ce qui est retenu. */
     pump(VD1 + 2 * 16666 + 9000);
@@ -631,6 +693,169 @@ static void t_txn_window(void)
     bsk_txn_ack();
 }
 
+/* L'ordre d'émission est celui du dépôt (ticket #680, défaut R-01 de l'audit du 2026-10-23) : un message accroché alors
+ * qu'une émission retenue attend déjà le 0x04 ne part pas dans ce 0x04, devant elle, mais avec la paire suivante,
+ * derrière elle ; accroché avant elle dans l'intervalle, il part dans ce 0x04, devant elle. Le 0x04 qu'elle attend parti,
+ * raté (E_BUS : il ne portait pas le message, rien de noté, bsk_txn_attach_failed) ou jeté hors de sa fenêtre ; la boucle
+ * arrêtée entre les deux puis relancée (le message reste, la retenue est perdue, bsk_txn_loop) : la paire suivante le porte.
+ * Un front toutes les 16666 µs depuis T0, la paire à +8600 et +10100 µs. */
+static bool o4_1d(size_t i, const uint8_t *m1d)
+{
+    return i < g_ps_n && g_ps_log[i].frame.msg[0] == 0x04 && g_ps_log[i].frame.len == 19 && !memcmp(g_ps_log[i].frame.msg + 14, m1d, 5);
+}
+
+static bool o4_alone(size_t i) { return i < g_ps_n && g_ps_log[i].frame.msg[0] == 0x04 && g_ps_log[i].frame.len == 14; }
+
+static bool o1c(size_t i) { return i < g_ps_n && g_ps_log[i].frame.msg[0] == 0x1C && g_ps_log[i].frame.cls == 1; }
+
+static void t_txn_after_held(void)
+{
+    static const uint8_t stop[] = {0x1C}, m1d[] = {0x1D, 0x56, 0x34, 0x00, 0x00};
+    uint64_t v = VD1;
+    size_t n0;
+    printf("TRANSACTION : un message accroché après une émission retenue part après elle, avec la paire suivante\n");
+    txn_boot();
+    bsk_phy_vd(60);
+    bsk_txn_loop(true);
+    g_ps_n = 0;
+    pump(v + 9000);
+    CHECK(g_ps_n == 1 && bsk_txn_send(stop, sizeof stop) == E_OK && g_ps_n == 1, "le 0x03 parti, le 0x1C retenu");
+    bsk_txn_attach(m1d, sizeof m1d);
+    pump(v + 10100);
+    CHECK(g_ps_n == 3 && o4_alone(1) && o1c(2), "le 0x04 sans le 1D accroché après le 0x1C, puis le 0x1C");
+    v += 16666;
+    pump(v + 10100);
+    CHECK(g_ps_n == 5 && o4_1d(4, m1d), "la paire suivante porte le 1D, derrière le 0x1C");
+
+    v += 16666;                                      /* accroché avant le 0x1C dans l'intervalle : devant lui */
+    pump(v + 9000);
+    n0 = g_ps_n;
+    bsk_txn_attach(m1d, sizeof m1d);
+    (void)bsk_txn_send(stop, sizeof stop);
+    pump(v + 10100);
+    CHECK(g_ps_n == n0 + 2 && o4_1d(n0, m1d) && o1c(n0 + 1), "accroché avant le 0x1C : dans ce 0x04, puis le 0x1C");
+
+    v += 16666;                                      /* le 0x04 raté */
+    pump(v + 9000);
+    n0 = g_ps_n;
+    (void)bsk_txn_send(stop, sizeof stop);
+    bsk_txn_attach(m1d, sizeof m1d);
+    g_ps.fail_sends = 1;
+    pump(v + 10100);
+    CHECK(g_ps.fail_sends == 0 && g_ps_n == n0 + 1 && o1c(n0) && !bsk_txn_attach_failed(),
+          "le 0x04 raté ne portait pas le 1D : rien de noté (bsk_txn_attach_failed) ; le 0x1C part");
+    v += 16666;
+    pump(v + 10100);
+    CHECK(g_ps_n == n0 + 3 && o4_1d(n0 + 2, m1d) && !bsk_txn_attach_failed(), "la paire suivante le porte, une émission unique");
+
+    v += 16666;                                      /* le 0x04 jeté hors de sa fenêtre */
+    pump(v + 9000);
+    n0 = g_ps_n;
+    (void)bsk_txn_send(stop, sizeof stop);
+    bsk_txn_attach(m1d, sizeof m1d);
+    bsk_txn_real(v + 12101);
+    pump(v + 12101);
+    CHECK(g_ps_n == n0 + 1 && o1c(n0) && !bsk_txn_attach_failed(), "le 0x04 jeté : le 0x1C part à sa place");
+    v += 16666;
+    pump(v + 10100);
+    CHECK(g_ps_n == n0 + 3 && o4_1d(n0 + 2, m1d), "la paire suivante porte le 1D");
+    bsk_txn_real(0);
+
+    v += 16666;                                      /* la boucle arrêtée entre les deux, puis relancée */
+    pump(v + 9000);
+    n0 = g_ps_n;
+    (void)bsk_txn_send(stop, sizeof stop);
+    bsk_txn_attach(m1d, sizeof m1d);
+    bsk_txn_loop(false);
+    bsk_txn_loop(true);
+    v += 16666;
+    pump(v + 10100);
+    CHECK(g_ps_n == n0 + 2 && g_ps_log[n0].frame.msg[0] == 0x03 && o4_1d(n0 + 1, m1d),
+          "relancée : le 0x1C retenu perdu (bsk_txn_loop), la première paire porte le 1D");
+    bsk_txn_loop(false);
+    bsk_txn_attach(NULL, 0);
+    bsk_phy_vd(0);
+}
+
+/* L'émission qui suit le prochain 0x04 parti rate (E_BUS, rien sur le fil) : celle de ce qui attendait ce 0x04. Le crochet
+ * se retire après ce 0x04, et passe chaque trame au crochet qu'il remplace (fail04_next : le moteur scripté, ou aucun). */
+static void (*fail04_next)(const bsk_frame_t *f, uint64_t t);
+
+static void fail_after_04(const bsk_frame_t *f, uint64_t t)
+{
+    if (fail04_next) fail04_next(f, t);
+    if (f->cls != 1 || f->msg[0] != 0x04) return;
+    g_ps.fail_sends = 1;
+    g_ps.on_send = fail04_next;
+}
+
+static void fail_next_04(void)
+{
+    fail04_next = g_ps.on_send;
+    g_ps.on_send = fail_after_04;
+}
+
+/* L'issue d'un message seul retenu, lue à sa place (bsk_txn_held_place, bsk_txn_held_end) : en attente jusqu'au 0x04, puis
+ * parti, ou raté (l'émission qui suit le 0x04 : E_BUS), ou abandonné avec la boucle (E_ABORTED, rien d'émis) ; hors de
+ * l'intervalle, ou la file pleine, aucune place. Une requête retenue dont l'émission rate derrière le 0x04 finit FAILED,
+ * E_BUS, à son départ, sans attendre son échéance : jusqu'ici, seul le chemin direct de cet échec était joué
+ * (t_txn_phy_error, t_txn_forbidden ; mineur des juges de #275). */
+static void t_txn_held_end(void)
+{
+    static const uint8_t stop[] = {0x1C}, q[] = {0x07, 0x00};
+    bsk_err_t e = E_FRAMING, e1 = E_FRAMING;
+    uint64_t v = VD1;
+    size_t n0;
+    printf("TRANSACTION : l'issue d'un message retenu à sa place, parti, raté, abandonné ; la requête retenue ratée\n");
+    txn_boot();
+    bsk_phy_vd(60);
+    bsk_txn_loop(true);
+    g_ps_n = 0;
+    CHECK(bsk_txn_send(stop, sizeof stop) == E_OK && g_ps_n == 1 && bsk_txn_held_place() == BSK_TXN_SENT,
+          "hors de l'intervalle : le 0x1C parti, aucune place");
+    pump(v + 9000);
+    CHECK(g_ps_n == 2 && bsk_txn_send(stop, sizeof stop) == E_OK && bsk_txn_held_place() == 0 && !bsk_txn_held_end(0, &e),
+          "le 0x03 parti : un 0x1C retenu à la place 0, en attente");
+    CHECK(bsk_txn_send(stop, sizeof stop) == E_OK && bsk_txn_held_place() == 1 && !bsk_txn_held_end(1, &e),
+          "un second à la place 1, en attente");
+    pump(v + 10099);
+    CHECK(g_ps_n == 2 && !bsk_txn_held_end(0, &e) && !bsk_txn_held_end(1, &e), "+10099 µs : rien d'émis, les deux en attente");
+    fail_next_04();
+    pump(v + 10100);
+    CHECK(g_ps.fail_sends == 0 && g_ps_n == 4 && o4_alone(2) && o1c(3) && bsk_txn_held_end(0, &e) && e == E_BUS &&
+              bsk_txn_held_end(1, &e1) && e1 == E_OK,
+          "+10100 µs : le 0x04, le premier 0x1C raté (E_BUS), le second parti (E_OK)");
+    CHECK(bsk_txn_send(stop, sizeof stop) == E_OK && g_ps_n == 5 && bsk_txn_held_place() == BSK_TXN_SENT,
+          "hors de l'intervalle de nouveau : parti, aucune place");
+
+    v += 16666;                                      /* la boucle arrêtée avant le 0x04 */
+    pump(v + 9000);
+    n0 = g_ps_n;
+    CHECK(bsk_txn_send(stop, sizeof stop) == E_OK && bsk_txn_held_place() == 0 && !bsk_txn_held_end(0, &e), "retenu, place 0");
+    bsk_txn_loop(false);
+    CHECK(bsk_txn_held_end(0, &e) && e == E_ABORTED && g_ps_n == n0, "la boucle arrêtée : E_ABORTED, rien d'émis");
+    bsk_txn_loop(true);
+
+    v += 2 * 16666;                                  /* la file pleine */
+    pump(v + 9000);
+    for (uint8_t k = 0; k < 4; k++) (void)bsk_txn_send(stop, sizeof stop);
+    CHECK(bsk_txn_held_place() == 3 && bsk_txn_send(stop, sizeof stop) == E_BUSY && bsk_txn_held_place() == BSK_TXN_SENT,
+          "le quatrième à la place 3 ; le cinquième refusé, E_BUSY, aucune place");
+    pump(v + 10100);
+
+    v += 16666;                                      /* la requête retenue, son émission ratée derrière le 0x04 */
+    pump(v + 9000);
+    n0 = g_ps_n;
+    CHECK(bsk_txn_request(q, sizeof q, 300, ps_now()) == TXN_WAIT && g_ps_n == n0, "la requête retenue, WAIT");
+    fail_next_04();
+    pump(v + 10100);
+    CHECK(g_ps.fail_sends == 0 && g_ps_n == n0 + 1 && o4_alone(n0) && bsk_txn_state() == TXN_FAILED && bsk_txn_error() == E_BUS,
+          "+10100 µs : le 0x04 parti, la requête ratée derrière lui : FAILED, E_BUS, à son départ");
+    bsk_txn_ack();
+    bsk_txn_loop(false);
+    bsk_phy_vd(0);
+}
+
 /* Les 0x03 et 0x04 émis depuis l'entrée `from` du journal : combien portent le bit AF, combien de 0x04
  * portent un 0x1D. */
 static void count_af_1d(size_t from, size_t *af, size_t *n1d)
@@ -713,6 +938,65 @@ static void t_txn_goto(void)
     pump(T0 + 1600 * MS);
     count_af_1d(from, &af, &n1d);
     CHECK(g_ps_n > from && af == 0 && n1d == 0, "boucle arrêtée puis relancée : la consigne et le bit AF sont oubliés");
+    bsk_phy_vd(0);
+}
+
+/* Le bit AF sur 30 paires (std.c:124) quand le goto est déposé entre le 0x03 et le 0x04 : sans rien de retenu, le 0x1D
+ * part dans ce 0x04, dont le 0x03 est déjà parti sans le bit ; derrière un 0x1C retenu, il est reporté à la paire
+ * suivante avec le bit ; déposé de nouveau dans l'intervalle, le bit du goto d'avant encore posé, ce 0x03 parti avant le
+ * dépôt ne compte pas non plus. Le cas direct, hors de l'intervalle, est t_txn_goto. Les paires comptées depuis le dépôt :
+ * 29 avant le ticket #680. Un front toutes les 16666 µs depuis T0, la paire à +8600 et +10100 µs. */
+static void t_txn_goto_between(void)
+{
+    static const uint8_t stop[] = {0x1C}, m1d[] = {0x1D, 0x56, 0x34, 0x00, 0x00};
+    size_t af, n1d, from;
+    uint64_t v = VD1;
+    printf("TRANSACTION : bit AF tenu 30 paires, le goto déposé entre le 0x03 et le 0x04, direct, reporté, redéposé\n");
+    txn_boot();
+    bsk_phy_vd(60);
+    bsk_txn_loop(true);
+
+    pump(v + 9000);                                  /* le 0x03 parti, rien de retenu */
+    from = g_ps_n;
+    drive_goto(0x3456);
+    pump(v + 10100);
+    CHECK(g_ps_n == from + 1 && o4_1d(from, m1d), "déposé entre le 0x03 et le 0x04, rien de retenu : le 0x1D dans ce 0x04");
+    v += 40 * 16666;
+    pump(v);
+    count_af_1d(from, &af, &n1d);
+    CHECK(af == 30 && n1d == 1, "dans ce 0x04 : bit AF sur 30 paires depuis le dépôt (%zu), un seul 0x1D (%zu)", af, n1d);
+
+    pump(v + 9000);                                  /* derrière un 0x1C retenu */
+    from = g_ps_n;
+    CHECK(bsk_txn_send(stop, sizeof stop) == E_OK && g_ps_n == from, "le 0x03 parti, le 0x1C retenu");
+    drive_goto(0x3456);
+    pump(v + 10100);
+    CHECK(g_ps_n == from + 2 && o4_alone(from) && o1c(from + 1), "reporté : ce 0x04 sans le 0x1D, puis le 0x1C");
+    v += 16666;
+    pump(v + 10100);
+    CHECK(g_ps_n == from + 4 && g_ps_log[from + 2].frame.msg[0] == 0x03 && (g_ps_log[from + 2].frame.msg[13] & 0x10) &&
+              o4_1d(from + 3, m1d),
+          "la paire suivante : le 0x03 avec le bit AF, le 0x04 avec le 0x1D");
+    v += 40 * 16666;
+    pump(v);
+    count_af_1d(from, &af, &n1d);
+    CHECK(af == 30 && n1d == 1, "reporté : bit AF sur 30 paires depuis le dépôt (%zu), un seul 0x1D (%zu)", af, n1d);
+
+    drive_goto(0x3456);                              /* direct, puis redéposé 10 paires plus tard dans l'intervalle */
+    v += 10 * 16666;
+    pump(v + 9000);
+    CHECK(g_ps_log[g_ps_n - 1].frame.msg[0] == 0x03 && (g_ps_log[g_ps_n - 1].frame.msg[13] & 0x10),
+          "le 0x03 parti avec le bit du goto d'avant");
+    from = g_ps_n;
+    drive_goto(0x3456);
+    pump(v + 10100);
+    CHECK(g_ps_n == from + 1 && o4_1d(from, m1d), "redéposé : le 0x1D dans ce 0x04");
+    v += 40 * 16666;
+    pump(v);
+    count_af_1d(from, &af, &n1d);
+    CHECK(af == 30 && n1d == 1, "redéposé : bit AF sur 30 paires depuis le dépôt (%zu), un seul 0x1D (%zu)", af, n1d);
+    bsk_txn_loop(false);
+    drive_forget();
     bsk_phy_vd(0);
 }
 
@@ -864,9 +1148,10 @@ static void t_limits_06(void)
     run_for(100 * MS);
     s = status();
     q = cmd(CMD_FOCUS_GOTO, 0);
-    CHECK(s.focus_min == 5 && s.focus_max == -5 && n_acks > 0 && ACKS[n_acks - 1].a.seq == q &&
-              ACKS[n_acks - 1].a.reason == E_LIMIT,
-          "bornes publiées 0 / 0 : 5 / -5, aucune cible admise (%d / %d)", (int)s.focus_min, (int)s.focus_max);
+    CHECK(!s.limits_valid && s.focus_min == 0 && s.focus_max == 0 && s.position_valid && n_acks > 0 &&
+              ACKS[n_acks - 1].a.seq == q && ACKS[n_acks - 1].a.reason == E_LIMIT,
+          "bornes publiées 0 / 0 : 5 / -5 resserrées, vides, inconnues (%d / %d), aucune cible admise", (int)s.focus_min,
+          (int)s.focus_max);
 
     boot();                                         /* un objectif qui n'émet que des 0x05 : ni position ni bornes */
     lens_135();
@@ -1000,8 +1285,8 @@ static void t_01_reset(void)
 }
 
 /* Un objectif muet. Trois 0x01, le reset soft (sans réponse, 400 ms), trois 0x01 : l'échec est compté (E5),
- * RECOVERING ; aucune boucle, jamais. La coupure désactivée (par défaut) : 3 s d'attente, puis POWERING, sans couper
- * les rails, sans mettre les lignes au repos, VD en marche. */
+ * RECOVERING ; aucune boucle, jamais. 3 s d'attente, puis POWERING, sans couper les rails, sans mettre les lignes au
+ * repos, VD en marche (la reprise ne coupe jamais les rails, décision de l'humain du 2026-10-23). */
 static void t_01_silent(void)
 {
     static const uint8_t order[] = {0x01, 0x01, 0x01, 0x0A, 0x01, 0x01, 0x01};
@@ -1030,33 +1315,6 @@ static void t_01_silent(void)
     CHECK(i >= 0 && t_of(i) == tr + 3000 * MS + 115 * MS, "la poignée de main est ré-émise");
 }
 
-/* La même reprise, la coupure activée (cut_rails) : RECOVERING, 3 s, rails coupés 500 ms, POWERING. */
-static void t_01_silent_cut(void)
-{
-    long i;
-    uint64_t tr;
-    printf("objectif muet, coupure activée (cut_rails) : RECOVERING, 3 s, rails coupés 500 ms, POWERING, poignée de main\n");
-    boot_cut(true);
-    g_ps.handshake = true;
-    ps_presence(true);
-    run_for(7000 * MS);
-    tr = entered(SESSION_RECOVERING, 0);
-    i = act(0, PS_RAIL);
-    while (i >= 0 && t_of(i) < tr) i = act((size_t)i + 1, PS_RAIL);
-    CHECK(i >= 0 && g_ps_log[i].rail == BSK_RAIL_MOTOR && !g_ps_log[i].on && t_of(i) == tr + 3000 * MS,
-          "3 s après : rail moteur coupé");
-    CHECK(i >= 0 && g_ps_log[i + 1].kind == PS_RAIL && g_ps_log[i + 1].rail == BSK_RAIL_LOGIC && !g_ps_log[i + 1].on,
-          "puis le rail logique");
-    CHECK(entered(SESSION_POWERING, chg_index_after(tr)) == tr + 3500 * MS, "POWERING 500 ms plus tard");
-    i = act(0, PS_BODY_CS);
-    while (i >= 0 && !(t_of(i) > tr && g_ps_log[i].on)) i = act((size_t)i + 1, PS_BODY_CS);
-    CHECK(i >= 0 && t_of(i) == tr + 3500 * MS + 115 * MS, "la poignée de main est ré-émise");
-    run_for(30000 * MS);
-    CHECK(status().session_state == SESSION_FAULT && status().last_error == E_LOST && count_sent(0, ps_now(), 0x01) == 24 &&
-              entered(SESSION_OFF, 0) == 0,
-          "au 4e échec : FAULT, E_LOST, sans passer par OFF (compteur tenu à travers la coupure)");
-}
-
 static void t_nocap(void)
 {
     long i0a;
@@ -1076,36 +1334,6 @@ static void t_nocap(void)
     /* Sans coupure, la VD tourne toujours : la fenêtre part de POWERING, 3 s après RECOVERING. */
     CHECK(count_sent(tr + 3000 * MS, tr + 3100 * MS, 0x03) == 0,
           "POWERING oublie la session : boucle arrêtée, la VD en marche (lensctl.c:114)");
-}
-
-/* La coupure de RECOVERING (cut_rails) relâche les lignes la boucle encore lancée (la sonde a échoué, rien n'a oublié
- * la session) ; la paire du dernier front, pas encore partie, ne part pas vers des lignes au repos. L'attente est
- * choisie pour que la coupure tombe entre un front et son 0x04 : vérifié ci-dessous. */
-static void t_cut_pending_pair(void)
-{
-    long ivd, ilines;
-    uint64_t tr, tcut, tv;
-    printf("RECOVERING, coupure : la paire en attente ne part pas vers des lignes au repos\n");
-    boot_cut(true);
-    P.retry_wait_ms = 3004;                         /* la coupure 9418 µs après un front : entre son 0x03 et son 0x04 */
-    bsk_session_init(&P);
-    lens_135();
-    g_ps.flow_on_0a = false;
-    ps_presence(true);
-    run_for(6000 * MS);
-    tr = entered(SESSION_RECOVERING, 0);
-    tcut = tr + 3004 * MS;
-    ivd = -1;                                       /* la VD lancée en dernier avant la coupure */
-    for (long i = act(0, PS_VD); i >= 0 && t_of(i) < tcut; i = act((size_t)i + 1, PS_VD))
-        if (g_ps_log[i].hz) ivd = i;
-    tv = t_of(ivd) + 16666 * ((tcut - t_of(ivd)) / 16666);   /* le dernier front avant la coupure */
-    ilines = act(0, PS_LINES);
-    while (ilines >= 0 && (g_ps_log[ilines].on || g_ps_log[ilines].t < tcut)) ilines = act((size_t)ilines + 1, PS_LINES);
-    CHECK(tr && ivd >= 0 && t_of(ilines) == tcut && tcut > tv + 8600 && tcut < tv + 10100 && count_sent(tv, tcut, 0x03) == 1 &&
-              count_sent(tv, tcut, 0x04) == 0,
-          "la coupure (%llu µs après le front) tombe entre le 0x03 et le 0x04 de ce front",
-          (unsigned long long)(tcut - tv));
-    CHECK(count_sent(tcut, tv + 16666, 0x04) == 0, "pas de 0x04 après les lignes relâchées");
 }
 
 /* 0x0B, 0x09, 0x0D exigés : la séquence s'arrête au premier qui manque, après ses trois envois ; 0x0A manquant : init
@@ -1217,7 +1445,7 @@ static void t_resend_bus(void)
     g_ps.on_send = NULL;
     {
         char l[400];
-        uint8_t g;
+        uint32_t g;
         size_t n;
         while ((n = bsk_journal_take(l, sizeof l - 1, &g)) > 0) {
             l[n] = 0;
@@ -1257,7 +1485,7 @@ static void t_short_replies(void)
     run_for(6000 * MS);
     {
         char b[400];
-        uint8_t g;
+        uint32_t g;
         size_t n;
         int r07 = 0, r08 = 0;
         while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
@@ -1516,35 +1744,32 @@ static void t_d2_ready(void)
     CHECK(bsk_bench_refused() == refused0, "aucune trame refusée par bench_core");
 }
 
-/* D2 qui retombe en RECOVERING, pendant l'attente puis pendant la coupure : OFF, et les rails ne sont
- * jamais rallumés sur une monture vide (la reprise ne va pas jusqu'à POWERING). */
+/* D2 qui retombe en RECOVERING, pendant l'attente : OFF, et les rails ne sont jamais rallumés sur une monture vide (la
+ * reprise ne va pas jusqu'à POWERING). */
 static void t_d2_recovering(void)
 {
-    static const uint32_t after_ms[] = {1000, 3200};   /* dans l'attente de 3 s ; dans la coupure de 500 ms (activée) */
-    for (size_t k = 0; k < sizeof after_ms / sizeof after_ms[0]; k++) {
-        uint64_t tr, td;
-        long i;
-        printf("D2 retombe en RECOVERING, %u ms après son entrée : OFF, rails jamais rallumés\n", after_ms[k]);
-        boot_cut(k == 1);
-        ps_presence(true);
-        while (status().session_state != SESSION_RECOVERING && ps_now() < T0 + 5000 * MS) run_for(1 * MS);
-        tr = entered(SESSION_RECOVERING, 0);
-        CHECK(tr != 0, "un objectif muet : RECOVERING");
-        run_to(tr + after_ms[k] * MS);
-        td = ps_now();
-        ps_presence(false);
-        run_for(10000 * MS);
-        CHECK(entered(SESSION_OFF, chg_index_after(td)) == td, "OFF à la retombée de D2");
-        CHECK(status().session_state == SESSION_OFF && entered(SESSION_POWERING, chg_index_after(td + 1)) == 0,
-              "10 s après : toujours OFF, pas de POWERING");
-        i = act(0, PS_RAIL);
-        while (i >= 0 && !(t_of(i) >= td && g_ps_log[i].on)) i = act((size_t)i + 1, PS_RAIL);
-        CHECK(i < 0, "aucun rail rallumé après la retombée");
-        i = act(0, PS_VD);
-        while (i >= 0 && t_of(i) < td) i = act((size_t)i + 1, PS_VD);
-        CHECK(i >= 0 && t_of(i) == td && g_ps_log[i].hz == 0, "VD arrêtée");
-        CHECK(count_sent(td + 1, ps_now(), 0x01) == 0 && count_sent(td + 1, ps_now(), 0x03) == 0, "plus aucune trame");
-    }
+    uint64_t tr, td;
+    long i;
+    printf("D2 retombe en RECOVERING, 1000 ms après son entrée : OFF, rails jamais rallumés\n");
+    boot();
+    ps_presence(true);
+    while (status().session_state != SESSION_RECOVERING && ps_now() < T0 + 5000 * MS) run_for(1 * MS);
+    tr = entered(SESSION_RECOVERING, 0);
+    CHECK(tr != 0, "un objectif muet : RECOVERING");
+    run_to(tr + 1000 * MS);                         /* dans l'attente de 3 s */
+    td = ps_now();
+    ps_presence(false);
+    run_for(10000 * MS);
+    CHECK(entered(SESSION_OFF, chg_index_after(td)) == td, "OFF à la retombée de D2");
+    CHECK(status().session_state == SESSION_OFF && entered(SESSION_POWERING, chg_index_after(td + 1)) == 0,
+          "10 s après : toujours OFF, pas de POWERING");
+    i = act(0, PS_RAIL);
+    while (i >= 0 && !(t_of(i) >= td && g_ps_log[i].on)) i = act((size_t)i + 1, PS_RAIL);
+    CHECK(i < 0, "aucun rail rallumé après la retombée");
+    i = act(0, PS_VD);
+    while (i >= 0 && t_of(i) < td) i = act((size_t)i + 1, PS_VD);
+    CHECK(i >= 0 && t_of(i) == td && g_ps_log[i].hz == 0, "VD arrêtée");
+    CHECK(count_sent(td + 1, ps_now(), 0x01) == 0 && count_sent(td + 1, ps_now(), 0x03) == 0, "plus aucune trame");
 }
 
 static void t_d2_handshake(void)
@@ -1727,7 +1952,7 @@ static void t_sony_edges_only(void)
 static const char *std_line(size_t *n_std)
 {
     static char l[400], b[400];
-    uint8_t g;
+    uint32_t g;
     size_t n;
     l[0] = 0;
     *n_std = 0;
@@ -1789,6 +2014,191 @@ static void t_hs_journal(void)
           "LENS_CS levée 2 ms après BODY_CS, jamais retombée : l'échéance de sa retombée, 500 ms après BODY_CS basse "
           "(« %s », %zu)", l, n);
     bsk_journal_set(false, false);
+}
+
+/* ─────────────────────────── les délais sous retard (ticket #689) ───────────────────────────
+ * Un délai minimal qui suit une action de la carte se compte depuis l'instant réel de l'action, même quand la tâche de
+ * session a pris du retard (audit du 2026-10-23, R-02) ; une échéance qui borne une attente de l'objectif reste jugée sur
+ * la date de l'événement. Le retard se joue en retenant les pas : la PHY scriptée avance son horloge et date ce qui arrive,
+ * aucun pas ne le lit, puis un pas à l'instant réel ; chaque appel matériel est daté de l'horloge de la PHY à son appel.
+ * Les délais sont écrits à la main : 50 ms après chaque rail, 15 ms de BODY_CS basse avant sa levée, 3 ms de BODY_CS
+ * haute tenue après LENS_CS vue haute, 100 ms entre le 0x1C et le 0x10 08 du homing du pilote (session.c). */
+
+/* Aucun pas jusqu'à `t`, puis un pas à `t`. */
+static void lag(uint64_t t)
+{
+    ps_run(t);
+    bsk_session_step(t);
+    note_state(t);
+}
+
+/* Comme run_to, chaque pas `late` après l'instant où la PHY ou la session ont quelque chose à faire. */
+static void run_late(uint64_t t_end, uint64_t late)
+{
+    for (;;) {
+        uint64_t t = ps_next(), ts = bsk_session_next();
+        if (ts < t) t = ts;
+        t = t >= t_end - late ? t_end : t + late;
+        ps_run(t);
+        bsk_session_step(t);
+        note_state(t);
+        if (t >= t_end) break;
+    }
+}
+
+static long rail_on(bsk_rail_t rail)
+{
+    for (long i = act(0, PS_RAIL); i >= 0; i = act((size_t)i + 1, PS_RAIL))
+        if (g_ps_log[i].rail == rail && g_ps_log[i].on) return i;
+    return -1;
+}
+
+/* Les écarts réels des appels du premier démarrage du journal de la PHY scriptée, chacun au moins son délai. `cs_us` :
+ * LENS_CS levée par l'objectif ce temps après BODY_CS haute (le répondeur : 1,1 ms), 0 si elle l'était déjà ; BODY_CS
+ * haute est tenue 3 ms au moins après sa levée et après celle de LENS_CS. */
+static void gaps_hold(const char *what, uint64_t cs_us)
+{
+    long lg = rail_on(BSK_RAIL_LOGIC), mo = rail_on(BSK_RAIL_MOTOR), li = act(0, PS_LINES), hi = act(0, PS_BODY_CS), lo;
+    while (hi >= 0 && !g_ps_log[hi].on) hi = act((size_t)hi + 1, PS_BODY_CS);
+    lo = hi >= 0 ? act((size_t)hi + 1, PS_BODY_CS) : -1;
+    CHECK(lg >= 0 && mo >= 0 && t_of(mo) >= t_of(lg) + 50 * MS, "%s : rail moteur %lld µs après le rail logique, 50 ms au moins",
+          what, (long long)(t_of(mo) - t_of(lg)));
+    CHECK(mo >= 0 && li >= 0 && g_ps_log[li].on && t_of(li) >= t_of(mo) + 50 * MS,
+          "%s : lignes pilotées %lld µs après le rail moteur, 50 ms au moins", what, (long long)(t_of(li) - t_of(mo)));
+    CHECK(li >= 0 && hi >= 0 && t_of(hi) >= t_of(li) + 15 * MS,
+          "%s : BODY_CS haute %lld µs après les lignes et BODY_CS basse, 15 ms au moins", what, (long long)(t_of(hi) - t_of(li)));
+    CHECK(hi >= 0 && lo >= 0 && !g_ps_log[lo].on && t_of(lo) >= t_of(hi) + cs_us + 3 * MS,
+          "%s : BODY_CS rabaissée %lld µs après sa levée (LENS_CS levée %llu µs après elle), 3 ms au moins après LENS_CS haute",
+          what, (long long)(t_of(lo) - t_of(hi)), (unsigned long long)cs_us);
+}
+
+/* L'audit : le rail logique allumé à T0, puis 150 ms sans pas, puis un pas, puis les pas à l'heure. Le rail moteur part au pas
+ * en retard, chaque délai suivant se compte depuis lui : lignes 50 ms après, BODY_CS haute 15 ms après, puis la poignée de
+ * main du répondeur (1,1 ms, 3 ms, 1,1 ms), le 0x01 et l'init, READY. Avant le ticket #689 : rail moteur, lignes, BODY_CS
+ * basse et haute à T0 + 150 ms, ensemble. */
+static void t_lag_audit(void)
+{
+    long i01;
+    printf("délais sous retard : 150 ms sans pas après le rail logique (audit R-02), chaque délai compté depuis l'action\n");
+    boot();
+    lens_135();
+    ps_presence(true);
+    run_for(1 * MS);
+    lag(T0 + 150 * MS);
+    run_for(3000 * MS);
+    gaps_hold("135, 150 ms sans pas", 1100);
+    CHECK(t_of(rail_on(BSK_RAIL_MOTOR)) == T0 + 150 * MS && t_of(act(0, PS_LINES)) == T0 + 200 * MS,
+          "rail moteur au pas en retard, T0 + 150 ms ; lignes 50 ms après lui");
+    i01 = sent(0, 2, 0x01);
+    CHECK(i01 >= 0 && t_of(i01) == T0 + 215 * MS + 2200 + 3 * MS && count_sent(0, ps_now(), 0x01) == 1,
+          "BODY_CS haute à T0 + 215 ms, puis la poignée de main : un 0x01, à la retombée de LENS_CS");
+    CHECK(status().session_state == SESSION_READY && entered(SESSION_RECOVERING, 0) == 0, "READY, sans reprise");
+}
+
+/* Chaque pas 60 ms en retard (plus que chaque délai du démarrage) : chaque action part d'un pas en retard, et chaque délai
+ * qui la suit se compte depuis ce pas. Le 135 lève LENS_CS 1,1 ms après BODY_CS ; le Sony resté alimenté la tient déjà
+ * haute. La ligne de la poignée de main mesure la levée de LENS_CS depuis BODY_CS levée, en temps réel : 1100 µs, et 0 pour
+ * le Sony, qui l'est avant (BODY_CS levée par un pas en retard sur l'échéance qui la lève). Rien d'autre : en retard de
+ * 60 ms, aucune paire n'est dans sa fenêtre de 2 ms. */
+static void t_lag_steps(void)
+{
+    const char *l;
+    size_t n;
+    printf("délais sous retard : chaque pas du démarrage 60 ms en retard, le 135 et le Sony à LENS_CS déjà haute\n");
+    hs_boot();
+    lens_135();
+    ps_presence(true);
+    run_late(T0 + 1000 * MS, 60 * MS);
+    gaps_hold("135, pas en retard de 60 ms", 1100);
+    l = std_line(&n);
+    CHECK(n == 1 && strstr(l, " step=handshake result=ok lens_cs_up_us=1100") && sent(0, 2, 0x01) >= 0,
+          "135 : poignée de main ok, LENS_CS levée 1100 µs après BODY_CS réelle, puis le 0x01 (« %s », %zu)", l, n);
+
+    hs_boot();
+    sony(true);
+    ps_presence(true);
+    run_late(T0 + 1000 * MS, 60 * MS);
+    gaps_hold("Sony, pas en retard de 60 ms", 0);
+    l = std_line(&n);
+    CHECK(n == 1 && strstr(l, " step=handshake result=ok lens_cs_up_us=0") && sent(0, 2, 0x01) >= 0,
+          "Sony : poignée de main ok, LENS_CS déjà haute, 0, puis le 0x01 (« %s », %zu)", l, n);
+    bsk_journal_set(false, false);
+}
+
+/* LENS_CS levée à T0 + 116,1 ms, lue par un pas qui commence avant elle, à T0 + 116 ms (la PHY de la carte date un front
+ * à son interruption, pendant le pas) : les 3 ms de BODY_CS haute tenue se comptent depuis la levée, pas depuis le début
+ * du pas. */
+static void t_lag_edge_in_step(void)
+{
+    printf("délais : LENS_CS levée pendant le pas qui la lit, 3 ms comptées depuis la levée\n");
+    boot();
+    lens_135();
+    ps_presence(true);
+    run_to(T0 + 115 * MS);
+    ps_run(T0 + 115 * MS + 1100);
+    bsk_session_step(T0 + 115 * MS + 1000);
+    note_state(T0 + 115 * MS + 1000);
+    run_for(3000 * MS);
+    gaps_hold("135, LENS_CS levée pendant le pas", 1100);
+    CHECK(status().session_state == SESSION_READY, "READY");
+}
+
+/* Le homing du pilote (le 0x10 de l'init sans réponse, t_10_missing) : son échéance de 8 s lue 150 ms en retard. Le 0x1C
+ * part au pas en retard, le 0x10 08 100 ms au moins après lui. Avant le ticket #689 : les deux dans le même pas. */
+static void t_lag_home(void)
+{
+    uint64_t t10;
+    long i1c, ih;
+    printf("délais sous retard : l'arrêt du homing du pilote lu 150 ms en retard, le 0x10 08 100 ms après le 0x1C\n");
+    boot();
+    lens_135();
+    g_ps.skip[0x10] = 1;
+    g_ps.flow = true;
+    ps_presence(true);
+    t10 = until_sent10(0x1F);
+    run_to(t10 + 8000 * MS - 1);
+    lag(t10 + 8150 * MS);
+    run_for(3000 * MS);
+    i1c = sent(0, 1, 0x1C);
+    for (ih = sent(0, 2, 0x10); ih >= 0 && g_ps_log[ih].frame.msg[1] != 0x08; ih = sent((size_t)ih + 1, 2, 0x10)) {}
+    CHECK(t10 && i1c >= 0 && t_of(i1c) == t10 + 8150 * MS, "0x1C au pas en retard, 8150 ms après le 0x10 1F");
+    CHECK(i1c >= 0 && ih >= 0 && t_of(ih) >= t_of(i1c) + 100 * MS, "0x10 08 %lld µs après le 0x1C, 100 ms au moins",
+          (long long)(t_of(ih) - t_of(i1c)));
+    CHECK(status().session_state == SESSION_READY, "READY");
+}
+
+/* Les attentes de l'objectif restent jugées sur la date de l'événement : LENS_CS levée 1,1 ms après BODY_CS haute, lue
+ * 585 ms plus tard, après l'échéance de sa levée (500 ms), est à l'heure : poignée de main ok, 1100 µs, BODY_CS tenue 3 ms
+ * depuis le pas qui la lit ; la réponse au 0x01, 5 ms après lui, lue 400 ms plus tard, après son échéance (300 ms), le sert :
+ * un seul 0x01, le 0x07 au pas en retard. */
+static void t_lag_waits(void)
+{
+    const char *l;
+    size_t n;
+    long i01, i07;
+    uint64_t t01 = T0 + 115 * MS + 2200 + 3 * MS;
+    printf("attentes de l'objectif sous retard : un événement daté avant son échéance est à l'heure\n");
+    hs_boot();
+    lens_135();
+    ps_presence(true);
+    run_to(T0 + 115 * MS);
+    lag(T0 + 700 * MS);
+    run_for(1000 * MS);
+    l = std_line(&n);
+    CHECK(n == 1 && !strcmp(l, "* std 1704 step=handshake result=ok lens_cs_up_us=1100"),
+          "LENS_CS lue après l'échéance de sa levée : ok, 1100 µs, BODY_CS basse 3 ms après le pas en retard (« %s », %zu)", l,
+          n);
+    bsk_journal_set(false, false);
+
+    boot();
+    lens_135();
+    ps_presence(true);
+    run_to(t01);
+    i01 = sent(0, 2, 0x01);
+    lag(t01 + 400 * MS);
+    i07 = sent(0, 2, 0x07);
+    CHECK(i01 >= 0 && t_of(i01) == t01 && count_sent(0, ps_now() + 1, 0x01) == 1 && i07 >= 0 && t_of(i07) == t01 + 400 * MS,
+          "la réponse au 0x01 lue après son échéance : servie, le 0x07 au pas en retard, aucun renvoi du 0x01");
 }
 
 static void t_loss(void)
@@ -2442,8 +2852,9 @@ static void t_mv_stall_still(void)
 /* STALLED arrête l'objectif : un 0x1C au même instant, surveillé comme celui de q (renvoyé à 1,5 s et à 3 s sans accusé ni
  * immobilité). Le moteur figé (frozen) est immobile : un seul 0x1C, l'immobilité éteint la surveillance. Le moteur instable
  * (jitter) ne l'est jamais : trois 0x1C ; un premier 0x1C qui ne part pas (E_BUS) est renvoyé de même. Aucun 0x1D ne part
- * après STALLED (drive_stop retire un 0x1D encore accroché : bsk_txn.h, bsk_txn_attach) ; un goto déposé ensuite éteint la
- * surveillance (ni 0x1C de plus, ni 0x1D d'avant). */
+ * après STALLED (drive_stop retire un 0x1D encore accroché : bsk_txn.h, bsk_txn_attach) ; un goto déposé 0,5 s après, le
+ * moteur stable de nouveau, attend la fin de l'arrêt (ticket #787), l'immobilité 0,3 s plus tard : ni 0x1C de plus, ni 0x1D
+ * d'avant, puis le sien, qui arrive. */
 static void t_mv_stall_stop(void)
 {
     uint64_t ts = 0, tm;
@@ -2494,9 +2905,14 @@ static void t_mv_stall_stop(void)
     CHECK(final_is(q, ACK_FAILED, E_STALL, &ts), "instable : STALLED");
     run_for(500 * MS);
     M.jitter = false;
+    from = g_ps_n;
     q = cmd(CMD_FOCUS_GOTO, 14000);
     run_for(5000 * MS);
-    CHECK(count_sent(ts + 1, ts + 6000 * MS, 0x1C) == 0, "un goto déposé 0,5 s après STALLED éteint la surveillance : aucun renvoi");
+    CHECK(count_sent(ts + 1, ts + 6000 * MS, 0x1C) == 0,
+          "un goto déposé 0,5 s après STALLED, le moteur stable : l'arrêt fini à l'immobilité, aucun renvoi");
+    count_af_1d(from, &af, &n1d);
+    CHECK(n1d == 1 && final_is(q, ACK_COMPLETED, E_OK, NULL) && M.pos == 14000,
+          "puis son 0x1D, seul, et le goto ARRIVED en 14000 (%d)", (int)M.pos);
 }
 
 static void t_mv_loss(void)
@@ -2510,6 +2926,8 @@ static void t_mv_loss(void)
     run_for(100 * MS);
     CHECK(status().motion_state == MOTION_MOVING, "MOVING");
     g_ps.flow = false;
+    g_ps.flow_on_0a = false;                    /* muet jusqu'au bout : la reprise ne vise pas le goto perdu (sa cible, la
+                                                   position de reprise), dont le nouveau goto remplacerait l'échéance */
     run_for(3000 * MS);
     CHECK(final_is(q, ACK_FAILED, E_LOST, &tf) && tf == entered(SESSION_RECOVERING, 0), "ACK_FAILED, E_LOST, à l'entrée en RECOVERING");
     CHECK(status().motion_state == MOTION_IDLE, "le mouvement est oublié avec la session");
@@ -2683,7 +3101,7 @@ static void t_aperture_sony(void)
     printf("ouverture, HOTE contre le Sony : a -> 4.0-22, o -> 4.0 (relue), a5.6 -> ok et F9 14 F9 14 dans le 0x03\n");
     boot();
     sony(true);
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     ps_presence(true);
     run_for(3000 * MS);
     CHECK(status().session_state == SESSION_READY && status().aperture_current == 0x1405 && status().aperture_min == 0x1405 &&
@@ -2756,7 +3174,7 @@ static void t_ring_role(void)
            "avec la session\n");
     boot();
     lens_135();
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     ps_presence(true);
     run_for(3000 * MS);
     s = status();
@@ -2818,7 +3236,7 @@ static void t_ring_nocap(void)
     boot();
     lens_135();
     g_ps.n05 = 63;
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     ps_presence(true);
     run_for(3000 * MS);
     CHECK(status().session_state == SESSION_READY && status().ring == RING_UNKNOWN && status().mf == BSK_UNKNOWN &&
@@ -2839,7 +3257,7 @@ static void t_ring_nocap(void)
 
     boot();
     sony(true);
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     ps_presence(true);
     run_for(3000 * MS);
     CHECK(status().session_state == SESSION_READY && bsk_host_line("t", r, sizeof r) && strstr(r, " mf=0 oss=1"),
@@ -2948,6 +3366,93 @@ static void t_ring_aperture(void)
     CHECK(consigne(0x14A5), "plus d'une seconde sans changement : les impulsions reprennent, f/5,0");
 }
 
+/* L'échelle des tiers de diaphragme, f/1,0 à f/45, tenue deux fois : en codes par la bague (ring.c, THIRDS : la SESSION ne
+ * calcule pas en flottant) et en f/ x10 par la couche HOTE (host.c, thirds : le nom usuel d'une ouverture relue). Les deux
+ * sont confrontées ici, cran par cran, à une seule liste écrite à la main : le nom usuel, son code, round(256 × (2·log2(f) +
+ * 16)), et une sonde, un code à moins d'un demi-tiers du cran (|ln(f_sonde / f)| < 0,06, le cran usuel le plus proche) dont
+ * le f/ exact, 10 × 2^((code/256 − 16)/2), arrondi au dixième, n'est pas le nom usuel (la valeur arrondie en commentaire,
+ * en f/ x10) : à la sonde, seul le cran de la table de HOTE donne le nom attendu. Le 135 des traces, sa plage du 0x08 élargie
+ * à 00 0E / 00 1C (f/0,5 - f/64) pour que ni la consigne ni l'ouverture relue ne soient bornées au bout de l'échelle.
+ * La bague : CMD_APERTURE_SET f/1,0 puis FF FF (le premier cran, sans cran plus ouvert), puis 01 01, un tiers à la fois,
+ * jusqu'au dernier ; l'ouverture relue (offsets 0-1 du 0x05) au code, puis à la sonde, lue par `o`. */
+static const struct {
+    uint16_t    code;
+    const char *f;
+    uint16_t    probe;
+} SCALE[] = {
+    {0x1000, "1.0", 0x0FD8},   /* f/0,95 -> 9 */
+    {0x1046, "1.1", 0x1024},   /* f/1,0499 -> 10 */
+    {0x1087, "1.2", 0x10A7},   /* f/1,25 -> 13 */
+    {0x10F9, "1.4", 0x1114},   /* f/1,45 -> 15 */
+    {0x115B, "1.6", 0x1173},   /* f/1,65 -> 17 */
+    {0x11B2, "1.8", 0x119C},   /* f/1,75 -> 17 */
+    {0x1200, "2.0", 0x1213},   /* f/2,05 -> 21 */
+    {0x1246, "2.2", 0x1234},   /* f/2,15 -> 21 */
+    {0x12A5, "2.5", 0x1295},   /* f/2,45 -> 24 */
+    {0x12F9, "2.8", 0x1307},   /* f/2,86 -> 29 */
+    {0x135B, "3.2", 0x134F},   /* f/3,15 -> 31 */
+    {0x139D, "3.5", 0x1392},   /* f/3,45 -> 34 */
+    {0x1400, "4.0", 0x13F6},   /* f/3,95 -> 39 */
+    {0x1457, "4.5", 0x144E},   /* f/4,45 -> 44 */
+    {0x14A5, "5.0", 0x149D},   /* f/4,95 -> 49 */
+    {0x14F9, "5.6", 0x1500},   /* f/5,66 -> 57 */
+    {0x1550, "6.3", 0x1556},   /* f/6,36 -> 64 */
+    {0x15A8, "7.1", 0x15A2},   /* f/7,04 -> 70 */
+    {0x1600, "8.0", 0x15FB},   /* f/7,95 -> 79 */
+    {0x1657, "9.0", 0x1652},   /* f/8,94 -> 89 */
+    {0x16A5, "10.0", 0x16A9},  /* f/10,06 -> 101 */
+    {0x16EB, "11.0", 0x16E7},  /* f/10,94 -> 109 */
+    {0x1767, "13.0", 0x176A},  /* f/13,06 -> 131 */
+    {0x179D, "14.0", 0x179A},  /* f/13,94 -> 139 */
+    {0x1800, "16.0", 0x17FD},  /* f/15,94 -> 159 */
+    {0x1857, "18.0", 0x1854},  /* f/17,93 -> 179 */
+    {0x18A5, "20.0", 0x18A7},  /* f/20,06 -> 201 */
+    {0x18EB, "22.0", 0x18E9},  /* f/21,93 -> 219 */
+    {0x194A, "25.0", 0x1948},  /* f/24,94 -> 249 */
+    {0x19B7, "29.0", 0x19B5},  /* f/28,91 -> 289 */
+    {0x1A00, "32.0", 0x19FE},  /* f/31,91 -> 319 */
+    {0x1A57, "36.0", 0x1A55},  /* f/35,90 -> 359 */
+    {0x1AA5, "40.0", 0x1AA6},  /* f/40,06 -> 401 */
+    {0x1AFC, "45.0", 0x1AFD},  /* f/45,07 -> 451 */
+};
+
+static void t_thirds(void)
+{
+    char r[BSK_HOST_REPLY_MAX];
+    const size_t n = sizeof SCALE / sizeof SCALE[0];
+    printf("l'échelle des tiers, f/1,0 à f/45 : la bague (codes) et la couche HOTE (noms usuels) contre une liste à la main\n");
+    CHECK(n == 34, "34 crans dans la liste (%zu)", n);
+    boot();
+    lens_135();
+    ps_answer(0x08, (const uint8_t[]){0x08, 0x00, 0x0E, 0x00, 0x1C, 0x00}, 6, 5 * MS);
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    ps_presence(true);
+    run_for(3000 * MS);
+    CHECK(status().session_state == SESSION_READY && status().ring == RING_APERTURE && status().aperture_min == 0x0E00 &&
+              status().aperture_max == 0x1C00,
+          "READY, bague en ouverture, plage 0x0E00 / 0x1C00 (0x%04X, 0x%04X)", status().aperture_min, status().aperture_max);
+    (void)cmd(CMD_APERTURE_SET, 0x1000);
+    TURN(0xFF, 0xFF);
+    CHECK(consigne(SCALE[0].code), "f/1,0, FF FF : le premier cran, 0x%04X", SCALE[0].code);
+    for (size_t k = 1; k < n; k++) {
+        cap_elapsed();
+        TURN(0x01, 0x01);
+        CHECK(consigne(SCALE[k].code), "01 01 : f/%s, 0x%04X", SCALE[k].f, SCALE[k].code);
+    }
+    for (size_t k = 0; k < n; k++) {
+        g_ps.m05[1] = (uint8_t)SCALE[k].code;
+        g_ps.m05[2] = (uint8_t)(SCALE[k].code >> 8);
+        run_for(20 * MS);
+        CHECK(bsk_host_line("o", r, sizeof r) && !strcmp(r, SCALE[k].f), "o, relue 0x%04X -> « %s », attendu « %s »",
+              SCALE[k].code, r, SCALE[k].f);
+        g_ps.m05[1] = (uint8_t)SCALE[k].probe;
+        g_ps.m05[2] = (uint8_t)(SCALE[k].probe >> 8);
+        run_for(20 * MS);
+        CHECK(bsk_host_line("o", r, sizeof r) && !strcmp(r, SCALE[k].f), "o, relue 0x%04X (sonde) -> « %s », attendu « %s »",
+              SCALE[k].probe, r, SCALE[k].f);
+    }
+}
+
 /* Sans plage d'ouverture (une réponse au 0x08 de 5 octets, t_aperture_08 : tolérée, READY atteint), la bague ne pose rien :
  * CMD_APERTURE_SET y est refusée (E_NOCAP), et borner à une plage inconnue (0, 0) poserait le code 0.
  * La consigne reste celle du début de la session, f/1,8, B2 11. */
@@ -2986,9 +3491,13 @@ static void pulse_until_ready(const bsk_frame_t *f, uint64_t t)
  * mouvement à l'offset 60 ; il n'est pas compté avant d'être revenu à 0. Ici l'objectif publie 01 dès le goto, sans
  * interruption (sans source : un mouvement tel que MOUVEMENT le lit), et cinq trames encore après l'arrêt ; puis la bague
  * tournée, 01 01 : f/1,8 bornée à la plage, BF 11 (le cran le plus proche, B2 11, f/1,8) -> f/2,0, round(256 × (2·log2(2)
- * + 16)) = 4608 = 0x1200, à la main. */
+ * + 16)) = 4608 = 0x1200, à la main. Le second goto est déposé pendant la surveillance de l'arrêt de q, que l'objectif ne
+ * confirme jamais (01 sans cesse, aucun accusé) : son 0x1D attend l'abandon du 0x1C, 4,5 s après q (trois fenêtres de
+ * 1,5 s ; ticket #787), et le goto démarre au 0x05 qui suit (au plus une trame, 16,7 ms) ; STALLED 10 s après : à
+ * q + 14,5 s et 16,7 ms au plus, jugé à q + 14,6 s. */
 static void t_ring_motion_tail(void)
 {
+    uint64_t tq;
     printf("bague en rôle ouverture : après q ou STALLED, l'offset 60 n'est compté qu'une fois revenu à 0\n");
     boot();
     lens_135();
@@ -2998,6 +3507,7 @@ static void t_ring_motion_tail(void)
     (void)cmd(CMD_FOCUS_GOTO, 16623);
     run_for(100 * MS);
     CHECK(status().motion_state == MOTION_MOVING, "l'offset 60 non nul : MOVING");
+    tq = ps_now();
     (void)cmd(CMD_FOCUS_STOP, 0);
     CHECK(status().motion_state == MOTION_ABORTED, "q : ABORTED, plus rien en vol");
     TURN(0x01, 0x01, 0x01, 0x01, 0x01);
@@ -3008,8 +3518,9 @@ static void t_ring_motion_tail(void)
     g_ps.on_send = NULL;
     g_ps.m05[61] = 0x01;
     (void)cmd(CMD_FOCUS_GOTO, 16623);
-    run_for(10100 * MS);
-    CHECK(status().motion_state == MOTION_STALLED, "en mouvement sans jamais s'immobiliser : STALLED à 10 s");
+    run_to(tq + 14600 * MS);
+    CHECK(status().motion_state == MOTION_STALLED,
+          "en mouvement sans jamais s'immobiliser : STALLED 10 s après son départ, qui attend l'abandon du 0x1C de q");
     TURN(0x01, 0x01, 0x01, 0x01, 0x01);
     CHECK(consigne(0x1200), "cinq trames 01 à la suite : la consigne reste f/2,0");
     TURN(0x01, 0x01);
@@ -3064,7 +3575,7 @@ static size_t n_jl;
 static void jdrain(void)
 {
     char b[400];
-    uint8_t g;
+    uint32_t g;
     size_t n;
     n_jl = 0;
     while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
@@ -3382,6 +3893,137 @@ static void t_ring_cap(void)
     bsk_journal_set(false, false);
 }
 
+/* La bague tournée sans fin : `v` à l'offset 60 de `n` 0x05 de suite, `tail` au dernier, puis 0 ; les changements de la
+ * consigne d'ouverture des 0x03 émis, suivis à l'émission (le relevé de la PHY scriptée, PS_LOG_CAP actions, n'en tient
+ * pas autant). */
+static struct {
+    unsigned n, i;
+    uint8_t v, tail;
+    uint16_t code;     /* la consigne du dernier 0x03 émis */
+    unsigned changes;  /* ... ses changements */
+} ENDLESS;
+
+static void endless_hook(const bsk_frame_t *f, uint64_t t)
+{
+    (void)t;
+    if (f->cls != 1) return;
+    if (f->msg[0] == 0x03) {
+        uint16_t c = (uint16_t)(f->msg[4] | f->msg[5] << 8);
+        ENDLESS.changes += c != ENDLESS.code;
+        ENDLESS.code = c;
+    }
+    if (f->msg[0] == 0x04) {
+        unsigned i = ENDLESS.i++;
+        g_ps.m05[61] = i + 1 < ENDLESS.n ? ENDLESS.v : i < ENDLESS.n ? ENDLESS.tail : 0;
+    }
+}
+
+static void endless_play(unsigned n, uint8_t v, uint8_t tail, uint16_t code)
+{
+    ENDLESS.n = n;
+    ENDLESS.i = 0;
+    ENDLESS.v = v;
+    ENDLESS.tail = tail;
+    ENDLESS.code = code;
+    ENDLESS.changes = 0;
+    g_ps.on_send = endless_hook;
+    run_for((n + 3) * 17 * MS);
+}
+
+/* Un flux défectueux, l'offset 60 à +127 sans fin : la somme signée du geste (int32_t) déborderait après 2^31 / 127 0x05,
+ * 78 h à 60 Hz ; la borne clôt le geste à son 4096e 0x05 non nul (écrit à la main, pas d'après la constante de ring.c).
+ * Le 135 des traces, sa plage BF 11 / 00 19 (SRC_R08), 4100 0x05 à 7F depuis f/5,6, le cap échu. Oracle écrit à la main,
+ * la VD à 60 Hz (16666 µs) :
+ *   - les tiers dus : 63 au premier 0x05 (127 unités, une gardée), 64 au second (1 + 127), 127 par paire ; 4096 0x05,
+ *     2048 paires, 260096 tiers dus ; les 4 suivants, 254 ;
+ *   - le cap : un tiers appliqué à la trame 1, puis toutes les 21 trames (20 font 333320 µs, moins de 1/3 s ; 21, 349986),
+ *     aux trames 1 + 21k : k = 0 à 195 dans les 4096 premières (1 + 21 × 195 = 4096), aucune dans les 4 suivantes (la
+ *     prochaine, 4117) ; chacun des autres tiers dus est perdu, compté ;
+ *   - la consigne : f/5,6 vers le fermé, cran par cran jusqu'au bord de la plage, 0x14F9 -> 0x1550, 0x15A8, 0x1600,
+ *     0x1657, 0x16A5, 0x16EB, 0x1767, 0x179D, 0x1800, 0x1857, 0x18A5, 0x18EB, puis 0x194A borné à 0x1900 : 13 changements,
+ *     les 13 premiers tiers appliqués ; les 183 autres ne changent rien (au bord, le cran le plus proche de 0x1900 est
+ *     0x18EB, le suivant 0x194A, borné à 0x1900) : ni thirds ni capped ;
+ *   - le premier geste clos à sa 4096e trame : pulses = 127 × 4096 = 520192, thirds = 13, frames = 4096, capped = 260096
+ *     − 196 = 259900 ; le second à la pause : pulses = 508, thirds = 0, frames = 4, capped = 254. Sans la borne, une seule
+ *     ligne, pulses=520700 frames=4100 ;
+ *   - la consigne est celle d'un geste non borné : la borne ne touche ni au reste de la somme ni au cap. Joué sous UBSan
+ *     (4_Firmware/run.sh, étape 5) : aucun débordement. */
+static void t_ring_bound(void)
+{
+    printf("bague en rôle ouverture : un flux sans fin à +127, le geste clos à son 4096e 0x05 non nul, la consigne "
+           "inchangée\n");
+    boot();
+    lens_135();
+    ps_presence(true);
+    run_for(3000 * MS);
+    CHECK(status().session_state == SESSION_READY && status().ring == RING_APERTURE, "READY, bague en ouverture");
+    bsk_journal_init(ps_now);
+    bsk_journal_set(true, false);
+    (void)cmd(CMD_APERTURE_SET, 0x14F9);
+    cap_elapsed();
+    CHECK(consigne(0x14F9), "f/5,6, F9 14");
+    jdrain();
+    endless_play(4100, 0x7F, 0x7F, 0x14F9);         /* 7F : +127, le plus grand compte positif d'un octet signé */
+    run_for(500 * MS);
+    jdrain();
+    CHECK(n_jl == 2 && strstr(JL[0], " gesture pulses=520192 thirds=13 frames=4096 capped=259900") &&
+              strstr(JL[1], " gesture pulses=508 thirds=0 frames=4 capped=254"),
+          "deux lignes, pulses=520192 thirds=13 frames=4096 capped=259900 puis pulses=508 thirds=0 frames=4 capped=254 "
+          "(%zu : « %s », « %s »)", n_jl, n_jl ? JL[0] : "", n_jl > 1 ? JL[1] : "");
+    CHECK(ENDLESS.changes == 13 && ENDLESS.code == 0x1900,
+          "la consigne : 13 changements, f/5,6 -> le bord de la plage, 00 19 (%u, %04X)", ENDLESS.changes, ENDLESS.code);
+    g_ps.on_send = NULL;
+    bsk_journal_set(false, false);
+}
+
+/* Le flux arrêté sur le 0x05 qui clôt le geste par sa borne, un reste dans la somme : la pause le jette, comme sans la
+ * borne. Des comptes de fronts (le Tamron F051, 7_Docs/E-Mount/protocol.md § 7.5), joués contre le 135 des traces : ring.c
+ * compte l'offset 60 à sa valeur signée, quel que soit l'objectif. Oracle écrit à la main, la VD à 60 Hz, le cap échu :
+ *   - 4095 0x05 à 02 puis un à 01 : un tiers dû à chacun des 4095 premiers, la somme à 0 après lui ; le 4096e la laisse à
+ *     1, sans tiers dû, et clôt le geste ;
+ *   - le cap : un tiers appliqué aux trames 1 + 21k, k = 0 à 194 (1 + 21 × 194 = 4075 ; 4096 n'a pas de tiers dû) : 195
+ *     appliqués, 4095 − 195 = 3900 perdus ; les 13 premiers mènent f/5,6 au bord de la plage, 00 19 (t_ring_bound) ;
+ *   - la ligne : pulses = 2 × 4095 + 1 = 8191, thirds = 13, frames = 4096, capped = 3900 ; la pause n'en écrit pas
+ *     d'autre ;
+ *   - f/5,6 reposée par a<f>, puis un 0x05 à 01 : la pause a jeté le reste, la somme vaut 1, aucun tiers ; la consigne
+ *     reste F9 14, la ligne pulses=1 thirds=0 frames=1 capped=0. Le reste gardé, la somme vaudrait 2 : un tiers, 0x1550. */
+static void t_ring_bound_rest(void)
+{
+    printf("bague en rôle ouverture : le flux arrêté sur la borne, un reste dans la somme, jeté à la pause\n");
+    boot();
+    lens_135();
+    ps_presence(true);
+    run_for(3000 * MS);
+    CHECK(status().session_state == SESSION_READY && status().ring == RING_APERTURE, "READY, bague en ouverture");
+    bsk_journal_init(ps_now);
+    bsk_journal_set(true, false);
+    (void)cmd(CMD_APERTURE_SET, 0x14F9);
+    cap_elapsed();
+    CHECK(consigne(0x14F9), "f/5,6, F9 14");
+    jdrain();
+    endless_play(4096, 0x02, 0x01, 0x14F9);
+    run_for(500 * MS);
+    jdrain();
+    CHECK(n_jl == 1 && strstr(JL[0], " gesture pulses=8191 thirds=13 frames=4096 capped=3900"),
+          "une ligne, pulses=8191 thirds=13 frames=4096 capped=3900 (%zu : « %s »)", n_jl, n_jl ? JL[0] : "");
+    CHECK(ENDLESS.changes == 13 && ENDLESS.code == 0x1900,
+          "la consigne : 13 changements, f/5,6 -> le bord de la plage, 00 19 (%u, %04X)", ENDLESS.changes, ENDLESS.code);
+    (void)cmd(CMD_APERTURE_SET, 0x14F9);              /* le relevé de la PHY scriptée est plein : suivie à l'émission */
+    run_for(50 * MS);
+    CHECK(ENDLESS.code == 0x14F9, "f/5,6 reposée, F9 14 (%04X)", ENDLESS.code);
+    jdrain();
+    endless_play(1, 0x01, 0x01, 0x14F9);
+    run_for(500 * MS);
+    jdrain();
+    CHECK(n_jl == 1 && strstr(JL[0], " gesture pulses=1 thirds=0 frames=1 capped=0"),
+          "le 01 d'après la pause : pulses=1 thirds=0 frames=1 capped=0, le reste jeté (%zu : « %s »)", n_jl,
+          n_jl ? JL[0] : "");
+    CHECK(ENDLESS.changes == 0 && ENDLESS.code == 0x14F9,
+          "la consigne inchangée, F9 14 (%u, %04X)", ENDLESS.changes, ENDLESS.code);
+    g_ps.on_send = NULL;
+    bsk_journal_set(false, false);
+}
+
 /* Les offsets 32 à 38 du 0x06 que le flux émet (g_ps.m06[33..39] : l'offset k est msg[k + 1]), une ligne de `row` par
  * 0x06, celui de la paire de chaque 0x04 émis, puis 0. */
 static struct {
@@ -3476,7 +4118,7 @@ static void t_ring_sony06(void)
 static size_t step08(char *first, size_t cap)
 {
     char b[400];
-    uint8_t g;
+    uint32_t g;
     size_t n, k = 0;
     first[0] = 0;
     while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
@@ -3597,15 +4239,15 @@ static bool mark_at(int32_t n, bsk_err_t why)
 #define MARK_AT(n, why) CHECK(mark_at(n, why), "CMD_SET_MARK %d : %s attendu", n, (why) == E_OK ? "servie" : bsk_err_token(why))
 
 /* j, js, jg, jx à travers HOTE (PROTOCOL.md, ligne `j`), CMD_SET_MARK n déposée directement ; les bornes du 0x06 du 135,
- * 13873 / 30738, resserrées de 5 ; la file du magasin pleine (er busy, rien de changé) ; une écriture ratée (acceptée,
- * puis la clé relue : ce qui est rangé) ; la marque rangée survit à la session. */
+ * 13873 / 30738, resserrées de 5 ; la file du magasin pleine (er busy, rien de changé) ; une écriture ratée (ACK_FAILED
+ * E_STORE, la clé relue : ce qui est rangé) ; la marque rangée survit à la session. */
 static void t_mark_letters(void)
 {
     char r[BSK_HOST_REPLY_MAX];
-    uint32_t v = 0, w0;
+    uint32_t v = 0, w0, q;
     printf("marque : j, js, jg, jx à travers HOTE, CMD_SET_MARK n ; la file pleine, une écriture ratée\n");
     ready_motor();
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     bsk_journal_init(ps_now);
     bsk_journal_set(true, false);
     jdrain();
@@ -3650,7 +4292,8 @@ static void t_mark_letters(void)
 
     g_store_sim.fail = true;
     jdrain();
-    MARK_AT(17000, E_OK);
+    q = cmd(CMD_SET_MARK, 17000);
+    CHECK(final_is(q, ACK_FAILED, E_STORE, NULL), "CMD_SET_MARK 17000, l'écriture ratée : ACK_FAILED, E_STORE");
     HOST("j", "16000");
     jdrain();
     CHECK(jcount(" store=er key=" KEY135) == 1, "* mark <t> store=er key=… (%zu)", n_jl);
@@ -3674,13 +4317,13 @@ static void t_mark_key(void)
     uint32_t v = 0;
     printf("marque : la clé de la v1, à la main pour le 135 et le Sony, 0x07 et 0x08 courts\n");
     ready_motor();
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     HOST("js", "ok");
     CHECK(g_store_sim.writes == 1 && store_sim_peek(KEY135, &v) && v == 14623, "le 135 : " KEY135 " -> 14623 (0x%X)", v);
 
     boot();
     sony(true);
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     ps_presence(true);
     run_for(3000 * MS);
     CHECK(status().session_state == SESSION_READY, "le Sony : READY");
@@ -3758,7 +4401,7 @@ static void t_mark_v1(void)
     (void)cmd(CMD_ATTACH, 0);
     run_for(6000 * MS);
     m = mark_now(&ok);
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     HOST("j", "15000");
     CHECK(ok && m.approach_dir == BSK_APPROACH_UNKNOWN, "0x53A98 : m -> 15000, sens inconnu");
     store_sim_poke(KEY135, 15000u | 1u << 24);
@@ -3781,7 +4424,7 @@ static void t_mark_focal(void)
     char r[BSK_HOST_REPLY_MAX];
     printf("marque : par focale nominale arrondie au mm, par objectif ; la focale courante n'y est pas\n");
     ready_motor();
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     MARK_AT(16340, E_OK);
     focal(1354);
     HOST("j", "16340");
@@ -3863,6 +4506,7 @@ static void t_mark_dir(void)
 static void t_mark_async(void)
 {
     char r[BSK_HOST_REPLY_MAX];
+    uint32_t q;
     printf("marque : le magasin asynchrone, lectures en attente, périmées, redéposées\n");
     boot();
     store_sim_poke(KEY135, 15000);
@@ -3872,7 +4516,7 @@ static void t_mark_async(void)
     g_ps.flow = true;
     ps_presence(true);
     run_for(3000 * MS);
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     CHECK(status().session_state == SESSION_READY, "READY");
     HOST("j", "-");
     store_sim_flush();
@@ -3880,14 +4524,22 @@ static void t_mark_async(void)
     run_for(20 * MS);
     HOST("j", "15000");
 
+    focal(1340);                                    /* lue en attente : 134 mm, puis 135 mm ; celle de 134 mm périmée */
+    focal(1350);
+    store_sim_flush();
+    run_for(20 * MS);
+    HOST("j", "15000");
+
     focal(1340);                                    /* lue en attente : 134 mm, puis 135 mm de nouveau */
     focal(1350);
-    MARK_AT(16000, E_OK);                           /* l'écriture après la lecture de 135 mm, avant qu'elle ne soit faite */
+    q = cmd(CMD_SET_MARK, 16000);                   /* l'écriture après la lecture de 135 mm, avant qu'elle ne soit faite */
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK), "CMD_SET_MARK 16000, l'écriture en attente : acceptée, en vol");
     focal(1340);
     focal(1350);
     HOST("j", "-");                                 /* relue : en attente */
     store_sim_flush();
     run_for(20 * MS);
+    CHECK(acks_are(q, 2, ACK_COMPLETED, E_OK), "l'écriture rangée : ACK_COMPLETED");
     HOST("j", "16000");
 
     focal(1340);                                    /* la lecture de 134 mm en attente, celle de 135 mm refusée */
@@ -3914,7 +4566,7 @@ static void t_mark_gestures(void)
     bsk_status_t s;
     printf("marque : les gestes comptés dans l'instantané, ni refus, ni zoom, ni relecture, ni session\n");
     ready_motor();
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     s = status();
     CHECK(s.mark_sets == 0 && s.mark_clears == 0, "READY : aucun geste (%u, %u)", s.mark_sets, s.mark_clears);
     HOST("js", "ok");
@@ -4067,7 +4719,7 @@ static void t_btn_nomark_limit(void)
     g_ps.flow = true;
     ps_presence(true);
     run_for(2000 * MS);
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     bsk_journal_init(ps_now);
     bsk_journal_set(true, false);
     CHECK(status().session_state == SESSION_READY && status().mark_position == 13000, "READY, marque 13000");
@@ -4356,6 +5008,83 @@ static void t_restore_wait(void)
           n_jl ? JL[0] : "");
     bsk_journal_set(false, false);
     g_store_sim.hold = false;
+}
+
+/* Les cinq attentes comptées sur l'heure historique (session.c, wait_for : S_FIRST05, S_PROBE05, S_STILL, S_MARK, S_REC_WAIT)
+ * y restent (ticket #689) : posée par un pas en retard de 200 ms, l'échéance part de la date de l'événement qui la pose,
+ * pas du pas qui le lit, et l'objectif ne répond pas. Le pas en retard lit l'événement ; les suivants sont à l'heure. Les
+ * délais, écrits à la main (PROTOCOL.md § 7, t_nocap, t_still_fails, t_restore_wait, t_loss) : le premier 0x05 attendu
+ * 500 ms après la réponse au 0x0A, puis la sonde 300 ms ; l'immobilité du homing du pilote 3 s après la réponse au
+ * 0x10 08 ; la lecture de la marque 500 ms après la fin du démarrage ; le nouvel essai 3 s après l'échec. Comptées depuis
+ * le pas en retard, chacune échoirait 200 ms plus tard. */
+static void t_lag_wait_dues(void)
+{
+    long i;
+    uint64_t tr;
+    printf("attentes de l'objectif sous retard : chacune comptée depuis l'événement qui la pose, pas depuis le pas qui le lit\n");
+
+    boot();                                         /* S_FIRST05 : la réponse au 0x0A lue 200 ms en retard */
+    lens_135();
+    g_ps.flow_on_0a = false;                        /* aucun 0x05, jamais (t_nocap) */
+    ps_presence(true);
+    while ((i = sent(0, 2, 0x0A)) < 0 && ps_now() < T0 + 3000 * MS) run_for(1 * MS);
+    tr = t_of(i) + 5 * MS;                          /* la réponse au 0x0A */
+    lag(tr + 200 * MS);
+    run_for(2000 * MS);
+    CHECK(i >= 0 && entered(SESSION_RECOVERING, 0) == tr + 500 * MS + 300 * MS,
+          "S_FIRST05 : la réponse au 0x0A lue 200 ms en retard, RECOVERING 500 + 300 ms après elle (%lld µs)",
+          (long long)(entered(SESSION_RECOVERING, 0) - tr));
+
+    boot();                                         /* S_PROBE05 : l'échéance du premier 0x05 lue 200 ms en retard */
+    lens_135();
+    g_ps.flow_on_0a = false;
+    ps_presence(true);
+    while ((i = sent(0, 2, 0x0A)) < 0 && ps_now() < T0 + 3000 * MS) run_for(1 * MS);
+    tr = t_of(i) + 5 * MS;
+    run_to(tr + 500 * MS - 1);
+    lag(tr + 700 * MS);
+    run_for(2000 * MS);
+    CHECK(i >= 0 && entered(SESSION_RECOVERING, 0) == tr + 500 * MS + 300 * MS,
+          "S_PROBE05 : l'échéance du premier 0x05 lue 200 ms en retard, RECOVERING 300 ms après elle (%lld µs)",
+          (long long)(entered(SESSION_RECOVERING, 0) - tr));
+
+    boot();                                         /* S_STILL : la réponse au 0x10 08 lue 200 ms en retard */
+    lens_135();
+    no_answer(0x0B);                                /* le homing du pilote (t_still_fails) */
+    g_ps.flow = true;
+    g_ps.m05[61] = 0x01;                            /* l'objectif se dit en mouvement : jamais immobile */
+    ps_presence(true);
+    tr = until_sent10(0x08) + 700 * MS;             /* la réponse au 0x10 08 */
+    lag(tr + 200 * MS);
+    run_for(4000 * MS);
+    CHECK(tr > 700 * MS && entered(SESSION_RECOVERING, 0) == tr + 3000 * MS,
+          "S_STILL : la réponse au 0x10 08 lue 200 ms en retard, RECOVERING 3 s après elle (%lld µs)",
+          (long long)(entered(SESSION_RECOVERING, 0) - tr));
+
+    restore_script(KEY135, 20000, NULL, 0);         /* S_MARK : la fin du démarrage lue 200 ms en retard */
+    g_store_sim.hold = true;                        /* la lecture de la marque jamais rendue (t_restore_wait) */
+    while ((i = sent(0, 2, 0x0A)) < 0 && ps_now() < T0 + 3000 * MS) run_for(1 * MS);
+    tr = t_of(i) + 5 * MS;                          /* la réponse au 0x0A, le flux déjà là : la fin du démarrage */
+    lag(tr + 200 * MS);
+    run_to(tr + 1000 * MS);
+    CHECK(i >= 0 && entered(SESSION_READY, 0) == tr + 500 * MS && entered(SESSION_RESTORING, 0) == 0,
+          "S_MARK : la fin du démarrage lue 200 ms en retard, READY 500 ms après elle, sans RESTORING (%lld µs)",
+          (long long)(entered(SESSION_READY, 0) - tr));
+    g_store_sim.hold = false;
+
+    boot();                                         /* S_REC_WAIT : l'échec compté par un pas en retard de 200 ms */
+    lens_135();
+    g_ps.flow_on_0a = false;
+    ps_presence(true);
+    while ((i = sent(0, 2, 0x0A)) < 0 && ps_now() < T0 + 3000 * MS) run_for(1 * MS);
+    tr = t_of(i) + 5 * MS + 500 * MS + 300 * MS;    /* l'échéance de la sonde : l'échec */
+    run_to(tr - 1);
+    lag(tr + 200 * MS);
+    run_for(4000 * MS);
+    CHECK(i >= 0 && entered(SESSION_RECOVERING, 0) == tr + 200 * MS &&
+              entered(SESSION_POWERING, chg_index_after(tr + 200 * MS)) == tr + 3000 * MS,
+          "S_REC_WAIT : l'échec lu 200 ms en retard, POWERING 3 s après lui (%lld µs)",
+          (long long)(entered(SESSION_POWERING, chg_index_after(tr + 200 * MS)) - tr));
 }
 
 /* Un blocage pendant le retour (le moteur ne bouge pas : ni démarrage ni accusé en 1 s, trois fois, STALLED) mène à
@@ -4665,14 +5394,14 @@ static void t_stop_link(void)
     long i1c;
     printf("q : le 0x1C qui ne part pas, ACK_FAILED E_BUS, « er link bus » ; ABORTED ; READY depuis RESTORING\n");
     boot();                                         /* OFF, D2 absent : aucun 0x1C tenté, ok */
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     g_ps.fail_sends = 1;
     from = g_ps_n;
     HOST("q", "ok");
     CHECK(status().session_state == SESSION_OFF && g_ps.fail_sends == 1 && g_ps_n == from, "OFF : q, ok, aucune émission tentée");
     g_ps.fail_sends = 0;
     ready_motor();
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     g = cmd(CMD_FOCUS_GOTO, 16623);
     run_for(100 * MS);
     CHECK(status().motion_state == MOTION_MOVING, "un goto en cours");
@@ -4693,7 +5422,7 @@ static void t_stop_link(void)
     CHECK(i1c >= 0 && status().session_state == SESSION_READY, "émis : le 0x1C part, « ok »");
 
     restore_script(KEY135, 20000 | 1u << 16, NULL, 0);
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     while (status().session_state != SESSION_RESTORING && ps_now() < T0 + 5000 * MS) run_for(1 * MS);
     run_for(100 * MS);
     CHECK(status().session_state == SESSION_RESTORING && status().motion_state == MOTION_MOVING, "RESTORING, en mouvement");
@@ -4705,6 +5434,499 @@ static void t_stop_link(void)
     run_for(100 * MS);
     CHECK(targets_1d(from, NULL, 0) == 0 && status().session_state == SESSION_READY, "plus de 0x1D, toujours READY");
     bsk_journal_set(false, false);
+}
+
+/* ───────────── l'ordre d'émission, celui de l'acceptation : un arrêt ne part jamais derrière un goto (#680) ───────────── */
+
+/* Le premier front VD après l'instant courant : celui du dernier 0x04 parti, 10100 µs avant lui, plus k fois 16666 µs (la
+ * période de bsk_phy_vd(60) dans la PHY scriptée), comme t_pair_late. */
+static uint64_t next_vd(void)
+{
+    uint64_t v = 0;
+    for (size_t j = 0; j < g_ps_n && j < PS_LOG_CAP; j++)
+        if (g_ps_log[j].kind == PS_SEND && g_ps_log[j].frame.msg[0] == 0x04) v = g_ps_log[j].t - 10100;
+    while (v <= ps_now()) v += 16666;
+    return v;
+}
+
+/* Depuis l'entrée `from` : l'entrée du premier 0x04 qui porte un 0x1D vers la cible `lo` `hi` si un 0x1C part avant lui et
+ * aucun après lui ; -1 sinon. */
+static long goto_after_stop(size_t from, uint8_t lo, uint8_t hi)
+{
+    long i1c = sent(from, 1, 0x1C);
+    for (size_t i = from; i < g_ps_n && i < PS_LOG_CAP; i++) {
+        const bsk_frame_t *f = &g_ps_log[i].frame;
+        if (g_ps_log[i].kind != PS_SEND || f->msg[0] != 0x04 || f->len != 19 || f->msg[14] != 0x1D || f->msg[15] != lo ||
+            f->msg[16] != hi)
+            continue;
+        return i1c >= 0 && (long)i > i1c && sent(i + 1, 1, 0x1C) < 0 ? (long)i : -1;
+    }
+    return -1;
+}
+
+/* Le défaut R-01 de l'audit du 2026-10-23 : q accepté entre le 0x03 et le 0x04 d'une paire (le front W), son 0x1C retenu
+ * derrière le 0x04 (txn.c) ; un goto vers C = 16623 accepté juste après, avant ce 0x04. Avant le ticket #680, ce 0x04
+ * partait avec le 0x1D vers C, puis le 0x1C : le moteur scripté faisait un pas et s'arrêtait en 14873, et le goto finissait
+ * ARRIVED, ACK_COMPLETED. L'ordre de l'acceptation tient : à W + 10100 µs le 0x04 seul, puis le 0x1C ; le 0x1D vers C
+ * (1D EF 40, 16623 calculé à la main) après la fin de l'arrêt (ticket #787), aucun 0x1C après lui ; le goto ARRIVED en C.
+ * Le q fini, ACK_COMPLETED : son 0x1C est parti.
+ * L'instant du 0x1D (STOP_1D_W, ci-dessous) : le moteur scripté n'accuse pas le 0x1C (M.ack1c faux), la fin de l'arrêt se
+ * lit à l'immobilité, la même position sur plus de 300 ms et au moins dix 0x06 (still.c), suivie depuis la première trame
+ * qui suit le 0x1C. Le répondeur publie le 0x05 2 ms et le 0x06 3 ms après chaque 0x04 parti, à W + k × 16666 + 12100 et
+ * + 13100 µs pour la paire k. Le 0x04 de W parti, le moteur au repos : suivie depuis le 0x05 de W (W + 12100), immobile au
+ * 0x06 de la paire 18 (18 × 16666 + 1000 = 300 988 µs > 300 ms après, le 19e 0x06), le 0x1D au 0x04 de la paire 19 :
+ * W + 19 × 16666 + 10100 = W + 326 754 µs. */
+#define STOP_1D_W (19u * 16666u + 10100u)
+/* La paire W sans 0x04 parti (jeté, raté, ou sans 0x03), ou la position changée par son 0x04 (un goto en cours au q) : suivie
+ * depuis la première trame de la paire 1, ou depuis le 0x06 de W (W + 13100) ; immobile 300 988 µs après le 0x05 de la
+ * paire 1 (au 0x06 de la paire 19), ou 19 × 16666 = 316 654 µs après le 0x06 de W (au 0x05 de la paire 19, le 18e 0x06
+ * depuis lui ; au 0x05 de la paire 18, 299 988 µs, pas encore) : le 0x1D au 0x04 de la paire 20, W + 20 × 16666 + 10100 =
+ * W + 343 420 µs. */
+#define STOP_1D_W1 (20u * 16666u + 10100u)
+static void t_stop_goto_order(void)
+{
+    uint32_t q, g;
+    uint64_t w;
+    size_t from;
+    long i1d;
+    printf("q puis goto entre le 0x03 et le 0x04 : le 0x1C part avant le 0x1D, le goto arrive à sa cible\n");
+    ready_motor();
+    w = next_vd();
+    run_to(w + 9000);
+    CHECK(count_sent(w, w + 9001, 0x03) == 1 && count_sent(w, w + 9001, 0x04) == 0, "le 0x03 de W parti, son 0x04 à venir");
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    CHECK(n_acks > 0 && ACKS[n_acks - 1].a.seq == g && ACKS[n_acks - 1].a.result == ACK_ACCEPTED && g_ps_n == from,
+          "le goto accepté ; rien d'émis entre le 0x03 et le 0x04");
+    run_to(w + 10100);
+    CHECK(g_ps_n == from + 2 && o4_alone(from) && o1c(from + 1) && t_of((long)from + 1) == w + 10100,
+          "à W + 10100 µs : le 0x04 seul, puis le 0x1C du q");
+    CHECK(final_is(q, ACK_COMPLETED, E_OK, NULL), "q fini à W + 10100 µs, son 0x1C parti");
+    run_for(2000 * MS);
+    i1d = goto_after_stop(from, 0xEF, 0x40);
+    CHECK(i1d >= 0 && t_of(i1d) == w + STOP_1D_W, "le 0x1D vers 16623 à la fin de l'arrêt, W + 326 754 µs, aucun 0x1C après lui");
+    CHECK(final_is(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 16623 && M.pos == 16623,
+          "le goto ARRIVED en 16623, ACK_COMPLETED (%d)", (int)status().focus_position);
+}
+
+/* Les variantes du même ordre (ticket #680), chacune q (ou l'arrêt de STALLED) puis un goto déposés entre le 0x03 et le
+ * 0x04 du front W, ou à leur place quand le 0x03 ne part pas. Chaque fois, l'arrêt part (le moteur s'arrête, le mouvement
+ * d'avant est ABORTED ou STALLED), le 0x1D du goto part après la fin de l'arrêt (ticket #787 : à W + STOP_1D_W, ou à
+ * W + STOP_1D_W1 quand la paire W ne part pas ou change la position, calculés en tête de t_stop_goto_order) et aucun 0x1C
+ * ne le suit, le goto arrive à sa cible :
+ *   - un goto vers 20000 en cours au q, le second vers 15500 (1D 8C 3C) : le premier ACK_FAILED, E_ABORTED ;
+ *   - le 0x04 de W jeté hors de sa fenêtre (le pas à W + 12101 µs, 2001 µs après son échéance) : le 0x1C part à sa place ;
+ *   - le 0x04 de W raté (E_BUS) : le 0x1C part derrière lui ; ce 0x04 ne portait pas le 0x1D, rien n'est noté
+ *     (drive_goto_failed) ;
+ *   - le 0x03 de W raté : pas d'intervalle, le 0x1C part au q, le 0x1D avec la paire suivante ;
+ *   - l'arrêt de STALLED (motion_expire, le moteur figé, 3 s après un goto vers 20000 posé pour tomber à W + 9000 µs), puis
+ *     un goto de l'hôte, le moteur dégelé ;
+ *   - q, puis le goto du bouton du fût (appui court, 0,3 s, son relâchement lu sur un 0x05 reçu à W + 9500 µs) vers la
+ *     marque 16623.
+ * Le goto du retour à la marque n'est pas joué : aucun arrêt surveillé ne le précède (RESTORING naît de l'init, la session
+ * oubliée éteint la surveillance, et q, STALLED et le changement de focale finissent le retour) ; il passe par le même
+ * dépôt (mv_start, drive_goto, bsk_txn_attach) que les deux autres. */
+static void t_stop_goto_variants(void)
+{
+    uint32_t q, g, g1;
+    uint64_t w, ts = 0;
+    size_t from;
+    long i1d;
+    printf("q ou STALLED puis goto : le 0x1C avant le 0x1D en cours de goto, paire jetée, émission ratée, bouton\n");
+
+    ready_motor();                                  /* un goto en cours au q */
+    g1 = cmd(CMD_FOCUS_GOTO, 20000);
+    run_for(100 * MS);
+    CHECK(status().motion_state == MOTION_MOVING, "un goto vers 20000 en cours");
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 15500);
+    run_for(3000 * MS);
+    i1d = goto_after_stop(from, 0x8C, 0x3C);
+    CHECK(final_is(g1, ACK_FAILED, E_ABORTED, NULL) && final_is(q, ACK_COMPLETED, E_OK, NULL),
+          "en cours : le premier goto ACK_FAILED, E_ABORTED ; q fini");
+    CHECK(i1d >= 0 && t_of(i1d) == w + STOP_1D_W1, "en cours : le 0x1C, puis le 0x1D vers 15500 à W + 343 420 µs");
+    CHECK(final_is(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 15500 && M.pos == 15500,
+          "en cours : le second goto ARRIVED en 15500 (%d)", (int)status().focus_position);
+
+    ready_motor();                                  /* le 0x04 de W jeté */
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    ps_run(w + 12101);
+    bsk_session_step(w + 12101);
+    note_state(w + 12101);
+    CHECK(g_ps_n == from + 1 && o1c(from), "jeté : le 0x1C part à la place du 0x04");
+    run_for(2000 * MS);
+    i1d = goto_after_stop(from, 0xEF, 0x40);
+    CHECK(i1d >= 0 && t_of(i1d) == w + STOP_1D_W1 && final_is(q, ACK_COMPLETED, E_OK, NULL),
+          "jeté : le 0x1D vers 16623 à W + 343 420 µs, aucun 0x1C après lui");
+    CHECK(final_is(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 16623 && M.pos == 16623,
+          "jeté : le goto ARRIVED en 16623 (%d)", (int)status().focus_position);
+
+    ready_motor();                                  /* le 0x04 de W raté */
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    g_ps.fail_sends = 1;
+    run_to(w + 10100);
+    CHECK(g_ps.fail_sends == 0 && g_ps_n == from + 1 && o1c(from) && !drive_goto_failed(),
+          "0x04 raté : le 0x1C part derrière lui ; il ne portait pas le 0x1D, rien de noté");
+    run_for(2000 * MS);
+    i1d = goto_after_stop(from, 0xEF, 0x40);
+    CHECK(i1d >= 0 && t_of(i1d) == w + STOP_1D_W1 && final_is(q, ACK_COMPLETED, E_OK, NULL),
+          "0x04 raté : le 0x1D vers 16623 à W + 343 420 µs, aucun 0x1C après lui");
+    CHECK(final_is(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 16623 && M.pos == 16623,
+          "0x04 raté : le goto ARRIVED en 16623 (%d)", (int)status().focus_position);
+
+    ready_motor();                                  /* le 0x03 de W raté */
+    w = next_vd();
+    run_to(w + 8599);
+    g_ps.fail_sends = 1;
+    run_to(w + 9000);
+    CHECK(g_ps.fail_sends == 0 && count_sent(w, w + 9001, 0x03) == 0, "le 0x03 de W raté");
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    CHECK(g_ps_n == from + 1 && o1c(from) && final_is(q, ACK_COMPLETED, E_OK, NULL), "0x03 raté : le 0x1C part au q");
+    run_for(2000 * MS);
+    i1d = goto_after_stop(from, 0xEF, 0x40);
+    CHECK(i1d >= 0 && t_of(i1d) == w + STOP_1D_W1 && count_sent(w, w + 16666, 0x04) == 0,
+          "0x03 raté : pas de 0x04 pour W, le 0x1D vers 16623 à W + 343 420 µs, aucun 0x1C après lui");
+    CHECK(final_is(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 16623 && M.pos == 16623,
+          "0x03 raté : le goto ARRIVED en 16623 (%d)", (int)status().focus_position);
+
+    ready_motor();                                  /* l'arrêt de STALLED */
+    M.frozen = true;
+    w = next_vd();
+    while (w + 9000 < ps_now() + 3000 * MS) w += 16666;
+    run_to(w + 9000 - 3000 * MS);
+    g1 = cmd(CMD_FOCUS_GOTO, 20000);
+    run_to(w + 9000);
+    CHECK(final_is(g1, ACK_FAILED, E_STALL, &ts) && ts == w + 9000 && count_sent(w, w + 9001, 0x1C) == 0,
+          "STALLED à W + 9000 µs, entre le 0x03 et le 0x04 : son 0x1C retenu");
+    from = g_ps_n;
+    M.frozen = false;
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    run_for(2000 * MS);
+    i1d = goto_after_stop(from, 0xEF, 0x40);
+    CHECK(o4_alone(from) && o1c(from + 1) && i1d >= 0 && t_of(i1d) == w + STOP_1D_W,
+          "STALLED : le 0x04 seul, le 0x1C, puis le 0x1D vers 16623 à W + 326 754 µs, aucun 0x1C après lui");
+    CHECK(final_is(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 16623 && M.pos == 16623,
+          "STALLED : le goto de l'hôte ARRIVED en 16623 (%d)", (int)status().focus_position);
+
+    ready_motor();                                  /* le goto du bouton du fût */
+    CHECK(acks_are(cmd(CMD_SET_MARK, 16623), 2, ACK_COMPLETED, E_OK), "la marque en 16623");
+    btn(true);
+    run_for(300 * MS);
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    btn(false);
+    ps_frame(1, g_ps.m05, g_ps.n05, w + 9500);
+    run_to(w + 9500);
+    CHECK(board_acks() == 1 && g_ps_n == from,
+          "bouton : relâché à W + 9500 µs, son goto accepté après q, rien d'émis entre le 0x03 et le 0x04");
+    run_to(w + 10100);
+    CHECK(final_is(q, ACK_COMPLETED, E_OK, NULL), "bouton : q fini à W + 10100 µs, son 0x1C parti");
+    run_for(2000 * MS);
+    i1d = goto_after_stop(from, 0xEF, 0x40);
+    CHECK(i1d >= 0 && t_of(i1d) == w + STOP_1D_W, "bouton : le 0x1C, puis le 0x1D vers 16623 à W + 326 754 µs");
+    CHECK(final_is(BSK_SEQ_BOARD, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 16623 && M.pos == 16623,
+          "bouton : son goto ARRIVED en 16623 (%d)", (int)status().focus_position);
+}
+
+/* Depuis l'entrée `from` : l'entrée du premier 0x04 qui porte un 0x1D, -1 sans lui. */
+static long sent_1d(size_t from)
+{
+    for (size_t i = from; i < g_ps_n && i < PS_LOG_CAP; i++)
+        if (g_ps_log[i].kind == PS_SEND && g_ps_log[i].frame.msg[0] == 0x04 && g_ps_log[i].frame.len == 19 &&
+            g_ps_log[i].frame.msg[14] == 0x1D)
+            return (long)i;
+    return -1;
+}
+
+/* q déposé entre le 0x03 et le 0x04 du front W : son 0x1C est retenu derrière le 0x04 (txn.c), et son accusé final suit son
+ * émission (B2 de l'audit des autorités, 2026-10-23 : il était ACK_COMPLETED au dépôt, que le 0x1C parte ou non). Le moteur
+ * scripté en `jitter` (la position bouge à chaque 0x06, jamais immobile, aucun accusé 1C) : seule la surveillance de l'arrêt
+ * peut renvoyer le 0x1C.
+ *   - parti : rien à W + 10099 µs ; à W + 10100 µs, le 0x04 seul puis le 0x1C, et ACK_COMPLETED à cet instant ; l'arrêt
+ *     surveillé depuis là, le même 0x1C renvoyé 1,5 s après ;
+ *   - raté (l'émission qui suit le 0x04 : E_BUS) : le goto en cours ABORTED au dépôt de q (ACK_FAILED, E_ABORTED) ; à
+ *     W + 10100 µs, ACK_FAILED, E_BUS ; rien de surveillé, aucun 0x1C ensuite, et plus de 0x1D (la consigne retirée) ;
+ *   - un goto déposé après q, avant le 0x04 (le cas de #680) : le 0x1C part, ACK_COMPLETED à W + 10100 µs ; le 0x1D attend
+ *     la fin de l'arrêt (ticket #787), qui ne vient pas (ni accusé ni immobilité) : le 0x1C renvoyé à W + 10100 µs + 1,5 s
+ *     et + 3 s, surveillé depuis son départ ; 4,5 s d'attente, plus que les 3 s où un goto parti serait renvoyé deux fois
+ *     puis STALLED, sans 0x1D, ni renvoi, ni STALLED, le goto COMMANDED ; le 0x1C abandonné à W + 10100 µs + 4,5 s =
+ *     W + 4 510 100 µs, le 0x1D part au 0x04 suivant, celui de la paire 271 (270 × 16666 + 10100 = 4 509 920 µs, avant ;
+ *     271 × 16666 + 10100 = 4 526 586 µs), et aucun 0x1C après lui ;
+ *   - un goto déposé après q, et le 0x1C raté : q ACK_FAILED, E_BUS, à W + 10100 µs, rien à surveiller ; le 0x1D part à la
+ *     paire suivante, W + 16666 + 10100 µs, aucun 0x1C sur le fil ;
+ *   - un goto déposé après q, et un accusé 1C reçu pendant la retenue (injecté à W + 9500 µs : celui, tardif, d'un arrêt
+ *     précédent ; la carte ne l'en distingue pas) : l'arrêt confirmé, le goto part, son 0x1D derrière le 0x1C retenu
+ *     (att_late, txn.c), à W + 16666 + 10100 µs ; au départ du 0x1C, la surveillance n'est pas rallumée (q_sent) : aucun
+ *     0x1C après le 0x1D. */
+static void t_stop_held(void)
+{
+    uint32_t q, g;
+    uint64_t w, ts = 0;
+    size_t from;
+    long i1d;
+    uint8_t m06[sizeof g_ps.m06 + 2];
+    printf("q entre le 0x03 et le 0x04 : son accusé final au départ du 0x1C retenu, parti ou raté\n");
+
+    ready_motor();                                  /* parti */
+    M.jitter = true;
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK) && g_ps_n == from, "parti : q accepté, pas fini, rien d'émis");
+    run_to(w + 10099);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK) && g_ps_n == from, "parti : à W + 10099 µs, toujours pas fini, rien d'émis");
+    run_to(w + 10100);
+    CHECK(g_ps_n == from + 2 && o4_alone(from) && o1c(from + 1) && t_of((long)from + 1) == w + 10100,
+          "parti : à W + 10100 µs, le 0x04 seul, puis le 0x1C");
+    CHECK(final_is(q, ACK_COMPLETED, E_OK, &ts) && ts == w + 10100, "parti : ACK_COMPLETED à W + 10100 µs, au départ du 0x1C");
+    run_for(1600 * MS);
+    CHECK(count_sent(w + 10101, w + 10100 + 1500 * MS, 0x1C) == 0 &&
+              count_sent(w + 10100 + 1500 * MS, w + 10100 + 1500 * MS + 1, 0x1C) == 1,
+          "parti : surveillé depuis son départ, le même 0x1C renvoyé à W + 10100 µs + 1,5 s");
+
+    ready_motor();                                  /* raté */
+    M.jitter = true;
+    g = cmd(CMD_FOCUS_GOTO, 20000);
+    run_for(100 * MS);
+    CHECK(status().motion_state == MOTION_MOVING, "raté : un goto en cours");
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    CHECK(final_is(g, ACK_FAILED, E_ABORTED, NULL) && status().motion_state == MOTION_ABORTED &&
+              acks_are(q, 1, ACK_ACCEPTED, E_OK) && g_ps_n == from,
+          "raté : le goto ABORTED au dépôt de q (ACK_FAILED, E_ABORTED), q pas fini, rien d'émis");
+    fail_next_04();
+    run_to(w + 10100);
+    CHECK(g_ps.fail_sends == 0 && g_ps_n == from + 1 && o4_alone(from) && final_is(q, ACK_FAILED, E_BUS, &ts) &&
+              ts == w + 10100,
+          "raté : à W + 10100 µs, le 0x04 seul sur le fil, q ACK_FAILED, E_BUS");
+    run_for(5000 * MS);
+    CHECK(sent(from, 1, 0x1C) < 0 && targets_1d(from, NULL, 0) == 0 && status().session_state == SESSION_READY,
+          "raté : rien de surveillé, aucun 0x1C ensuite ; la consigne retirée, plus de 0x1D ; READY");
+
+    ready_motor();                                  /* un goto après q */
+    M.jitter = true;
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    run_to(w + 10100);
+    CHECK(o1c(from + 1) && final_is(q, ACK_COMPLETED, E_OK, &ts) && ts == w + 10100 && acks_are(g, 1, ACK_ACCEPTED, E_OK),
+          "un goto après q : le 0x1C parti, q ACK_COMPLETED à W + 10100 µs, le goto en vol");
+    run_to(w + 4510099);
+    CHECK(count_sent(w + 10100, w + 10101, 0x1C) == 1 && count_sent(w + 1510100, w + 1510101, 0x1C) == 1 &&
+              count_sent(w + 3010100, w + 3010101, 0x1C) == 1 && count_sent(w, w + 4510100, 0x1C) == 3,
+          "un goto après q : le 0x1C à W + 10100 µs, renvoyé 1,5 s et 3 s après, surveillé depuis son départ");
+    CHECK(targets_1d(from, NULL, 0) == 0 && acks_are(g, 1, ACK_ACCEPTED, E_OK) &&
+              status().motion_state == MOTION_COMMANDED,
+          "un goto après q : 4,5 s sans 0x1D, ni renvoi, ni STALLED ; le goto COMMANDED, en vol");
+    run_to(w + 4526586 + 1600 * MS);
+    i1d = sent_1d(from);
+    CHECK(i1d >= 0 && t_of(i1d) == w + 4526586 && targets_1d(from, NULL, 0) >= 1 && count_sent(w, ps_now(), 0x1C) == 3,
+          "un goto après q : le 0x1C abandonné à W + 4 510 100 µs, le 0x1D au 0x04 suivant, W + 4 526 586 µs ; aucun 0x1C"
+          " après lui");
+
+    ready_motor();                                  /* un goto après q, le 0x1C raté */
+    M.jitter = true;
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    fail_next_04();
+    run_to(w + 10100);
+    CHECK(g_ps.fail_sends == 0 && o4_alone(from) && final_is(q, ACK_FAILED, E_BUS, &ts) && ts == w + 10100 &&
+              acks_are(g, 1, ACK_ACCEPTED, E_OK),
+          "0x1C raté : q ACK_FAILED, E_BUS, à W + 10100 µs, le goto en vol");
+    run_for(1600 * MS);
+    i1d = sent_1d(from);
+    CHECK(i1d >= 0 && t_of(i1d) == w + 16666 + 10100 && sent(from, 1, 0x1C) < 0,
+          "0x1C raté : rien à surveiller, le 0x1D à la paire suivante, W + 26 766 µs ; aucun 0x1C sur le fil");
+
+    ready_motor();                                  /* un goto après q, un accusé 1C pendant la retenue */
+    M.jitter = true;
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    q = cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    memcpy(m06, g_ps.m06, g_ps.n06);
+    m06[g_ps.n06] = 0x1C;
+    m06[g_ps.n06 + 1] = 0x00;
+    ps_frame(1, m06, g_ps.n06 + 2u, w + 9500);
+    run_to(w + 10100);
+    CHECK(o4_alone(from) && o1c(from + 1) && final_is(q, ACK_COMPLETED, E_OK, &ts) && ts == w + 10100,
+          "accusé 1C pendant la retenue : à W + 10100 µs, le 0x04 seul, puis le 0x1C, q ACK_COMPLETED");
+    run_for(1600 * MS);
+    i1d = sent_1d(from);
+    CHECK(i1d >= 0 && t_of(i1d) == w + 16666 + 10100 && count_sent(w, ps_now(), 0x1C) == 1,
+          "accusé 1C pendant la retenue : le 0x1D à la paire suivante, W + 26 766 µs ; aucun 0x1C après lui");
+}
+
+/* Un goto déposé pendant la surveillance de l'arrêt attend sa fin (ticket #787) ; un second q, pendant cette attente, l'arrête
+ * comme il arrête tout mouvement : ACK_FAILED, E_ABORTED, ABORTED, et son 0x1D ne part jamais, pas même quand l'arrêt est
+ * fini. Le moteur scripté s'arrête au 0x1C sans l'accuser : la fin de l'arrêt se lit à l'immobilité, en 0,35 s environ
+ * (t_stop_goto_order), et rien n'est émis ensuite que les deux 0x1C. */
+static void t_stop_wait_q(void)
+{
+    uint32_t g1, g, q2;
+    size_t from;
+    printf("un second q pendant l'attente de la fin de l'arrêt : le goto ABORTED, son 0x1D jamais émis\n");
+    ready_motor();
+    g1 = cmd(CMD_FOCUS_GOTO, 20000);
+    run_for(100 * MS);
+    CHECK(status().motion_state == MOTION_MOVING, "un goto vers 20000 en cours");
+    from = g_ps_n;
+    (void)cmd(CMD_FOCUS_STOP, 0);
+    g = cmd(CMD_FOCUS_GOTO, 16623);
+    run_for(100 * MS);
+    CHECK(final_is(g1, ACK_FAILED, E_ABORTED, NULL) && acks_are(g, 1, ACK_ACCEPTED, E_OK) &&
+              status().motion_state == MOTION_COMMANDED && targets_1d(from, NULL, 0) == 0,
+          "q puis un goto : le premier ABORTED, le second COMMANDED, son 0x1D pas émis");
+    q2 = cmd(CMD_FOCUS_STOP, 0);
+    CHECK(final_is(g, ACK_FAILED, E_ABORTED, NULL) && status().motion_state == MOTION_ABORTED,
+          "le second q : le goto qui attendait ACK_FAILED, E_ABORTED, ABORTED");
+    run_for(2000 * MS);
+    CHECK(final_is(q2, ACK_COMPLETED, E_OK, NULL) && targets_1d(from, NULL, 0) == 0 &&
+              count_sent(t_of((long)from), ps_now(), 0x1C) == 2 && status().motion_state == MOTION_ABORTED,
+          "2 s après, l'arrêt fini : aucun 0x1D, les deux 0x1C seuls ; ABORTED");
+}
+
+/* Le transport de la carte (host_usb.c, servi par la boucle de main.c) pour une réponse différée : après chaque pas de
+ * session, bsk_host_observe puis bsk_host_later, jusqu'à t_end. Vrai : la réponse dans `r`, rendue à l'instant `*t` ; faux,
+ * toujours attendue à t_end. Les accusés vont à HOTE, pas à ACKS. */
+static bool later_by(uint64_t t_end, char *r, size_t cap, uint64_t *t)
+{
+    for (;;) {
+        uint64_t n = ps_next(), ns = bsk_session_next();
+        if (ns < n) n = ns;
+        if (n > t_end) n = t_end;
+        ps_run(n);
+        bsk_session_step(n);
+        bsk_host_observe();
+        if (bsk_host_later(r, cap) != BSK_HOST_LATER) {
+            *t = n;
+            return true;
+        }
+        if (n >= t_end) return false;
+    }
+}
+
+/* Une ligne dont la réponse est différée : BSK_HOST_LATER, rien d'écrit. */
+static bool host_later(const char *line, char *r, size_t cap) { return bsk_host_line(line, r, cap) == BSK_HOST_LATER && !r[0]; }
+
+/* `q` à travers HOTE, déposé entre le 0x03 et le 0x04 du front W (PROTOCOL.md, ligne q) : la réponse attend le départ du
+ * 0x1C retenu (BSK_HOST_LATER), et HOTE ne passe aucune autre ligne d'ici là (bsk_host.h).
+ *   - parti : `ok` à W + 10100 µs, l'instant où la PHY scriptée émet le 0x1C, après le 0x04 ;
+ *   - raté : `er link bus` à W + 10100 µs ; `g`, le goto qu'il arrête : `aborted` ;
+ *   - la boucle arrêtée avant le 0x04 : `er link aborted`, rien d'émis, par un retrait de l'objectif (D2 retombe à
+ *     W + 9500 µs), un `p0` déposé directement à la session (CMD_DETACH, à W + 9500 µs) et une perte (le flux arrêté, son
+ *     dernier 0x05 et 0x06 à W + 9500 µs - 2 s - 1 µs : la perte constatée 2 s + 1 µs après, à W + 9500 µs) ;
+ *   - la file des retenues pleine (quatre q déposés à la session avant lui) : `er busy` tout de suite, rien d'émis pour
+ *     lui ; les quatre ACK_COMPLETED à W + 10100 µs, leurs quatre 0x1C derrière le 0x04. */
+static void t_stop_held_host(void)
+{
+    char r[BSK_HOST_REPLY_MAX];
+    uint32_t q4[4];
+    uint64_t w, ts = 0, tr = 0;
+    size_t from;
+    bsk_cmd_t c;
+    printf("q à travers HOTE entre le 0x03 et le 0x04 : ok au départ du 0x1C, er link bus, er link aborted, er busy\n");
+
+    ready_motor();                                  /* parti */
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    CHECK(host_later("q", r, sizeof r) && g_ps_n == from, "parti : q -> BSK_HOST_LATER, rien d'émis");
+    CHECK(!later_by(w + 10099, r, sizeof r, &tr), "parti : toujours attendue à W + 10099 µs");
+    CHECK(later_by(w + 10100, r, sizeof r, &tr) && !strcmp(r, "ok") && tr == w + 10100 && o4_alone(from) && o1c(from + 1) &&
+              t_of((long)from + 1) == w + 10100,
+          "parti : « ok » à W + 10100 µs, l'instant du 0x1C émis derrière le 0x04 (« %s »)", r);
+
+    ready_motor();                                  /* raté */
+    M.jitter = true;
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    HOST("f20000", "ok");
+    run_for(100 * MS);
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    CHECK(host_later("q", r, sizeof r) && status().motion_state == MOTION_ABORTED, "raté : q -> BSK_HOST_LATER, le goto ABORTED");
+    fail_next_04();
+    CHECK(later_by(w + 10100, r, sizeof r, &tr) && !strcmp(r, "er link bus") && tr == w + 10100 && g_ps_n == from + 1 &&
+              o4_alone(from),
+          "raté : « er link bus » à W + 10100 µs, le 0x04 seul sur le fil (« %s »)", r);
+    HOST("g", "aborted");
+
+    for (int k = 0; k < 3; k++) {                   /* la boucle arrêtée avant le 0x04 */
+        static const char *const HOW[] = {"retrait", "p0", "perte"};
+        ready_motor();
+        bsk_host_init("2.0.0-dev", "poweron", ps_now);
+        if (k == 2) {
+            g_ps.flow = false;
+            run_for(20 * MS);                       /* les 0x05 et 0x06 du dernier 0x04 reçus */
+        }
+        w = next_vd();
+        while (w + 9500 <= ps_now() + 2000 * MS + 1) w += 16666;
+        if (k == 2) {
+            ps_frame(1, g_ps.m05, g_ps.n05, w + 9500 - 2000 * MS - 1);
+            ps_frame(1, g_ps.m06, g_ps.n06, w + 9500 - 2000 * MS - 1);
+        }
+        run_to(w + 9000);
+        CHECK(status().session_state == SESSION_READY, "%s : READY à W + 9000 µs", HOW[k]);
+        from = g_ps_n;
+        CHECK(host_later("q", r, sizeof r), "%s : q -> BSK_HOST_LATER", HOW[k]);
+        if (k < 2) {
+            CHECK(!later_by(w + 9500, r, sizeof r, &tr), "%s : toujours attendue à W + 9500 µs", HOW[k]);
+            if (k == 0) {
+                ps_presence(false);
+            } else {                                /* déposé entre deux pas, lu comme après un pas */
+                c = (bsk_cmd_t){.seq = 0x7FFFFFF0u, .op = CMD_DETACH};
+                bsk_session_command(&c);
+                bsk_host_observe();
+            }
+        }
+        if (k == 1) tr = bsk_host_later(r, sizeof r) != BSK_HOST_LATER ? ps_now() : 0;
+        CHECK((k == 1 || later_by(w + 10100, r, sizeof r, &tr)) && !strcmp(r, "er link aborted") && tr == w + 9500 &&
+                  status().session_state != SESSION_READY,
+              "%s : « er link aborted » à W + 9500 µs, la session quittée (« %s », %llu)", HOW[k], r,
+              (unsigned long long)(tr - w));
+        run_for(20 * MS);
+        CHECK(sent(from, 1, 0x04) < 0 && sent(from, 1, 0x1C) < 0, "%s : ni le 0x04 ni le 0x1C ne sont partis", HOW[k]);
+    }
+
+    ready_motor();                                  /* la file pleine */
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    w = next_vd();
+    run_to(w + 9000);
+    from = g_ps_n;
+    for (int k = 0; k < 4; k++) q4[k] = cmd(CMD_FOCUS_STOP, 0);
+    HOST("q", "er busy");
+    CHECK(g_ps_n == from, "file pleine : rien d'émis");
+    run_to(w + 10100);
+    CHECK(g_ps_n == from + 5 && o4_alone(from) && o1c(from + 1) && o1c(from + 4), "file pleine : le 0x04, puis quatre 0x1C");
+    for (int k = 0; k < 4; k++)
+        CHECK(final_is(q4[k], ACK_COMPLETED, E_OK, &ts) && ts == w + 10100, "file pleine : le q %d retenu, ACK_COMPLETED à W + 10100 µs", k);
 }
 
 /* Le 0x10 de l'init est un homing (init.c, S_Q10 ; sa réponse n'arrive qu'à la fin du mouvement) : q y est refusé comme en
@@ -4719,7 +5941,7 @@ static void t_stop_init_home(void)
     uint64_t t10;
     printf("q pendant le 0x10 de l'init : E_BUSY, « er busy home », rien d'émis ; ailleurs dans IDENTIFYING, ok\n");
     boot();
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     lens_135();
     g_ps.flow = true;
     ps_presence(true);
@@ -4744,7 +5966,7 @@ static void t_stop_init_home(void)
           "le homing n'est pas interrompu : READY, aucun 0x1C");
 
     boot();                                         /* le 0x10 sans réponse, sans flux : IDENTIFYING, le 0x05 attendu */
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     lens_135();
     g_ps.skip[0x10] = 1;
     ps_presence(true);
@@ -4756,7 +5978,7 @@ static void t_stop_init_home(void)
           "le 0x10 échu à 8 s, le premier 0x05 attendu : IDENTIFYING, q -> ok, rien d'émis");
 
     boot();                                         /* D2 retombe pendant le 0x10 de l'init : OFF */
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     lens_135();
     g_ps.flow = true;
     ps_presence(true);
@@ -4831,6 +6053,371 @@ static void t_stop_unconfirmed(void)
     bsk_journal_set(false, false);
 }
 
+/* ─────────────────────────── la reprise : la position de reprise (ticket #674) ─────────────────────────── */
+
+/* La perte en READY : le flux arrêté, RECOVERING 2 s après sa dernière trame ; `during`, s'il y en a, change ce que
+ * l'objectif rendra (NULL : rien) ; puis la reprise, le flux revenu au 0x0A de la nouvelle init (flow_on_0a, lens_135),
+ * LOG ON depuis ce 0x0A (la première seconde d'un démarrage est pleine : until_0a), 5 s ensuite. Rend l'entrée du journal
+ * de la PHY scriptée où la reprise commence. */
+static size_t resume_after_loss(void (*during)(void))
+{
+    size_t from;
+    uint64_t t0 = ps_now();
+    bsk_journal_init(ps_now);
+    g_ps.flow = false;
+    while (status().session_state != SESSION_RECOVERING && ps_now() < t0 + 5000 * MS) run_for(1 * MS);
+    from = g_ps_n;
+    if (during) during();
+    while (sent(from, 2, 0x0A) < 0 && ps_now() < t0 + 15000 * MS) run_for(1 * MS);
+    bsk_journal_set(true, false);
+    jdrain();
+    run_for(5000 * MS);
+    jdrain();
+    bsk_journal_set(false, false);
+    return from;
+}
+
+/* Le 0x06 rendu de nouveau, par le moteur scripté : après stop_stream(0x06). */
+static void back_06(void) { g_ps.on_send = motor; }
+
+static void unfreeze(void) { M.frozen = false; }
+
+/* Une perte en READY, rien en vol (critère 1) : la dernière position lue, posée par la bague (le moteur scripté publie
+ * 18000 sans 0x1D), est visée par la reprise, pas la marque 20000 croissante. Attendus, à la main : le sens de l'arrivée,
+ * croissant (14623 puis 18000) ; le moteur scripté ne bouge pas pendant l'init : déjà sur la position, le dernier sens
+ * inconnu dans la nouvelle session, le jeu repris par le dépassement (X = 200, le 135) : 17800 puis 18000. Dans la perte,
+ * le 0x05 s'arrête le premier (2 ms après son 0x04, avant le 0x06) : sa clé vidée n'efface pas la position. Puis le 0x06
+ * arrêté seul avant la perte : sa position oubliée (0, lens_rx_stale) n'est pas une position lue, la reprise vise encore
+ * 18000. */
+static void t_resume_ring(void)
+{
+    printf("reprise : la dernière position lue (la bague) visée après une perte, pas la marque ; un 0x06 arrêté n'y compte pas\n");
+    for (int k = 0; k < 2; k++) {
+        uint16_t t[4] = {0};
+        size_t from, n;
+        const char *what = k ? "le 0x06 arrêté avant la perte" : "la perte";
+        ready_motor();
+        store_sim_poke(KEY135, 20000 | 1u << 16);   /* relue au démarrage suivant */
+        M.pos = 18000;
+        run_for(100 * MS);
+        CHECK(status().session_state == SESSION_READY && status().focus_position == 18000, "%s : READY, la bague en 18000", what);
+        if (k) {
+            stop_stream(0x06);
+            run_for(2100 * MS);
+            CHECK(status().session_state == SESSION_READY && !(status().capabilities & CAP_LIMITS_REPORTED) &&
+                      status().focus_position == 0,
+                  "%s : READY, la position inconnue", what);
+        }
+        from = resume_after_loss(k ? back_06 : NULL);
+        n = targets_1d(from, t, 4);
+        CHECK(n == 2 && t[0] == 17800 && t[1] == 18000, "%s : 17800 puis 18000 (%zu : %u, %u)", what, n, t[0], t[1]);
+        CHECK(status().session_state == SESSION_READY && status().focus_position == 18000 && status().mark_valid &&
+                  status().mark_position == 20000,
+              "%s : READY en 18000, la marque 20000 relue, pas visée (%ld)", what, (long)status().focus_position);
+        CHECK(jcount(" pos=18000 dir=inc x=200 path=overshoot via=17800") == 1 && jcount(" mark=") == 0 &&
+                  jcount(" end=arrived") == 1,
+              "%s : « * restore <t> pos=18000 dir=inc x=200 path=overshoot via=17800 », puis « end=arrived » (%zu)", what, n_jl);
+    }
+}
+
+/* Une perte pendant un déplacement relatif (critère 2) : depuis 18000 (la bague), m-1000, la cible calculée 17000, le
+ * moteur scripté figé et le flux arrêté aussitôt : la perte avant l'arrivée (2 s, avant le STALLED de 3 s), le déplacement
+ * ACK_FAILED E_LOST. Le moteur libéré pendant la reprise, toujours en 18000 : la reprise vise 17000, en décroissant (de
+ * 18000 vers 17000, le sens du déplacement, pas celui de la bague) : du bon côté, un seul goto. Le goto absolu en vol :
+ * t_power_loss_restore de test_session135.c. */
+static void t_resume_move(void)
+{
+    uint16_t t[4] = {0};
+    size_t from, n;
+    uint32_t q;
+    printf("reprise : la cible d'un déplacement relatif en vol, perdu avant l'arrivée\n");
+    ready_motor();
+    M.pos = 18000;
+    run_for(100 * MS);
+    M.frozen = true;
+    q = cmd(CMD_FOCUS_MOVE, -1000);
+    from = resume_after_loss(unfreeze);
+    CHECK(final_is(q, ACK_FAILED, E_LOST, NULL), "m-1000 : ACK_FAILED, E_LOST");
+    n = targets_1d(from, t, 4);
+    CHECK(n == 1 && t[0] == 17000 && status().session_state == SESSION_READY && status().focus_position == 17000,
+          "un 0x1D, 17000 ; READY en 17000 (%zu : %u, position %ld)", n, t[0], (long)status().focus_position);
+    CHECK(jcount(" pos=17000 dir=dec x=200 path=direct") == 1, "« * restore <t> pos=17000 dir=dec x=200 path=direct » (%zu)", n_jl);
+}
+
+static void to_f051(void)
+{
+    ps_answer(0x07, TAMRON07, sizeof TAMRON07, 5 * MS);
+    store_sim_poke("010334c1bf087", 15000);
+}
+
+static void to_100mm(void)
+{
+    g_ps.m05[27] = 1000 & 0xFF;                    /* la focale nominale, offsets 26-27 : 1000 dixièmes */
+    g_ps.m05[28] = 1000 >> 8;
+    store_sim_poke("01030800bf064", 15000);
+}
+
+static void narrow(void) { set_limits(14000, 17000); }
+
+/* Une perte, puis un autre objectif ou une autre focale nominale au démarrage suivant (critère 3) : la position de reprise
+ * est celle de la clé de la session perdue (KEY135, 18000) ; la reprise suit la marque de la clé nouvelle, comme un
+ * démarrage. Le F051 (TAMRON07, sa clé 010334c1bf087), la marque 15000 sans sens rangée sous elle : en décroissant, depuis
+ * 18000 au-dessus, un seul goto ; X = (30733 - 13878) / 100 = 168. La focale 100 mm (la clé 01030800bf064 : 0x064), la
+ * même marque sous elle ; X = 200, le 135. Puis la clé de la reprise, mais des bornes du 0x06 lues autres à la reprise
+ * (14000 / 17000, appliquées 14005 / 16995 ; décision de l'architecte) : 18000 hors d'elles, pas de retour, et pas la
+ * marque non plus (15000 croissante, dans les bornes) : `skip=limit pos=18000`. */
+static void t_resume_other(void)
+{
+    static const struct {
+        void (*during)(void);
+        uint32_t mark135;
+        const char *what, *line;
+        int32_t at;
+    } C[] = {
+        {to_f051, 20000 | 1u << 16, "un autre objectif", " mark=15000 dir=unknown x=168 path=direct", 15000},
+        {to_100mm, 20000 | 1u << 16, "une autre focale", " mark=15000 dir=unknown x=200 path=direct", 15000},
+        {narrow, 15000 | 1u << 16, "d'autres bornes", " skip=limit pos=18000", 18000},
+    };
+    printf("reprise : un autre objectif, une autre focale : la marque de la clé nouvelle ; la position hors des bornes : rien\n");
+    for (size_t k = 0; k < sizeof C / sizeof C[0]; k++) {
+        uint16_t t[4] = {0};
+        size_t from, n;
+        ready_motor();
+        store_sim_poke(KEY135, C[k].mark135);
+        M.pos = 18000;
+        run_for(100 * MS);
+        from = resume_after_loss(C[k].during);
+        n = targets_1d(from, t, 4);
+        CHECK(C[k].at == 18000 ? n == 0 : n == 1 && t[0] == 15000, "%s : %zu 0x1D (%u)", C[k].what, n, t[0]);
+        CHECK(status().session_state == SESSION_READY && status().focus_position == C[k].at,
+              "%s : READY en %ld (%ld)", C[k].what, (long)C[k].at, (long)status().focus_position);
+        CHECK(jcount(C[k].line) == 1 && jcount(" pos=") == (C[k].at == 18000 ? 1u : 0u), "%s : « * restore <t>%s » (%zu)",
+              C[k].what, C[k].line, n_jl);
+    }
+}
+
+/* Un démarrage qui n'est pas une reprise va à la marque, quelle que soit la position d'avant (critère 4) : l'objectif
+ * retiré puis remis (D2, to_off), `b` (CMD_ATTACH) en READY. La position de reprise 18000 (la bague), la marque 20000
+ * croissante : depuis 18000 dessous, un seul goto. La mise sous tension de la carte : t_resume_reboot. */
+static void t_resume_cold(void)
+{
+    printf("reprise : D2 retombé, `b` : la marque, pas la dernière position\n");
+    for (int k = 0; k < 2; k++) {
+        uint16_t t[4] = {0};
+        size_t from, n;
+        const char *what = k ? "CMD_ATTACH" : "D2 retombé puis revenu";
+        ready_motor();
+        store_sim_poke(KEY135, 20000 | 1u << 16);
+        M.pos = 18000;
+        run_for(100 * MS);
+        from = g_ps_n;
+        if (k) {
+            (void)cmd(CMD_ATTACH, 0);
+        } else {
+            ps_presence(false);
+            run_for(500 * MS);
+            ps_presence(true);
+        }
+        run_for(5000 * MS);
+        n = targets_1d(from, t, 4);
+        CHECK(n == 1 && t[0] == 20000 && status().session_state == SESSION_READY && status().focus_position == 20000,
+              "%s : un 0x1D, 20000 ; READY sur la marque (%zu : %u)", what, n, t[0]);
+    }
+}
+
+/* La mémoire de la position de reprise donnée par le test (p->keep), gardée à travers bsk_session_init comme la mémoire
+ * RTC de la carte (main/main.c) ; FNV-1a 32 bits d'après sa définition (h = 2166136261, puis h = (h ^ octet) * 16777619
+ * pour chaque octet), sur la clé (ses 16 octets), la position (poids faible d'abord) et le sens : la somme que restore.c
+ * pose, calculée ici sans lui. */
+static bsk_session_keep_t K;
+
+static uint32_t fnv(const bsk_session_keep_t *k)
+{
+    uint32_t h = 2166136261u;
+    uint8_t b[BSK_STORE_KEY_MAX + 3];
+    memcpy(b, k->key, BSK_STORE_KEY_MAX);
+    b[BSK_STORE_KEY_MAX] = (uint8_t)k->pos;
+    b[BSK_STORE_KEY_MAX + 1] = (uint8_t)(k->pos >> 8);
+    b[BSK_STORE_KEY_MAX + 2] = k->dir;
+    for (size_t i = 0; i < sizeof b; i++) h = (h ^ b[i]) * 16777619u;
+    return h;
+}
+
+/* Un démarrage de la carte (warm : par chien de garde ou panic ; faux : la mise sous tension) : la PHY scriptée et la
+ * SESSION de nouveau, K gardée ; le moteur scripté et les marques rangées (la NVS) restent. Le journal éteint : un sens
+ * hors de bsk_approach_t relu par erreur ne se formate pas (le mutant le dit par le trajet). */
+static void board_start(bool warm)
+{
+    ps_init(T0);
+    bsk_session_params_default(&P);
+    P.keep = &K;
+    P.warm = warm;
+    bsk_journal_set(false, false);
+    bsk_session_init(&P);
+    n_chg = 0;
+    n_mchg = 0;
+    n_acks = 0;
+    last_state = SESSION_OFF;
+    last_mv = MOTION_IDLE;
+    lens_135();
+    g_ps.on_send = motor;
+    g_ps.flow = true;
+}
+
+/* D2 présent, 5 s : READY, `nt` 0x1D émis depuis le démarrage de la carte, `a` puis `b`, la position publiée sur le
+ * dernier. */
+static bool board_runs_to(uint16_t a, uint16_t b, size_t nt)
+{
+    uint16_t t[4] = {0};
+    size_t n;
+    ps_presence(true);
+    run_for(5000 * MS);
+    n = targets_1d(0, t, 4);
+    return status().session_state == SESSION_READY && n == nt && t[0] == a && (nt < 2 || t[1] == b) &&
+           (nt == 0 || status().focus_position == (nt < 2 ? a : b));
+}
+
+/* Le redémarrage de la carte (critère 6). La mise sous tension, K pleine de ce que la RAM porte (0xA5) : effacée sans être
+ * lue ; READY en 14623, rien à viser. La bague en 18000 : K tenue (KEY135, 18000, croissant, sa somme). Un redémarrage par
+ * chien de garde ou panic (warm) : la reprise vise 18000, pas la marque 20000 (17800 puis 18000, comme t_resume_ring). Une
+ * mise sous tension avec K telle quelle : K effacée sans être lue, la marque (depuis 18000 dessous, 20000). Puis warm, K
+ * abîmée : sa position changée sans sa somme (une écriture interrompue) ; puis K qui passe sa somme avec un sens hors de
+ * bsk_approach_t (3) : ni l'une ni l'autre n'est relue, la marque, sur laquelle le moteur est déjà (le dernier sens inconnu :
+ * 19800 puis 20000). */
+static void t_resume_reboot(void)
+{
+    static const bsk_session_keep_t ZERO;
+    bsk_session_keep_t kept;
+    printf("reprise : après un redémarrage par chien de garde ou panic, la position gardée ; à la mise sous tension, jamais lue\n");
+    memset(&K, 0xA5, sizeof K);
+    store_sim_reset();
+    memset(&M, 0, sizeof M);
+    M.pos = 14623;
+    board_start(false);
+    CHECK(!memcmp(&K, &ZERO, sizeof K), "mise sous tension : K effacée au bsk_session_init");
+    CHECK(board_runs_to(0, 0, 0) && status().focus_position == 14623, "READY en 14623, sans mouvement");
+    store_sim_poke(KEY135, 20000 | 1u << 16);
+    M.pos = 18000;
+    run_for(100 * MS);
+    CHECK(!strcmp(K.key, KEY135) && K.pos == 18000 && K.dir == BSK_APPROACH_INCREASING && K.sum == fnv(&K),
+          "K tenue : " KEY135 ", 18000, croissant, sa somme (%s, %u, %u)", K.key, K.pos, K.dir);
+    kept = K;
+
+    board_start(true);
+    CHECK(!memcmp(&K, &kept, sizeof K), "warm : K relue telle quelle");
+    CHECK(board_runs_to(17800, 18000, 2), "redémarrage par chien de garde ou panic : 17800 puis 18000, READY en 18000");
+
+    K = kept;
+    board_start(false);
+    CHECK(!memcmp(&K, &ZERO, sizeof K), "mise sous tension, K telle quelle : effacée sans être lue");
+    CHECK(board_runs_to(20000, 0, 1), "la marque : un goto, 20000");
+
+    K = kept;
+    K.pos = 18001;
+    board_start(true);
+    CHECK(!memcmp(&K, &ZERO, sizeof K) && board_runs_to(19800, 20000, 2),
+          "warm, la position changée sans sa somme : effacée, la marque (19800 puis 20000)");
+
+    K = kept;
+    K.dir = 3;
+    K.sum = fnv(&K);
+    board_start(true);
+    CHECK(!memcmp(&K, &ZERO, sizeof K) && board_runs_to(19800, 20000, 2),
+          "warm, sa somme juste et un sens invalide (3) : effacée, la marque (19800 puis 20000)");
+}
+
+/* Une perte pendant le retour vers la position de reprise (pas la marque) : après une perte en READY, puis après un
+ * redémarrage chaud (K donnée, relue). La bague en 18000 (K : KEY135, 18000, croissant), la marque 20000 croissante ;
+ * le moteur scripté figé : le retour vise 18000, déjà dessus, le dernier sens inconnu dans la session nouvelle, par le
+ * dépassement (X = 200, le 135) : 17800, qui ne part pas (STALLED à 3 s). 100 ms après l'entrée en RESTORING, les deux
+ * flux arrêtés (g_ps.flow) : une perte pendant le retour est un échec compté (PROTOCOL.md § 7) : RECOVERING 2 s après le
+ * dernier 0x06 (3 ms après son 0x04, plus 1 µs, comme t_loss), `* restore … end=recovering`. La position de reprise
+ * n'est écrite qu'en READY (restore.c, en-tête) : K telle quelle pendant la reprise. Le moteur libéré, la reprise vise la
+ * même cible, 18000, pas la marque : 17800 puis 18000, READY en 18000, la marque relue, pas visée. Un seul flux arrêté
+ * en RESTORING n'est pas une perte : t_one_stream_restoring. */
+static void t_resume_restoring_loss(void)
+{
+    printf("reprise : une perte pendant le retour vers la dernière position, la même cible visée ensuite, pas la marque\n");
+    for (int k = 0; k < 2; k++) {
+        const char *what = k ? "redémarrage chaud" : "perte en READY";
+        bsk_session_keep_t kept;
+        uint16_t t[4] = {0};
+        uint64_t tc, tl = 0, tr;
+        size_t ir, from, n;
+        if (k) {
+            memset(&K, 0, sizeof K);
+            memcpy(K.key, KEY135, strlen(KEY135));
+            K.pos = 18000;
+            K.dir = BSK_APPROACH_INCREASING;
+            K.sum = fnv(&K);
+            store_sim_reset();
+            store_sim_poke(KEY135, 20000 | 1u << 16);
+            memset(&M, 0, sizeof M);
+            M.pos = 18000;
+            M.frozen = true;
+            board_start(true);
+            bsk_journal_init(ps_now);
+            ps_presence(true);
+        } else {
+            ready_motor();
+            store_sim_poke(KEY135, 20000 | 1u << 16);
+            M.pos = 18000;
+            run_for(100 * MS);
+            CHECK(status().session_state == SESSION_READY && status().focus_position == 18000, "%s : READY, la bague en 18000",
+                  what);
+            bsk_journal_init(ps_now);
+            M.frozen = true;
+            g_ps.flow = false;
+            tc = ps_now();
+            while (status().session_state != SESSION_RECOVERING && ps_now() < tc + 5000 * MS) run_for(1 * MS);
+        }
+        kept = K;
+        from = g_ps_n;
+        while (sent(from, 2, 0x0A) < 0 && ps_now() < T0 + 20000 * MS) run_for(1 * MS);
+        bsk_journal_set(true, false);
+        jdrain();
+        while (status().session_state != SESSION_RESTORING && ps_now() < T0 + 20000 * MS) run_for(1 * MS);
+        for (ir = 0; ir < n_chg && !(chg[ir].state == SESSION_RESTORING && chg[ir].t >= t_of((long)from)); ir++) {}
+        run_for(100 * MS);
+        n = targets_1d(from, t, 4);
+        CHECK(status().session_state == SESSION_RESTORING && n >= 1 && t[0] == 17800,
+              "%s : RESTORING vers 18000 par 17800, le moteur figé (%u, %zu : %u)", what, status().session_state, n, t[0]);
+        g_ps.flow = false;
+        tc = ps_now();
+        for (size_t j = 0; j < g_ps_n; j++)
+            if (g_ps_log[j].kind == PS_SEND && g_ps_log[j].frame.msg[0] == 0x04) tl = g_ps_log[j].t + 3 * MS;   /* le 0x06 */
+        while (status().session_state != SESSION_RECOVERING && ps_now() < tc + 5000 * MS) run_for(1 * MS);
+        jdrain();
+        tr = entered(SESSION_RECOVERING, ir);
+        CHECK(tr == tl + 2000 * MS + 1 && mv_entered(MOTION_STALLED, 0) == 0,
+              "%s : les deux flux arrêtés en RESTORING, RECOVERING 2 s après le dernier 0x06, avant le STALLED (écart %lld µs)",
+              what, (long long)(tr - tl));
+        CHECK(jcount(" pos=18000 dir=inc x=200 path=overshoot via=17800") == 1 && jcount(" mark=") == 0 &&
+                  jcount(" end=recovering") == 1,
+              "%s : « * restore <t> pos=18000 dir=inc x=200 path=overshoot via=17800 », puis « end=recovering » (%zu)", what,
+              n_jl);
+        CHECK(!memcmp(&K, &kept, sizeof K), "%s : la position de reprise telle quelle pendant la reprise", what);
+        M.frozen = false;
+        from = g_ps_n;
+        while (sent(from, 2, 0x0A) < 0 && ps_now() < tr + 15000 * MS) run_for(1 * MS);
+        bsk_journal_set(true, false);
+        jdrain();
+        run_for(5000 * MS);
+        jdrain();
+        bsk_journal_set(false, false);
+        n = targets_1d(from, t, 4);
+        CHECK(n == 2 && t[0] == 17800 && t[1] == 18000, "%s, puis la reprise : 17800 puis 18000 (%zu : %u, %u)", what, n, t[0],
+              t[1]);
+        CHECK(status().session_state == SESSION_READY && status().focus_position == 18000 && status().mark_valid &&
+                  status().mark_position == 20000,
+              "%s, puis la reprise : READY en 18000, la marque 20000 relue, pas visée (%ld)", what,
+              (long)status().focus_position);
+        CHECK(jcount(" pos=18000 dir=inc x=200 path=overshoot via=17800") == 1 && jcount(" mark=") == 0 &&
+                  jcount(" end=arrived") == 1,
+              "%s, puis la reprise : « * restore <t> pos=18000 … via=17800 », puis « end=arrived » (%zu)", what, n_jl);
+    }
+}
+
 /* ─────────────────────────── CMD_LENS_CUSTOM ─────────────────────────── */
 
 /* La réponse du 135 au canal 0x40 : 19 octets, l'écho de MainCmd et SubCmd, puis 16 octets de données (samyang.md § 6.1 ;
@@ -4859,6 +6446,216 @@ static void ready135_custom(const uint8_t *r)
     run_for(4000 * MS);
 }
 
+/* ─────────────────────────── la marque rangée (constat A4 de l'audit des autorités, ticket #747) ─────────────────────────── */
+
+/* La session au repos en 16000 avec la marque 14623 rangée sous KEY135 (js, rangée dans l'appel), HOTE et le journal
+ * prêts, sous LOG ON, le journal vidé. */
+static void mark_bench(char *r, size_t cap)
+{
+    uint32_t v = 0;
+    ready_motor();
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    bsk_journal_init(ps_now);
+    bsk_journal_set(true, false);
+    CHECK(host_is("js", "ok", r, cap) && store_sim_peek(KEY135, &v) && v == 14623, "la marque 14623 rangée (0x%X)", v);
+    (void)cmd(CMD_FOCUS_GOTO, 16000);
+    run_for(2000 * MS);
+    CHECK(status().motion_state == MOTION_ARRIVED && status().focus_position == 16000 && status().mark_sets == 1,
+          "au repos en 16000, une pose comptée");
+    jdrain();
+}
+
+/* `js`, `jx`, CMD_SET_MARK et l'appui long, l'écriture retenue par le magasin (`hold`, comme la tâche de la carte) : pas
+ * d'`ok` ni d'accusé final avant son résultat ; pendant l'attente, ce que publie la session (j, la marque de
+ * l'instantané) est la marque rangée d'avant, ou rien après un effacement rangé, et les gestes comptés pour la LED ne
+ * bougent pas ; rien au journal. Le résultat relevé : `ok`, ACK_COMPLETED, ou `* btn … result=ok`, la marque nouvelle
+ * publiée, le geste compté une fois, `* mark … set` ou `clear`. */
+static void t_mark_stored(void)
+{
+    char r[BSK_HOST_REPLY_MAX];
+    uint64_t t;
+    uint32_t v = 0, q;
+    bsk_status_t s;
+    printf("marque : js, jx, CMD_SET_MARK et l'appui long finis à l'écriture rangée ; avant, la marque d'avant, rien de compté\n");
+    mark_bench(r, sizeof r);
+    g_store_sim.hold = true;
+    CHECK(host_later("js", r, sizeof r), "js, l'écriture retenue : la réponse attend");
+    CHECK(!later_by(ps_now() + 1000 * MS, r, sizeof r, &t), "1 s retenue : toujours aucune réponse");
+    s = status();
+    CHECK(s.mark_valid && s.mark_position == 14623 && s.mark_sets == 1 && s.mark_clears == 0,
+          "js en attente : la marque rangée d'avant, 14623, rien de compté (%d %ld, %u)", s.mark_valid, (long)s.mark_position,
+          s.mark_sets);
+    jdrain();
+    CHECK(n_jl == 0, "js en attente : rien au journal (%zu : « %s »)", n_jl, n_jl ? JL[0] : "");
+    store_sim_flush();
+    CHECK(later_by(ps_now() + 100 * MS, r, sizeof r, &t) && !strcmp(r, "ok"), "js rangée : ok (« %s »)", r);
+    s = status();
+    CHECK(s.mark_valid && s.mark_position == 16000 && s.mark_sets == 2 && store_sim_peek(KEY135, &v) && v == (16000u | 1u << 16),
+          "js rangée : la marque 16000, une pose de plus (%ld, %u, 0x%X)", (long)s.mark_position, s.mark_sets, v);
+    HOST("j", "16000");
+    jdrain();
+    CHECK(n_jl == 1 && strstr(JL[0], " set key=" KEY135 " pos=16000 dir=inc"), "* mark <t> set key=… pos=16000 dir=inc, une "
+          "fois (%zu)", n_jl);
+
+    CHECK(host_later("jx", r, sizeof r), "jx, l'écriture retenue : la réponse attend");
+    CHECK(!later_by(ps_now() + 500 * MS, r, sizeof r, &t), "500 ms retenue : toujours aucune réponse");
+    s = status();
+    CHECK(s.mark_valid && s.mark_position == 16000 && s.mark_clears == 0, "jx en attente : la marque rangée, 16000, rien de "
+          "compté (%u)", s.mark_clears);
+    store_sim_flush();
+    CHECK(later_by(ps_now() + 100 * MS, r, sizeof r, &t) && !strcmp(r, "ok"), "jx rangée : ok (« %s »)", r);
+    s = status();
+    CHECK(!s.mark_valid && s.mark_sets == 2 && s.mark_clears == 1 && !store_sim_peek(KEY135, &v), "jx rangée : plus de "
+          "marque, un effacement (%u)", s.mark_clears);
+    HOST("j", "-");
+    jdrain();
+    CHECK(n_jl == 1 && strstr(JL[0], " clear key=" KEY135), "* mark <t> clear key=…, une fois (%zu)", n_jl);
+
+    q = cmd(CMD_SET_MARK, 17000);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK), "CMD_SET_MARK 17000 retenue : acceptée, en vol");
+    run_for(500 * MS);
+    HOST("j", "-");
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK) && status().mark_sets == 2, "500 ms retenue : ni accusé final, ni pose comptée");
+    store_sim_flush();
+    run_for(20 * MS);
+    CHECK(final_is(q, ACK_COMPLETED, E_OK, NULL) && status().mark_sets == 3, "rangée : ACK_COMPLETED, une pose de plus");
+    HOST("j", "17000");
+
+    q = cmd(CMD_SET_MARK, 15000);                   /* la clé quittée pendant l'écriture : 134 mm */
+    focal(1340);
+    store_sim_flush();
+    run_for(20 * MS);
+    CHECK(final_is(q, ACK_COMPLETED, E_OK, NULL) && status().mark_sets == 4, "rangée la clé quittée : ACK_COMPLETED, comptée");
+    store_sim_flush();
+    run_for(20 * MS);
+    HOST("j", "-");                                 /* 134 mm : rien n'y est rangé */
+    focal(1350);
+    store_sim_flush();
+    run_for(20 * MS);
+    HOST("j", "15000");                             /* 135 mm, relue : ce qui y est rangé */
+
+    jdrain();
+    press_for(1500);
+    jdrain();
+    s = status();
+    CHECK(!jcount("* btn ") && !jcount("* mark ") && s.mark_position == 15000 && s.mark_sets == 4, "l'appui long retenu : "
+          "ni * btn ni * mark, la marque d'avant, 15000, rien de compté (%s, %ld, %u)", n_jl ? JL[n_jl - 1] : "-",
+          (long)s.mark_position, s.mark_sets);
+    store_sim_flush();
+    run_for(20 * MS);
+    jdrain();
+    s = status();
+    CHECK(jcount(" press=long result=ok") == 1 && jcount(" set key=" KEY135 " pos=16000") == 1 && s.mark_position == 16000 &&
+              s.mark_sets == 5,
+          "l'appui long rangé : * btn … press=long result=ok, la marque 16000, une pose de plus (%zu, %u)", n_jl, s.mark_sets);
+    g_store_sim.hold = false;
+    bsk_journal_set(false, false);
+}
+
+/* L'écriture ratée (`fail`), rendue dans l'appel ou retenue : `js`, `jx` répondent `er store`, CMD_SET_MARK ACK_FAILED
+ * E_STORE, l'appui long `* btn … result=er why=store` ; jamais `ok`. `j` rend la marque rangée d'avant ;
+ * `* mark … store=er` au journal, aucun `set` ni `clear` ; rien de compté. */
+static void t_mark_store_fail(void)
+{
+    char r[BSK_HOST_REPLY_MAX];
+    uint64_t t;
+    uint32_t q;
+    bsk_status_t s;
+    printf("marque : l'écriture ratée, er store, la marque d'avant relue, store=er, rien de compté\n");
+    mark_bench(r, sizeof r);
+    g_store_sim.fail = true;
+    HOST("js", "er store");
+    HOST("j", "14623");
+    HOST("jx", "er store");
+    HOST("j", "14623");
+    q = cmd(CMD_SET_MARK, 17000);
+    CHECK(final_is(q, ACK_FAILED, E_STORE, NULL), "CMD_SET_MARK 17000 ratée : ACK_FAILED, E_STORE");
+    press_for(1500);
+    jdrain();
+    s = status();
+    CHECK(jcount(" store=er key=" KEY135) == 4 && jcount(" press=long result=er why=store") == 1 && !jcount(" set key=") &&
+              !jcount(" clear key="),
+          "quatre * mark <t> store=er key=…, * btn … press=long result=er why=store, aucun set ni clear (%zu)", n_jl);
+    CHECK(s.mark_valid && s.mark_position == 14623 && s.mark_sets == 1 && s.mark_clears == 0, "la marque d'avant, 14623, "
+          "rien de compté (%u, %u)", s.mark_sets, s.mark_clears);
+
+    g_store_sim.hold = true;
+    CHECK(host_later("js", r, sizeof r), "js retenue : la réponse attend");
+    store_sim_flush();
+    CHECK(later_by(ps_now() + 100 * MS, r, sizeof r, &t) && !strcmp(r, "er store"), "js retenue puis ratée : er store (« %s »)",
+          r);
+    CHECK(host_later("jx", r, sizeof r), "jx retenue : la réponse attend");
+    store_sim_flush();
+    CHECK(later_by(ps_now() + 100 * MS, r, sizeof r, &t) && !strcmp(r, "er store"), "jx retenue puis ratée : er store (« %s »)",
+          r);
+    HOST("j", "14623");
+    jdrain();
+    s = status();
+    CHECK(jcount(" store=er key=" KEY135) == 2 && !jcount(" set key=") && !jcount(" clear key=") && s.mark_sets == 1 &&
+              s.mark_clears == 0,
+          "deux store=er de plus, rien de compté (%zu, %u, %u)", n_jl, s.mark_sets, s.mark_clears);
+    g_store_sim.fail = g_store_sim.hold = false;
+    bsk_journal_set(false, false);
+}
+
+/* L'attente du magasin bornée : l'écriture d'un geste de marque en attente, CMD_SET_MARK, CMD_CLEAR_MARK, `js`, `jx` et
+ * l'appui long reçoivent E_BUSY (`er busy`, `* btn … press=long result=er why=busy`), rien n'est déposé ; l'écriture pas rendue finit
+ * ACK_FAILED E_STORE à BSK_STORE_WRITE_MS de son dépôt, 2 s écrites à la main, et `js` répond `er store` à 2 s, sous les
+ * 3 s du driver INDI (CEF_TIMEOUT). L'écriture encore dans la file, un geste reçoit encore E_BUSY ; rendue ensuite,
+ * rangée, elle est publiée et comptée. Rendue la session quittée (l'objectif retiré), elle finit à son résultat. */
+static void t_mark_deadline(void)
+{
+    char r[BSK_HOST_REPLY_MAX];
+    uint64_t t0, t;
+    uint32_t q, w0;
+    bsk_status_t s;
+    printf("marque : l'attente du magasin bornée à 2 s, les gestes pendant elle E_BUSY, le résultat rendu après\n");
+    mark_bench(r, sizeof r);
+    g_store_sim.hold = true;
+    q = cmd(CMD_SET_MARK, BSK_MARK_HERE);
+    t0 = ps_now();
+    w0 = g_store_sim.writes;
+    CHECK(acks_are(cmd(CMD_SET_MARK, 17000), 1, ACK_REJECTED, E_BUSY) && acks_are(cmd(CMD_CLEAR_MARK, 0), 1, ACK_REJECTED, E_BUSY),
+          "en vol : CMD_SET_MARK et CMD_CLEAR_MARK E_BUSY");
+    HOST("js", "er busy");
+    HOST("jx", "er busy");
+    press_for(1500);
+    jdrain();
+    CHECK(jcount(" press=long result=er why=busy") == 1 && g_store_sim.writes == w0, "l'appui long refusé, busy ; rien "
+          "déposé (%u)", (unsigned)(g_store_sim.writes - w0));
+    run_to(t0 + 2000 * MS - 1);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK), "2 s moins 1 µs : toujours en vol");
+    run_to(t0 + 2000 * MS);
+    CHECK(final_is(q, ACK_FAILED, E_STORE, &t) && t == t0 + 2000 * MS, "à 2 s : ACK_FAILED, E_STORE (%lld µs)",
+          (long long)(t - t0));
+    HOST("js", "er busy");                          /* l'écriture encore dans la file */
+    HOST("j", "14623");
+    store_sim_flush();
+    run_for(20 * MS);
+    s = status();
+    CHECK(s.mark_valid && s.mark_position == 16000 && s.mark_sets == 2, "rendue après, rangée : 16000 publiée, comptée (%u)",
+          s.mark_sets);
+
+    t0 = ps_now();
+    CHECK(host_later("js", r, sizeof r), "js retenue : la réponse attend");
+    CHECK(later_by(t0 + 3000 * MS, r, sizeof r, &t) && !strcmp(r, "er store") && t == t0 + 2000 * MS,
+          "js jamais rendue : er store à 2 s (« %s », %lld µs)", r, (long long)(t - t0));
+    store_sim_flush();
+    run_for(20 * MS);
+
+    q = cmd(CMD_SET_MARK, 17000);
+    ps_presence(false);
+    run_for(50 * MS);
+    CHECK(status().session_state == SESSION_OFF && acks_are(q, 1, ACK_ACCEPTED, E_OK), "l'objectif retiré : OFF, l'écriture "
+          "toujours en vol");
+    store_sim_flush();
+    run_for(20 * MS);
+    CHECK(final_is(q, ACK_COMPLETED, E_OK, NULL) && status().mark_sets == 4, "rendue, rangée : ACK_COMPLETED, comptée (%u)",
+          status().mark_sets);
+    g_store_sim.hold = false;
+    bsk_journal_set(false, false);
+}
+
 static void t_custom(void)
 {
     uint8_t d[BSK_CUSTOM_DATA];
@@ -4866,7 +6663,7 @@ static void t_custom(void)
     size_t from;
     uint32_t r0;
     bsk_ack_t a;
-    printf("CMD_LENS_CUSTOM au 135 : 'P' FA 00 et 'P' 38 30+arg, la réponse rendue, une commande en vol à la fois, échéance, sortie de READY, bench_core\n");
+    printf("CMD_LENS_CUSTOM au 135 : 'P' FA 00 et 'P' 38 30+arg, la réponse rendue, une commande en vol à la fois, bench_core, sortie de READY, échéance\n");
     ready135_custom(RPFA);
     CHECK(status().session_state == SESSION_READY, "READY");
     from = g_ps_n;
@@ -4880,28 +6677,19 @@ static void t_custom(void)
     bsk_session_custom_data(d);
     CHECK(final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RPFA + 3, sizeof d), "lire : COMPLETED, les 16 octets de "
           "données de la réponse rendus tels quels");
+    ps_answer(0x40, RP38, sizeof RP38, 60 * MS);
     from = g_ps_n;
     q = cmd(CMD_LENS_CUSTOM, 0x21);
     run_for(200 * MS);
     bsk_session_custom_data(d);
-    CHECK(custom_sent(from, 0x38, 0x51), "écrire 21 : 40 50 38 51 et quinze 00");
-    CHECK(final_is(q, ACK_FAILED, E_FRAMING, NULL) && !memcmp(d, RPFA + 3, sizeof d),
-          "une réponse 0x40 d'une autre sous-commande ('P' FA à 'P' 38) : FAILED, E_FRAMING, ses données pas rendues");
-    ps_answer(0x40, RP38, sizeof RP38, 60 * MS);
+    CHECK(custom_sent(from, 0x38, 0x51) && final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RP38 + 3, sizeof d),
+          "écrire 21 : 40 50 38 51 et quinze 00, COMPLETED, l'écho rendu");
     from = g_ps_n;
     q = cmd(CMD_LENS_CUSTOM, 0x02);
     run_for(200 * MS);
     bsk_session_custom_data(d);
     CHECK(custom_sent(from, 0x38, 0x32) && final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RP38 + 3, sizeof d),
           "écrire 02 : 40 50 38 32, COMPLETED, l'écho rendu (données à zéro)");
-    no_answer(0x40);
-    q = cmd(CMD_LENS_CUSTOM, -1);
-    run_for(995 * MS);
-    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK), "sans réponse : en vol à 995 ms");
-    run_for(30 * MS);
-    CHECK(final_is(q, ACK_FAILED, E_TIMEOUT, NULL), "sans réponse : FAILED, E_TIMEOUT, à 1 s de l'émission");
-    CHECK(acks_are(cmd(CMD_LENS_CUSTOM, -1), 1, ACK_ACCEPTED, E_OK), "puis acceptée de nouveau");
-    run_for(1100 * MS);
     for (int k = 0; k < 2; k++) {
         static const int32_t BAD[] = {0x03, 0x30};   /* le bas à 3, le haut à 3 */
         r0 = bsk_bench_refused();
@@ -4921,6 +6709,20 @@ static void t_custom(void)
           "D2 retombe pendant CMD_LENS_CUSTOM : OFF, FAILED, E_ABORTED");
     run_for(200 * MS);
     CHECK(!bsk_session_ack(&a), "plus aucun accusé ensuite");
+    ps_presence(true);
+    run_for(4000 * MS);
+    CHECK(status().session_state == SESSION_READY, "D2 revient : READY");
+    no_answer(0x40);
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(995 * MS);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK), "sans réponse : en vol à 995 ms");
+    run_for(30 * MS);
+    CHECK(final_is(q, ACK_FAILED, E_TIMEOUT, NULL), "sans réponse : FAILED, E_TIMEOUT, à 1 s de l'émission");
+    CHECK(acks_are(cmd(CMD_LENS_CUSTOM, -1), 1, ACK_REJECTED, E_DESYNC), "puis refusée, E_DESYNC (t_custom_late)");
+    run_for(200 * MS);
+    CHECK(sent(from, 2, 0x40) >= 0 && sent((size_t)sent(from, 2, 0x40) + 1, 2, 0x40) < 0,
+          "refusée : rien d'émis, la seule trame 0x40 est celle qui a expiré");
 }
 
 static void t_custom_others(void)
@@ -4999,16 +6801,396 @@ static void t_custom_held_abort(void)
           "ni l'écriture retenue ni le 0x04 ne sont partis, aucun refus");
 }
 
-/* Le bouton respecte l'exclusion de la commande USB : pendant CMD_LENS_CUSTOM en vol (le 135 muet, 1 s d'échéance), un appui
- * long et un appui court sont ignorés et journalisés comme pendant un goto (t_btn_busy) : ni marque posée, rien d'écrit en
- * NVS, ni goto. Chaque appui est relâché moins d'une seconde après le dépôt de la commande, qui est donc encore en vol. */
+/* ─────────────────────────── une réponse qui n'est pas celle de la requête en cours (G1, ticket #783) ─────────────────────────── */
+
+/* Les trames que le 135 pose sur le fil pendant une requête, injectées une à une, 1 ms après l'émission de la requête de
+ * type `inj_type`, puis 1 ms après la précédente ; une seule fois. */
+static const uint8_t *inj_msg[4];
+static size_t inj_len[4], n_inj;
+static uint8_t inj_type;
+
+static void inject(const bsk_frame_t *f, uint64_t t)
+{
+    if (f->cls != 2 || f->msg[0] != inj_type) return;
+    for (size_t k = 0; k < n_inj; k++) ps_frame(2, inj_msg[k], inj_len[k], t + (k + 1) * MS);
+    n_inj = 0;
+}
+
+/* (B) sur 0x40 : pendant une lecture CUSTOM ('P' FA), un 'W' 02 (astro-normal:38, 40 57 00 02 et quinze 00), un 'L' de la
+ * trace (astro-normal:28, 40 4C FB 35 3A) sous la sous-commande de la requête, FA, comme le 135 la reprend (un 'F' FB y
+ * reçoit d'abord un 'L' FB : astro-normal:25, 28, 32), un 'H' de la même forme (samyang.md § 6.4), et la réponse à
+ * l'écriture 'P' 38 : aucune ne termine la requête ; la vraie réponse, 60 ms après l'émission, est servie avec ses données.
+ * Avant le ticket #783, le 'W' la finissait en E_FRAMING. */
+static void t_custom_other_40(void)
+{
+    static const uint8_t W02[19] = {0x40, 'W', 0x00, 0x02};
+    static const uint8_t LFA[19] = {0x40, 'L', 0xFA, 0x35, 0x3A};
+    static const uint8_t HFA[19] = {0x40, 'H', 0xFA, 0x35, 0x3A};
+    uint8_t d[BSK_CUSTOM_DATA];
+    uint32_t q;
+    size_t from;
+    printf("(B) 0x40 : 'W', 'L', 'H' et la réponse à 'P' 38 pendant une lecture CUSTOM ne la terminent pas ; sa réponse servie\n");
+    ready135_custom(RPFA);
+    inj_type = 0x40;
+    inj_msg[0] = W02, inj_msg[1] = LFA, inj_msg[2] = HFA, inj_msg[3] = RP38;
+    inj_len[0] = inj_len[1] = inj_len[2] = inj_len[3] = 19;
+    n_inj = 4;
+    g_ps.on_send = inject;
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(40 * MS);
+    CHECK(n_inj == 0 && acks_are(q, 1, ACK_ACCEPTED, E_OK), "les quatre trames reçues : toujours en vol");
+    run_for(200 * MS);
+    bsk_session_custom_data(d);
+    CHECK(custom_sent(from, 0xFA, 0x00) && final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RPFA + 3, sizeof d),
+          "la réponse 'P' FA : COMPLETED, ses 16 octets de données rendus");
+    g_ps.on_send = NULL;
+}
+
+/* (C2 a), G1 cas 1 (repro_stale_reply de l'audit des garanties) : une lecture CUSTOM expire ; une deuxième, déposée ensuite,
+ * est refusée, E_DESYNC, rien d'émis ; la réponse en retard de la première, injectée 1 ms plus tard comme dans le repro,
+ * n'est rendue à personne : ni accusé, ni données. Avant le ticket #783, la deuxième était acceptée et la réponse en retard
+ * la finissait COMPLETED, avec ses données. */
+static void t_custom_late(void)
+{
+    static const uint8_t LATE[19] = {0x40, 'P', 0xFA, 0x11};   /* le repro : la réponse en retard, données 11 00 … */
+    uint8_t d[BSK_CUSTOM_DATA], d0[BSK_CUSTOM_DATA];
+    uint32_t first, second;
+    size_t from, n0;
+    printf("(C2 a) une lecture CUSTOM expirée : la suivante refusée, E_DESYNC, rien d'émis ; la réponse en retard rendue à personne\n");
+    ready135_custom(RPFA);
+    no_answer(0x40);
+    bsk_session_custom_data(d0);
+    first = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(1200 * MS);
+    CHECK(final_is(first, ACK_FAILED, E_TIMEOUT, NULL), "la première : FAILED, E_TIMEOUT");
+    from = g_ps_n;
+    second = cmd(CMD_LENS_CUSTOM, -1);
+    CHECK(acks_are(second, 1, ACK_REJECTED, E_DESYNC), "la deuxième : refusée, E_DESYNC");
+    n0 = n_acks;
+    ps_frame(2, LATE, sizeof LATE, ps_now() + 1 * MS);
+    run_for(500 * MS);
+    bsk_session_custom_data(d);
+    CHECK(sent(from, 2, 0x40) < 0 && sent(from, 1, 0x40) < 0, "rien d'émis vers l'objectif");
+    CHECK(n_acks == n0 && !memcmp(d, d0, sizeof d), "la réponse en retard : ni accusé, ni données rendues");
+}
+
+/* Jusqu'à READY, par pas de 100 ms, 30 s au plus. */
+static bool until_ready(void)
+{
+    for (int k = 0; k < 300 && status().session_state != SESSION_READY; k++) run_for(100 * MS);
+    return status().session_state == SESSION_READY;
+}
+
+/* Les rails coupés depuis l'entrée `from` du journal : une commande de rail à l'arrêt. */
+static bool rails_cut(size_t from)
+{
+    for (long i = act(from, PS_RAIL); i >= 0; i = act((size_t)i + 1, PS_RAIL))
+        if (!g_ps_log[i].on) return true;
+    return false;
+}
+
+/* (C2 a), la frontière : une session qui commence sans coupure des rails ne lève pas le refus. La reprise après une perte
+ * (le flux arrêté, RECOVERING, POWERING sans coupure : décision de l'humain du 2026-10-23), puis `b` (CMD_ATTACH en READY,
+ * une session nouvelle sans coupure) : CUSTOM toujours refusée, E_DESYNC, rien d'émis, le 135 prêt à répondre. Avant le
+ * ticket #783, elle était acceptée. */
+static void t_custom_desync_kept(void)
+{
+    uint32_t q;
+    size_t from;
+    printf("(C2 a) après une reprise, et après b, les rails gardés : CUSTOM toujours refusée, E_DESYNC\n");
+    ready135_custom(RPFA);
+    no_answer(0x40);
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(1200 * MS);
+    CHECK(final_is(q, ACK_FAILED, E_TIMEOUT, NULL), "la lecture : FAILED, E_TIMEOUT");
+    ps_answer(0x40, RPFA, sizeof RPFA, 60 * MS);
+    from = g_ps_n;
+    g_ps.flow = false;                                /* rallumé par le 0x0A de la reprise (flow_on_0a) */
+    run_for(2500 * MS);
+    CHECK(status().session_state == SESSION_RECOVERING, "le flux arrêté : la perte, RECOVERING");
+    CHECK(until_ready() && entered(SESSION_POWERING, chg_index_after(t_of((long)from))) && !rails_cut(from),
+          "la reprise : POWERING, READY, les rails jamais coupés");
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(200 * MS);
+    CHECK(acks_are(q, 1, ACK_REJECTED, E_DESYNC) && sent(from, 2, 0x40) < 0, "après la reprise : refusée, E_DESYNC, rien d'émis");
+    (void)cmd(CMD_ATTACH, 0);
+    CHECK(until_ready() && !rails_cut(from), "b : une nouvelle session, READY, les rails jamais coupés");
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(200 * MS);
+    CHECK(acks_are(q, 1, ACK_REJECTED, E_DESYNC) && sent(from, 2, 0x40) < 0, "après b : refusée, E_DESYNC, rien d'émis");
+}
+
+/* (C2 a), la frontière : une session qui commence rails coupés lève le refus. D2 retombé puis revenu, puis `p0` et `p1`
+ * (CMD_DETACH, CMD_ATTACH) : les rails coupés, READY, une lecture CUSTOM à l'heure est émise et accusée COMPLETED. */
+static void t_custom_desync_lifted(void)
+{
+    static const char *const HOW[] = {"D2 retombé puis revenu", "p0 puis p1"};
+    uint8_t d[BSK_CUSTOM_DATA];
+    uint32_t q;
+    size_t from;
+    printf("(C2 a) après une coupure des rails (D2, p0 puis p1) : CUSTOM de nouveau servie\n");
+    for (int k = 0; k < 2; k++) {
+        ready135_custom(RPFA);
+        no_answer(0x40);
+        q = cmd(CMD_LENS_CUSTOM, -1);
+        run_for(1200 * MS);
+        CHECK(final_is(q, ACK_FAILED, E_TIMEOUT, NULL) && acks_are(cmd(CMD_LENS_CUSTOM, -1), 1, ACK_REJECTED, E_DESYNC),
+              "%s : la lecture expirée, la suivante refusée, E_DESYNC", HOW[k]);
+        ps_answer(0x40, RPFA, sizeof RPFA, 60 * MS);
+        from = g_ps_n;
+        if (k == 0) {
+            ps_presence(false);
+            run_for(50 * MS);
+            ps_presence(true);
+        } else {
+            (void)cmd(CMD_DETACH, 0);
+            run_for(50 * MS);
+            (void)cmd(CMD_ATTACH, 0);
+        }
+        CHECK(until_ready() && rails_cut(from), "%s : les rails coupés, READY", HOW[k]);
+        from = g_ps_n;
+        q = cmd(CMD_LENS_CUSTOM, -1);
+        run_for(200 * MS);
+        bsk_session_custom_data(d);
+        CHECK(custom_sent(from, 0xFA, 0x00) && final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RPFA + 3, sizeof d),
+              "%s : la lecture émise, COMPLETED, ses données rendues", HOW[k]);
+    }
+}
+
+/* (C2 a), ticket #789 : une lecture CUSTOM émise, sans réponse, encore en vol quand la perte oublie la session (le flux
+ * arrêté 1,5 s avant le dépôt : la perte 2 s après le dernier 0x05/0x06, avant l'échéance d'1 s de la lecture). La perte
+ * ne coupe pas les rails, l'objectif garde sa réponse en attente : la lecture finit E_ABORTED, la suivante est refusée,
+ * E_DESYNC, rien d'émis, et la réponse de la première, injectée ensuite, n'est rendue à personne. Avant le ticket #789,
+ * la suivante était émise, et la réponse en retard la finissait (l'audit du 2026-10-24). */
+static void t_custom_lost(void)
+{
+    static const uint8_t LATE[19] = {0x40, 'P', 0xFA, 0x11};   /* la réponse de la première, données 11 00 … */
+    uint8_t d[BSK_CUSTOM_DATA], d0[BSK_CUSTOM_DATA];
+    uint32_t q;
+    size_t from, n0;
+    printf("(C2 a) une lecture CUSTOM en vol à la perte : E_ABORTED, la suivante refusée après la reprise, E_DESYNC\n");
+    ready135_custom(RPFA);
+    no_answer(0x40);
+    g_ps.flow = false;                                /* rallumé par le 0x0A de la reprise (flow_on_0a) */
+    run_for(1500 * MS);
+    CHECK(status().session_state == SESSION_READY, "le flux arrêté depuis 1,5 s : toujours READY");
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(15 * MS);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK) && custom_sent(from, 0xFA, 0x00), "la lecture : émise, en vol");
+    run_for(600 * MS);
+    CHECK(status().session_state == SESSION_RECOVERING && final_is(q, ACK_FAILED, E_ABORTED, NULL),
+          "la perte, la lecture en vol : RECOVERING, FAILED, E_ABORTED");
+    ps_answer(0x40, RPFA, sizeof RPFA, 60 * MS);
+    CHECK(until_ready() && !rails_cut(from), "la reprise : READY, les rails jamais coupés");
+    bsk_session_custom_data(d0);
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    CHECK(acks_are(q, 1, ACK_REJECTED, E_DESYNC), "la suivante : refusée, E_DESYNC");
+    n0 = n_acks;
+    ps_frame(2, LATE, sizeof LATE, ps_now() + 1 * MS);
+    run_for(500 * MS);
+    bsk_session_custom_data(d);
+    CHECK(sent(from, 2, 0x40) < 0 && sent(from, 1, 0x40) < 0, "rien d'émis vers l'objectif");
+    CHECK(n_acks == n0 && !memcmp(d, d0, sizeof d), "la réponse de la première : ni accusé, ni données rendues");
+}
+
+/* (C2 a), ticket #789 : une lecture CUSTOM retenue jusqu'au 0x04 (déposée entre le 0x03 et le 0x04) quand la perte oublie
+ * la session, avant ce 0x04 : jamais émise, aucune réponse ne peut lui revenir, rien n'est désynchronisé. Le dernier 0x05
+ * et le dernier 0x06 sont injectés, le flux arrêté, à l'instant où la perte tombe 2 s plus tard (lost_ms), 500 µs après
+ * un 0x03 ; la période des 0x03 est lue sur le fil. La lecture finit E_ABORTED, rien d'émis, et après la reprise (rails
+ * jamais coupés) une lecture est émise et accusée COMPLETED. */
+static void t_custom_held_lost(void)
+{
+    uint8_t d[BSK_CUSTOM_DATA];
+    uint64_t t3 = 0, per = 0, l3;
+    uint32_t q;
+    size_t from;
+    long i;
+    printf("(C2 a) une lecture CUSTOM retenue jusqu'au 0x04 à la perte : jamais émise, rien de désynchronisé\n");
+    ready135_custom(RPFA);
+    g_ps.flow = false;                                /* rallumé par le 0x0A de la reprise (flow_on_0a) */
+    for (i = (long)g_ps_n - 1; i >= 0 && !per; i--)   /* les deux derniers 0x03 émis : la période */
+        if (g_ps_log[i].kind == PS_SEND && g_ps_log[i].frame.msg[0] == 0x03) {
+            if (t3) per = t3 - g_ps_log[i].t;
+            else t3 = g_ps_log[i].t;
+        }
+    CHECK(per > 0, "deux 0x03 émis : leur période, %llu µs", (unsigned long long)per);
+    l3 = t3;
+    while (l3 < ps_now() + 2100 * MS) l3 += per;      /* le 0x03 derrière lequel la perte tombe */
+    ps_frame(1, g_ps.m05, g_ps.n05, l3 + 500 - 2000 * MS - 1);   /* la perte : 2000 ms et 1 µs après lui, en l3 + 500 */
+    ps_frame(1, g_ps.m06, g_ps.n06, l3 + 500 - 2000 * MS - 1);
+    run_to(l3 + 100);
+    CHECK(status().session_state == SESSION_READY && g_ps_n && g_ps_log[g_ps_n - 1].kind == PS_SEND &&
+              g_ps_log[g_ps_n - 1].frame.msg[0] == 0x03 && g_ps_log[g_ps_n - 1].t == l3,
+          "READY, le 0x03 parti, son 0x04 pas encore");
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK) && g_ps_n == from, "la lecture : acceptée, retenue, rien d'émis");
+    run_to(l3 + 1000);
+    CHECK(status().session_state == SESSION_RECOVERING && final_is(q, ACK_FAILED, E_ABORTED, NULL),
+          "la perte avant le 0x04 : RECOVERING, FAILED, E_ABORTED");
+    CHECK(sent(from, 2, 0x40) < 0 && sent(from, 1, 0x40) < 0 && sent(from, 1, 0x04) < 0,
+          "ni la lecture retenue ni le 0x04 ne sont partis");
+    CHECK(until_ready() && !rails_cut(from), "la reprise : READY, les rails jamais coupés");
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(200 * MS);
+    bsk_session_custom_data(d);
+    CHECK(custom_sent(from, 0xFA, 0x00) && final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RPFA + 3, sizeof d),
+          "après la reprise : la lecture émise, COMPLETED, ses données rendues");
+}
+
+/* (C2 a), ticket #789 : sans CUSTOM en vol, l'oubli de la session ne désynchronise rien. `b` en READY (une session
+ * nouvelle, rails gardés), `p0` puis `p1`, une perte puis la reprise (rails gardés) : au retour en READY, une lecture
+ * CUSTOM est émise et accusée COMPLETED, ses données rendues. */
+static void t_custom_forget_free(void)
+{
+    static const char *const HOW[] = {"b en READY", "p0 puis p1", "une perte puis la reprise"};
+    uint8_t d[BSK_CUSTOM_DATA];
+    uint32_t q;
+    size_t from;
+    printf("(C2 a) sans CUSTOM en vol, b, p0 puis p1, et une perte ne désynchronisent rien\n");
+    for (int k = 0; k < 3; k++) {
+        ready135_custom(RPFA);
+        CHECK(status().session_state == SESSION_READY, "%s : READY", HOW[k]);
+        from = g_ps_n;
+        if (k == 0) {
+            (void)cmd(CMD_ATTACH, 0);
+        } else if (k == 1) {
+            (void)cmd(CMD_DETACH, 0);
+            run_for(50 * MS);
+            (void)cmd(CMD_ATTACH, 0);
+        } else {
+            g_ps.flow = false;                        /* rallumé par le 0x0A de la reprise (flow_on_0a) */
+            run_for(2500 * MS);
+            CHECK(status().session_state == SESSION_RECOVERING, "%s : RECOVERING", HOW[k]);
+        }
+        CHECK(until_ready() && entered(SESSION_POWERING, chg_index_after(t_of((long)from))) && rails_cut(from) == (k == 1),
+              "%s : POWERING, READY, les rails %s", HOW[k], k == 1 ? "coupés" : "jamais coupés");
+        from = g_ps_n;
+        q = cmd(CMD_LENS_CUSTOM, -1);
+        run_for(200 * MS);
+        bsk_session_custom_data(d);
+        CHECK(custom_sent(from, 0xFA, 0x00) && final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RPFA + 3, sizeof d),
+              "%s : la lecture émise, COMPLETED, ses données rendues", HOW[k]);
+    }
+}
+
+/* (C2 a), ticket #789 : une lecture CUSTOM émise, en vol, puis l'objectif retiré (D2 retombe : la session oubliée, puis
+ * les rails coupés, to_off) et rebranché : la lecture finit E_ABORTED ; au retour en READY, une lecture est émise et
+ * accusée COMPLETED. */
+static void t_custom_d2_free(void)
+{
+    uint8_t d[BSK_CUSTOM_DATA];
+    uint32_t q;
+    size_t from;
+    printf("(C2 a) une lecture CUSTOM en vol, l'objectif retiré puis rebranché : E_ABORTED, puis CUSTOM servie\n");
+    ready135_custom(RPFA);
+    no_answer(0x40);
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(15 * MS);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK) && custom_sent(from, 0xFA, 0x00), "la lecture : émise, en vol");
+    ps_presence(false);
+    run_for(50 * MS);
+    CHECK(status().session_state == SESSION_OFF && final_is(q, ACK_FAILED, E_ABORTED, NULL) && rails_cut(from),
+          "D2 retombe : OFF, les rails coupés, FAILED, E_ABORTED");
+    ps_answer(0x40, RPFA, sizeof RPFA, 60 * MS);
+    ps_presence(true);
+    CHECK(until_ready(), "D2 revient : READY");
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(200 * MS);
+    bsk_session_custom_data(d);
+    CHECK(custom_sent(from, 0xFA, 0x00) && final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RPFA + 3, sizeof d),
+          "rebranché : la lecture émise, COMPLETED, ses données rendues");
+}
+
+/* (C2 a), ticket #789 : bsk_session_init ne garde rien de CMD_LENS_CUSTOM. Une lecture laissée émise et en vol par un banc
+ * (rien ne remet TRANSACTION à zéro d'un banc à l'autre) ; puis le démarrage d'un banc nouveau : une lecture est émise et
+ * accusée COMPLETED. Sur la carte, tout est à zéro au reset. */
+static void t_custom_boot_free(void)
+{
+    uint8_t d[BSK_CUSTOM_DATA];
+    uint32_t q;
+    size_t from;
+    printf("(C2 a) une lecture CUSTOM laissée en vol, puis bsk_session_init : CUSTOM servie\n");
+    ready135_custom(RPFA);
+    no_answer(0x40);
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(15 * MS);
+    CHECK(acks_are(q, 1, ACK_ACCEPTED, E_OK) && custom_sent(from, 0xFA, 0x00), "la lecture : émise, laissée en vol");
+    ready135_custom(RPFA);
+    CHECK(status().session_state == SESSION_READY, "le banc nouveau : READY");
+    from = g_ps_n;
+    q = cmd(CMD_LENS_CUSTOM, -1);
+    run_for(200 * MS);
+    bsk_session_custom_data(d);
+    CHECK(custom_sent(from, 0xFA, 0x00) && final_is(q, ACK_COMPLETED, E_OK, NULL) && !memcmp(d, RPFA + 3, sizeof d),
+          "le banc nouveau : la lecture émise, COMPLETED, ses données rendues");
+}
+
+/* (B) sur 0x0B et 0x0A, pendant l'init du Sony des captures : une réponse 0x0B qui n'est pas l'écho de la requête (0B 42 00,
+ * l'écho d'une autre requête, samyang.md § 1.3), 1 ms après l'émission, ne la termine pas : le 0x09 part à la vraie
+ * réponse, que le Sony rend ici 100 ms après l'émission, un seul 0x0B émis. Un 0x0A qui porte un bit absent de la requête
+ * (l'offset 2, bit 0), 1 ms après : il ne la termine pas, la boucle ne part qu'à la vraie réponse, rendue 200 ms après
+ * (le Sony n'est pas un Samyang : la boucle part à la fin de l'init, init.c). Avant le ticket #783, la fausse réponse les
+ * terminait. */
+static void t_init_not_echo(void)
+{
+    static const uint8_t B0B[3] = {0x0B, 0x42, 0x00};
+    uint8_t b0a[17];
+    long i, j;
+    printf("(B) 0x0B et 0x0A de l'init : une réponse qui n'est pas celle de la requête ne la termine pas (le Sony)\n");
+    for (int k = 0; k < 2; k++) {
+        boot();
+        sony(true);
+        inj_type = k ? 0x0A : 0x0B;
+        if (k) {
+            g_ps.reply[0x0A].delay_us = 200 * MS;
+            memcpy(b0a, g_ps.reply[0x0A].msg, sizeof b0a);
+            b0a[3] = 0x01;
+            inj_msg[0] = b0a;
+        } else {
+            g_ps.reply[0x0B].delay_us = 100 * MS;
+            inj_msg[0] = B0B;
+        }
+        inj_len[0] = k ? sizeof b0a : sizeof B0B;
+        n_inj = 1;
+        g_ps.on_send = inject;
+        ps_presence(true);
+        run_for(3000 * MS);
+        i = sent(0, 2, inj_type);
+        if (k) {
+            j = i >= 0 ? sent((size_t)i, 1, 0x03) : -1;
+            CHECK(n_inj == 0 && j >= 0 && t_of(j) >= t_of(i) + 200 * MS,
+                  "0x0A, un bit hors de la requête : la boucle part après la vraie réponse, à 200 ms (%lld µs)",
+                  (long long)(t_of(j) - t_of(i)));
+        } else {
+            j = i >= 0 ? sent((size_t)i, 2, 0x09) : -1;
+            CHECK(n_inj == 0 && j >= 0 && t_of(j) == t_of(i) + 100 * MS && count_sent(0, ps_now() + 1, 0x0B) == 1,
+                  "0B 42 00 : le 0x09 à la vraie réponse, 100 ms après le 0x0B, un seul 0x0B (%lld µs)",
+                  (long long)(t_of(j) - t_of(i)));
+        }
+        CHECK(status().session_state == SESSION_READY, "%s : READY", k ? "0x0A" : "0x0B");
+        g_ps.on_send = NULL;
+    }
+}
+
+/* Le bouton respecte l'exclusion de la commande USB : pendant CMD_LENS_CUSTOM en vol (le 135 répond en 980 ms, sous son
+ * échéance d'1 s), un appui long et un appui court sont ignorés et journalisés comme pendant un goto (t_btn_busy) : ni
+ * marque posée, rien d'écrit en NVS, ni goto. Chaque appui est relâché moins de 980 ms après le dépôt de la commande, qui
+ * est donc encore en vol. */
 static void t_btn_custom(void)
 {
     uint32_t w0;
     bool ok;
     printf("bouton : pendant CMD_LENS_CUSTOM en vol, court et long ignorés, journalisés\n");
-    ready135_custom(RP38);
-    no_answer(0x40);
+    ready135_custom(RPFA);
+    ps_answer(0x40, RPFA, sizeof RPFA, 980 * MS);
     bsk_journal_init(ps_now);
     bsk_journal_set(true, false);
     CHECK(status().session_state == SESSION_READY && !mark_now(&ok).position && !ok, "READY, sans marque");
@@ -5020,7 +7202,7 @@ static void t_btn_custom(void)
     run_for(900 * MS);
     btn(false);
     run_for(50 * MS);                                /* appui de 1,2 s : long ; relâché 0,95 s après le dépôt */
-    run_for(1100 * MS);                              /* la lecture finie à son échéance */
+    run_for(1100 * MS);                              /* la lecture finie à sa réponse */
     CHECK(acks_are(cmd(CMD_LENS_CUSTOM, -1), 1, ACK_ACCEPTED, E_OK), "lire de nouveau : acceptée, en vol");
     press_for(300);
     jdrain();
@@ -5363,7 +7545,7 @@ static bool same_act(const ps_act_t *a, const ps_act_t *b)
 static size_t fault_boot(bool faults, char rl[8][80])
 {
     char b[400];
-    uint8_t g;
+    uint32_t g;
     size_t n, k = 0;
     boot();
     lens_135();
@@ -5423,20 +7605,432 @@ static void t_rail_fault_ignored(void)
         CHECK(!strcmp(rl[4], "* rail 4000 motor fault cmd=on") && !strcmp(rl[5], "* rail 4000 motor ok cmd=on"),
               "READY : « %s », « %s »", rl[4], rl[5]);
     }
-    bsk_host_init("2.0.0-dev", "poweron");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
     if (!bsk_host_line("DEBUG", R, sizeof R)) R[0] = 0;
     {
-        static const char tail[] = " fault_motor=2 fault_logic=1 stack_sensor=0";   /* puis la pile du capteur, sans lui */
+        static const char tail[] = " fault_motor=2 fault_logic=1 stack_sensor=0 nvs=ok";   /* puis la pile du capteur, sans
+                                                                                             lui, et la NVS saine */
         CHECK(strlen(R) > sizeof tail - 1 && !strcmp(R + strlen(R) - (sizeof tail - 1), tail),
               "DEBUG : deux activations du rail moteur, une du rail logique, avant la pile du capteur : « %s »", R);
     }
 }
 
+/* ─────────────────────────── les fenêtres de la poignée de main et la commande sous retard (ticket #691) ───────────────────
+ * Les deux fenêtres que la poignée de main laisse à l'objectif (handshake_ms, 500 ms, après BODY_CS levée puis rabaissée) se
+ * comptent depuis le mouvement réel de BODY_CS, pas depuis l'heure historique de l'échéance qui l'a causé ; elles restent
+ * des fenêtres : un front de LENS_CS daté avant leur échéance est à l'heure (t_lag_waits). Une commande déposée entre deux
+ * pas (`p1` après `p0`, `b`) agit à son instant réel, donné par bsk_session_real comme main.c le fait avant HOTE. Le
+ * répondeur ne fait pas la poignée de main : LENS_CS est posée par le test. Les instants sont écrits à la main : BODY_CS
+ * basse à T0 + 100 ms, sa levée échue à T0 + 115 ms ; un pas retenu de 600 ms la lève à T0 + 715 ms (le journal compte en
+ * ms depuis 0 : T0 = 1000 ms). Avant le ticket #691, l'échéance d'une fenêtre ouverte par un pas en retard de plus de
+ * 500 ms échoyait dans ce pas : `never_high` ou `stuck_high` sans que l'objectif ait eu le moindre délai. */
+
+/* L'entrée du journal de la PHY scriptée du `k`-ième BODY_CS à `on` (k = 0 : le premier), -1 sinon. */
+static long body_cs(bool on, unsigned k)
+{
+    for (long i = act(0, PS_BODY_CS); i >= 0; i = act((size_t)i + 1, PS_BODY_CS))
+        if (g_ps_log[i].on == on && k-- == 0) return i;
+    return -1;
+}
+
+/* Le 135, LENS_CS posée par le test ; la poignée de main ouverte, les lignes et BODY_CS basse à T0 + 100 ms. */
+static void hs_manual(void)
+{
+    hs_boot();
+    lens_135();
+    g_ps.handshake = false;
+    ps_presence(true);
+}
+
+/* Critères 1 et 7 : BODY_CS levée par un pas retenu de 600 ms, LENS_CS levée `x` après elle (en µs, moins de 500 ms) puis
+ * retombée 1,1 ms après BODY_CS rabaissée : la poignée de main aboutit, `lens_cs_up_us` vaut `x`, et la ligne est datée de
+ * la retombée de LENS_CS, `want`. */
+static void hs_late_up(uint64_t x, const char *want)
+{
+    const char *l;
+    size_t n;
+    uint64_t up = T0 + 715 * MS;
+    hs_manual();
+    run_to(T0 + 115 * MS - 1);
+    lag(up);
+    ps_lens_cs(true, up + x);
+    run_to(up + x + 3 * MS);
+    ps_lens_cs(false, up + x + 3 * MS + 1100);
+    run_for(1000 * MS);
+    l = std_line(&n);
+    CHECK(t_of(body_cs(true, 0)) == up && t_of(body_cs(false, 1)) == up + x + 3 * MS,
+          "BODY_CS levée au pas en retard, T0 + 715 ms, rabaissée 3 ms après LENS_CS haute (%llu µs après la levée)",
+          (unsigned long long)(t_of(body_cs(false, 1)) - t_of(body_cs(true, 0))));
+    CHECK(n == 1 && !strcmp(l, want), "LENS_CS levée %llu µs après BODY_CS levée par un pas en retard de 600 ms : « %s », "
+          "attendu « %s » (%zu)", (unsigned long long)x, l, want, n);
+    CHECK(sent(0, 2, 0x01) >= 0 && t_of(sent(0, 2, 0x01)) >= up + x + 3 * MS + 1100, "le 0x01 après la retombée de LENS_CS");
+    bsk_journal_set(false, false);
+}
+
+/* Critère 2 : LENS_CS jamais levée ; BODY_CS levée à l'heure (T0 + 115 ms), puis par un pas retenu de 600 ms (T0 + 715 ms),
+ * les pas suivants à l'heure : rabaissée 500 ms réels après sa levée, `never_high` à cet instant, puis le 0x01. */
+static void t_lag_hs_up(void)
+{
+    const char *l;
+    size_t n;
+    printf("poignée de main sous retard : la fenêtre de la levée de LENS_CS comptée depuis BODY_CS levée réellement\n");
+    hs_late_up(1100, "* std 1720 step=handshake result=ok lens_cs_up_us=1100");
+    hs_late_up(490 * MS, "* std 2209 step=handshake result=ok lens_cs_up_us=490000");
+
+    hs_manual();
+    run_for(1000 * MS);
+    l = std_line(&n);
+    CHECK(t_of(body_cs(true, 0)) == T0 + 115 * MS && t_of(body_cs(false, 1)) == T0 + 615 * MS,
+          "à l'heure : BODY_CS levée à T0 + 115 ms, rabaissée 500 ms après (%llu µs)",
+          (unsigned long long)(t_of(body_cs(false, 1)) - t_of(body_cs(true, 0))));
+    CHECK(n == 1 && !strcmp(l, "* std 1615 step=handshake result=LENS_CS_never_high"), "à l'heure : never_high (« %s », %zu)",
+          l, n);
+    CHECK(count_sent(0, T0 + 615 * MS, 0x01) == 0 && sent(0, 2, 0x01) >= 0, "à l'heure : le 0x01 après la fenêtre");
+    bsk_journal_set(false, false);
+
+    hs_manual();
+    run_to(T0 + 115 * MS - 1);
+    lag(T0 + 715 * MS);
+    run_for(1000 * MS);
+    l = std_line(&n);
+    CHECK(t_of(body_cs(true, 0)) == T0 + 715 * MS && t_of(body_cs(false, 1)) == T0 + 1215 * MS,
+          "en retard : BODY_CS levée à T0 + 715 ms, rabaissée 500 ms réels après (%llu µs)",
+          (unsigned long long)(t_of(body_cs(false, 1)) - t_of(body_cs(true, 0))));
+    CHECK(n == 1 && !strcmp(l, "* std 2215 step=handshake result=LENS_CS_never_high"),
+          "en retard : never_high 500 ms après la levée réelle (« %s », %zu)", l, n);
+    CHECK(count_sent(0, T0 + 1215 * MS, 0x01) == 0 && sent(0, 2, 0x01) >= 0, "en retard : le 0x01 après la fenêtre");
+    bsk_journal_set(false, false);
+}
+
+/* Critère 3 : LENS_CS levée 1,1 ms après BODY_CS haute (T0 + 116,1 ms) ; BODY_CS rabaissée, à l'heure, 3 ms après
+ * (T0 + 119,1 ms), ou par un pas retenu de 600 ms (T0 + 719,1 ms). LENS_CS retombée `y` après (en µs, moins de 500 ms) :
+ * ok à sa retombée ; `y` nul : restée haute, `stuck_high` 500 ms réels après BODY_CS rabaissée. */
+static void hs_late_down(uint64_t late, uint64_t y, const char *want)
+{
+    const char *l;
+    size_t n;
+    uint64_t down = T0 + 119 * MS + 100 + late;
+    hs_manual();
+    ps_lens_cs(true, T0 + 115 * MS + 1100);
+    run_to(T0 + 119 * MS + 100 - 1);
+    lag(down);
+    if (y) ps_lens_cs(false, down + y);
+    run_for(1000 * MS);
+    l = std_line(&n);
+    CHECK(t_of(body_cs(false, 1)) == down, "BODY_CS rabaissée à T0 + %llu µs", (unsigned long long)(down - T0));
+    CHECK(n == 1 && !strcmp(l, want), "BODY_CS rabaissée %llu µs en retard, LENS_CS retombée %llu µs après (0 : jamais) : "
+          "« %s », attendu « %s » (%zu)", (unsigned long long)late, (unsigned long long)y, l, want, n);
+    CHECK(count_sent(0, down + (y ? y : 500 * MS), 0x01) == 0 && sent(0, 2, 0x01) >= 0, "le 0x01 après la fenêtre");
+    bsk_journal_set(false, false);
+}
+
+static void t_lag_hs_down(void)
+{
+    printf("poignée de main sous retard : la fenêtre de la retombée de LENS_CS comptée depuis BODY_CS rabaissée réellement\n");
+    hs_late_down(600 * MS, 1100, "* std 1720 step=handshake result=ok lens_cs_up_us=1100");
+    hs_late_down(600 * MS, 490 * MS, "* std 2209 step=handshake result=ok lens_cs_up_us=1100");
+    hs_late_down(0, 0, "* std 1619 step=handshake result=LENS_CS_stuck_high lens_cs_up_us=1100");
+    hs_late_down(600 * MS, 0, "* std 2219 step=handshake result=LENS_CS_stuck_high lens_cs_up_us=1100");
+}
+
+/* Critère 4 : `p1` après `p0` (OFF tenu, rails coupés) et `b` en READY, à travers HOTE, déposés 40 ms après le début du
+ * dernier pas, l'instant réel donné à la session comme main.c le fait (bsk_session_real) : le rail logique à cet instant,
+ * le rail moteur 50 ms après lui, les lignes 50 ms après le rail moteur, puis la poignée de main du répondeur et READY.
+ * Avant le ticket #691 : le rail moteur 10 ms après le rail logique (50 ms comptées depuis le dernier pas). */
+static void t_lag_attach(void)
+{
+    char r[BSK_HOST_REPLY_MAX];
+    printf("délais sous retard : p1 après p0, et b, déposés 40 ms après le dernier pas, 50 ms comptées depuis la commande\n");
+    for (int k = 0; k < 2; k++) {
+        const char *what = k ? "b en READY" : "p1 après p0";
+        uint64_t t;
+        boot();
+        lens_135();
+        bsk_host_init("2.0.0-dev", "poweron", ps_now);
+        ps_presence(true);
+        run_for(3000 * MS);
+        CHECK(status().session_state == SESSION_READY, "%s : READY", what);
+        if (!k) {
+            HOST("p0", "ok");
+            run_for(100 * MS);
+            CHECK(status().session_state == SESSION_OFF, "p0 : OFF");
+        }
+        t = ps_now() + 40 * MS;
+        g_ps_n = 0;                                  /* le journal de la PHY : ce démarrage seul (gaps_hold) */
+        g_ps.handshake = true;
+        ps_run(t);
+        bsk_session_real(t);
+        HOST(k ? "b" : "p1", "ok");
+        run_for(3000 * MS);
+        gaps_hold(what, 1100);
+        CHECK(t_of(rail_on(BSK_RAIL_LOGIC)) == t && t_of(rail_on(BSK_RAIL_MOTOR)) == t + 50 * MS &&
+                  t_of(act(0, PS_LINES)) == t + 100 * MS,
+              "%s : rail logique à la commande, rail moteur 50 ms après, lignes 50 ms après lui", what);
+        CHECK(status().session_state == SESSION_READY, "%s : READY", what);
+    }
+}
+
+/* ─────────────────────────── lens_rx ne publie que des valeurs valides ─────────────────────────── */
+
+/* L'ouverture relue au 0x05, offsets 0-1. */
+static void ap05(uint16_t code)
+{
+    g_ps.m05[1] = (uint8_t)code;
+    g_ps.m05[2] = (uint8_t)(code >> 8);
+}
+
+/* L'intensité la plus forte de la LED pendant `us`, évaluée toutes les 10 ms (la cadence de la carte) sur l'instantané
+ * de la session. */
+static uint16_t led_peak(uint64_t us)
+{
+    uint16_t peak = 0, v;
+    uint64_t end = ps_now() + us;
+    bsk_status_t st;
+    while (ps_now() < end) {
+        run_for(10 * MS);
+        st = status();
+        v = bsk_led_eval(&st, ps_now());
+        if (v > peak) peak = v;
+    }
+    return peak;
+}
+
+/* Une ouverture relue au 0x05 hors du domaine que la carte convertit, 0x0E00 à 0x2000 bornes comprises (bsk_contract.h),
+ * est inconnue (A1) : aperture_current à 0, `o` -> `er link aperture`, `a+1` -> `er nocap ap`, et la LED n'y voit aucun
+ * changement d'ouverture. Codes de test : 0x0DFF (le domaine - 1), 0x2001 (+ 1), 0xFFFF ; aux bornes, 0x0E00 et 0x2000,
+ * connues, `o` les borne à la plage du 135, BF 11 / 00 19 : f/1,8 et f/22 (t_aperture_unknown de test_host). Le 135 des
+ * traces relit B2 11 (dump05:7). La LED (led.c, en tête) : en READY, la respiration ne dépasse pas 5000 ; le motif d'un
+ * changement d'ouverture est à 10000 pendant 80 ms, seul à 10000 ici (position immobile, aucun geste de marque) ; le fixe
+ * « ON » de son démarrage dure 990 ms. Un changement d'ouverture vu se lit donc à un pic de 10000. */
+static void t_aperture_domain(void)
+{
+    char r[BSK_HOST_REPLY_MAX];
+    uint16_t peak;
+    printf("une ouverture relue hors du domaine : inconnue, o -> er link aperture, la LED n'y voit aucun changement\n");
+    boot();
+    lens_135();
+    ps_presence(true);
+    run_for(3000 * MS);
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    CHECK(status().session_state == SESSION_READY && status().aperture_current == 0x11B2, "READY, relue B2 11 (0x%04X)",
+          status().aperture_current);
+    bsk_led_init(ps_now());
+    (void)led_peak(1100 * MS);
+    ap05(0x14F9);
+    peak = led_peak(300 * MS);
+    CHECK(peak == 10000 && status().aperture_current == 0x14F9, "relue 0x14F9, un changement : le motif, 10000 (%u)", peak);
+    for (const uint16_t *c = (const uint16_t[]){0x0DFF, 0x2001, 0xFFFF, 1}; *c != 1; c++) {
+        ap05(0x11B2);
+        (void)led_peak(300 * MS);
+        ap05(*c);
+        peak = led_peak(300 * MS);
+        CHECK(status().aperture_current == 0, "relue 0x%04X : inconnue, publiée 0 (0x%04X)", *c, status().aperture_current);
+        CHECK(peak < 10000, "relue 0x%04X : aucun motif d'ouverture (%u)", *c, peak);
+        HOST("o", "er link aperture");
+        HOST("a+1", "er nocap ap");
+    }
+    ap05(0x0E00);
+    run_for(50 * MS);
+    CHECK(status().aperture_current == 0x0E00, "relue 0x0E00 : connue (0x%04X)", status().aperture_current);
+    HOST("o", "1.8");
+    ap05(0x2000);
+    run_for(50 * MS);
+    CHECK(status().aperture_current == 0x2000, "relue 0x2000 : connue (0x%04X)", status().aperture_current);
+    HOST("o", "22.0");
+}
+
+/* L'ouverture que publie la bague (offsets 17-19 du 0x05) hors du domaine est inconnue (A1) : pas prise comme consigne,
+ * le 0x03 garde la dernière prise, 0x1457 ; revenue à 0x1457, ce n'est pas un changement ; aux bornes du domaine, prise,
+ * bornée à la plage du 135, BF 11 / 00 19. Codes de test, comme t_aperture_domain ; le geste, comme t_ring_aperture. */
+static void t_ring_domain(void)
+{
+    printf("bague en rôle ouverture : une ouverture publiée hors du domaine n'est pas une consigne\n");
+    boot();
+    lens_135();
+    ps_presence(true);
+    run_for(3000 * MS);
+    CHECK(status().session_state == SESSION_READY && status().ring == RING_APERTURE, "READY, bague en ouverture");
+    g_ps.m05[20] = 0x01;
+    g_ps.m05[18] = 0x00;
+    g_ps.m05[19] = 0x14;
+    run_for(20 * MS);
+    g_ps.m05[18] = 0x57;
+    run_for(20 * MS);
+    CHECK(consigne(0x1457), "publiée 0x1457 : prise");
+    for (const uint16_t *c = (const uint16_t[]){0x0DFF, 0x2001, 0xFFFF, 1}; *c != 1; c++) {
+        g_ps.m05[18] = (uint8_t)*c;
+        g_ps.m05[19] = (uint8_t)(*c >> 8);
+        run_for(20 * MS);
+        CHECK(consigne(0x1457), "publiée 0x%04X : pas prise, la consigne reste 57 14", *c);
+    }
+    g_ps.m05[18] = 0x57;
+    g_ps.m05[19] = 0x14;
+    run_for(20 * MS);
+    CHECK(consigne(0x1457), "revenue à 0x1457 : la même, rien");
+    g_ps.m05[18] = 0x00;
+    g_ps.m05[19] = 0x0E;
+    run_for(20 * MS);
+    CHECK(consigne(0x11BF), "publiée 0x0E00 : prise, bornée au minimum de la plage, BF 11");
+    g_ps.m05[18] = 0x00;
+    g_ps.m05[19] = 0x20;
+    run_for(20 * MS);
+    CHECK(consigne(0x1900), "publiée 0x2000 : prise, bornée au maximum de la plage, 00 19");
+}
+
+/* Une plage du 0x08 dont le minimum dépasse le maximum est inconnue (A3), comme une plage hors du domaine (t_aperture_absurd) :
+ * le 135 des traces dont la réponse au 0x08 porte 00 19 / BF 11 (0x1900, 0x11BF : sa plage, inversée). Attendus : ni plage
+ * ni CAP_APERTURE ; la consigne de départ reste f/1,8, B2 11 (bornée à elle, elle serait BF 11) ; `a`, `a5.6`, `o` ->
+ * `er nocap ap` ; CMD_APERTURE_SET, E_NOCAP. De même, à travers HOTE, une plage qu'un code hors du domaine rend inconnue
+ * (le cas de t_aperture_unknown de test_host avant que la session ne la juge seule) : 00 00 / BF 11, FF 0D / 00 19,
+ * BF 11 / 01 20, BF 11 / FF FF. Une plage d'un seul code, 00 14 / 00 14 (f/4), est une plage : `a` -> 4.0-4, la consigne
+ * de départ 00 14. Les bornes du domaine, 00 0E / 00 20 : `a` -> 0.5-256. */
+static void t_aperture_inverted(void)
+{
+    static const uint8_t bad[][6] = {{0x08, 0x00, 0x19, 0xBF, 0x11, 0x00}, {0x08, 0x00, 0x00, 0xBF, 0x11, 0x00},
+                                     {0x08, 0xFF, 0x0D, 0x00, 0x19, 0x00}, {0x08, 0xBF, 0x11, 0x01, 0x20, 0x00},
+                                     {0x08, 0xBF, 0x11, 0xFF, 0xFF, 0x00}};
+    char r[BSK_HOST_REPLY_MAX];
+    bsk_status_t st;
+    uint32_t q;
+    size_t from;
+    printf("une plage du 0x08 inversée, ou hors du domaine : inconnue, à travers HOTE ; une plage d'un seul code, connue\n");
+    for (size_t k = 0; k < sizeof bad / sizeof bad[0]; k++) {
+        boot();
+        lens_135();
+        ps_answer(0x08, bad[k], sizeof bad[k], 5 * MS);
+        ps_presence(true);
+        run_for(3000 * MS);
+        bsk_host_init("2.0.0-dev", "poweron", ps_now);
+        st = status();
+        CHECK(st.session_state == SESSION_READY && count_sent(0, UINT64_MAX, 0x08) == 1 &&
+                  !(st.capabilities & (CAP_APERTURE | CAP_APERTURE_READBACK)) && st.aperture_min == 0 && st.aperture_max == 0,
+              "plage 0x%02X%02X-0x%02X%02X : READY, le 0x08 envoyé une fois, pas de plage (0x%04X, 0x%04X)", bad[k][2],
+              bad[k][1], bad[k][4], bad[k][3], st.aperture_min, st.aperture_max);
+        CHECK(ap03_all(0, 0x11B2), "plage 0x%02X%02X-0x%02X%02X : la consigne de départ, B2 11", bad[k][2], bad[k][1],
+              bad[k][4], bad[k][3]);
+        from = g_ps_n;
+        HOST("a", "er nocap ap");
+        HOST("a5.6", "er nocap ap");
+        HOST("o", "er nocap ap");
+        q = cmd(CMD_APERTURE_SET, 0x14F9);
+        CHECK(acks_are(q, 1, ACK_REJECTED, E_NOCAP) && consigne(0x11B2) && g_ps_n > from,
+              "CMD_APERTURE_SET : E_NOCAP, la consigne inchangée");
+    }
+    boot();
+    lens_135();
+    ps_answer(0x08, (const uint8_t[]){0x08, 0x00, 0x14, 0x00, 0x14, 0x00}, 6, 5 * MS);
+    ps_presence(true);
+    run_for(3000 * MS);
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    st = status();
+    CHECK(st.session_state == SESSION_READY && (st.capabilities & CAP_APERTURE) && st.aperture_min == 0x1400 &&
+              st.aperture_max == 0x1400 && ap03_all(0, 0x1400),
+          "plage 0x1400-0x1400 : une plage, la consigne de départ 00 14 (0x%04X, 0x%04X)", st.aperture_min, st.aperture_max);
+    HOST("a", "4.0-4");
+    ps_answer(0x08, (const uint8_t[]){0x08, 0x00, 0x0E, 0x00, 0x20, 0x00}, 6, 5 * MS);
+    (void)cmd(CMD_ATTACH, 0);
+    run_for(3000 * MS);
+    CHECK(status().session_state == SESSION_READY && status().aperture_min == 0x0E00 && status().aperture_max == 0x2000,
+          "plage 0x0E00-0x2000 : connue (0x%04X, 0x%04X)", status().aperture_min, status().aperture_max);
+    HOST("a", "0.5-256");
+}
+
+/* Des bornes du 0x06 qui, resserrées de 5 pas, ne forment pas un intervalle non vide dans 0..65535 sont inconnues (A2),
+ * comme sans 0x06, et la position reste publiée : limits_valid faux, focus_min et focus_max à 0 ; position_valid, 20000 ;
+ * CAP_LIMITS_REPORTED gardé (un 0x06 lu : la LED y lit la position mesurée). `r` -> `er link limits` ; `f` et `:GP#`
+ * rendent la position (20000 = 0x4E20, `4E20#`) ; `f0`, `f20000`, `m20000`, `js` -> `er range limits` ; CMD_SET_MARK 0 -> E_LIMIT
+ * (0 et 0, les bornes publiées inconnues, ne sont pas des bornes). Bornes publiées de test : 100 / 105 (105 / 100, inversées),
+ * 0 / 3 (la haute à -2, sous 0), 65533 / 65535 (la basse à 65538, au-delà de 65535). 100 / 110 : 105 / 105, un seul pas,
+ * valide. Puis le 0x06 arrêté (2 s, la durée de la perte, le 0x05 courant) : inconnues aussi. */
+static void t_limits_invalid(void)
+{
+    static const uint16_t C[][2] = {{100, 105}, {0, 3}, {65533, 65535}};
+    char r[BSK_HOST_REPLY_MAX];
+    bsk_status_t st;
+    printf("bornes invalides après la marge : inconnues, r -> er link limits, la position publiée, toute cible refusée\n");
+    boot();
+    lens_135();
+    ps_presence(true);
+    run_for(3000 * MS);
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    HOST("r", "13878-30733");
+    for (size_t k = 0; k < sizeof C / sizeof C[0]; k++) {
+        set_limits(C[k][0], C[k][1]);
+        set_pos(20000);
+        run_for(100 * MS);
+        st = status();
+        CHECK(st.session_state == SESSION_READY && st.position_valid && st.focus_position == 20000 && !st.limits_valid &&
+                  st.focus_min == 0 && st.focus_max == 0 && (st.capabilities & CAP_LIMITS_REPORTED),
+              "bornes publiées %u / %u : inconnues, à 0 (%d / %d), la position 20000 publiée (%d)", C[k][0], C[k][1],
+              (int)st.focus_min, (int)st.focus_max, (int)st.focus_position);
+        HOST("r", "er link limits");
+        HOST("f", "20000");
+        HOST(":GP", "4E20#");
+        HOST("f0", "er range limits");
+        HOST("f20000", "er range limits");
+        HOST("m20000", "er range limits");
+        HOST("js", "er range limits");
+        MARK_AT(0, E_LIMIT);
+        CHECK(status().motion_state == MOTION_IDLE && !status().mark_valid, "bornes publiées %u / %u : rien en vol, pas de marque",
+              C[k][0], C[k][1]);
+    }
+    set_limits(100, 110);
+    run_for(100 * MS);
+    CHECK(status().limits_valid && status().focus_min == 105 && status().focus_max == 105, "bornes publiées 100 / 110 : 105 / 105");
+    HOST("r", "105-105");
+    set_limits(13873, 30738);
+    run_for(100 * MS);
+    HOST("r", "13878-30733");
+    g_ps.n06 = 0;
+    run_for(2500 * MS);
+    st = status();
+    CHECK(st.session_state == SESSION_READY && !st.position_valid && !st.limits_valid, "0x06 arrêté : ni position ni bornes");
+    HOST("r", "er link limits");
+    MARK_AT(0, E_LIMIT);
+}
+
+/* Le retour de fin de démarrage, le bouton du fût et `jg` sur des bornes invalides (A2) : refusés, comme sans 0x06. La
+ * marque 0, sens inconnu, rangée sous la clé du 135 (KEY135) ; les bornes du 0x06 publiées 100 / 105 (105 / 100 resserrées)
+ * dès le premier 0x06. Attendus : READY, la marque 0 relue, aucun 0x1D émis (le retour ne part pas) ; un appui court : le
+ * goto du bouton refusé, E_LIMIT, aucun 0x1D ; `jg` -> `er range limits` (PROTOCOL.md : les bornes s'appliquent à tout
+ * goto, `jg` compris ; inconnues, aucun n'est admis), aucun 0x1D. */
+static void t_limits_invalid_boot(void)
+{
+    char r[BSK_HOST_REPLY_MAX];
+    uint16_t t[4];
+    printf("bornes invalides au démarrage : ni retour à la marque, ni goto du bouton, ni jg\n");
+    boot();
+    store_sim_poke(KEY135, 0);
+    lens_135();
+    set_limits(100, 105);
+    g_ps.flow = true;
+    ps_presence(true);
+    run_for(2000 * MS);
+    CHECK(status().session_state == SESSION_READY && status().mark_valid && status().mark_position == 0 &&
+              !status().limits_valid && targets_1d(0, t, 4) == 0,
+          "READY, la marque 0 relue, bornes inconnues, aucun 0x1D : le retour ne part pas");
+    press_for(300);
+    CHECK(board_acks() == 1 && ACKS[n_acks - 1].a.seq == BSK_SEQ_BOARD && ACKS[n_acks - 1].a.result == ACK_REJECTED &&
+              ACKS[n_acks - 1].a.reason == E_LIMIT && targets_1d(0, t, 4) == 0,
+          "le goto du bouton : ACK_REJECTED, E_LIMIT, aucun 0x1D");
+    bsk_host_init("2.0.0-dev", "poweron", ps_now);
+    /* `jg` jugé en READY, rien en vol : son refus ne vient alors que de l'admission des bornes. Le code tenu y est déjà ;
+     * une admission qui laisserait passer la marque 0 (le mutant A2 de motion_admit, l->have06 pour l->lim) laisse aussi
+     * partir le retour, et `jg` rendrait `er busy boot` pendant ce retour au lieu de dire son admission. */
+    for (uint64_t t0 = ps_now(); !(status().session_state == SESSION_READY && status().motion_state == MOTION_IDLE) &&
+                                 ps_now() < t0 + 60000 * MS;)
+        run_for(100 * MS);
+    HOST("jg", "er range limits");
+    run_for(100 * MS);
+    CHECK(status().motion_state == MOTION_IDLE && targets_1d(0, t, 4) == 0, "jg : rien en vol, aucun 0x1D");
+}
+
 int main(void)
 {
     signal(SIGALRM, too_long);
-    alarm(10);
+    alarm(GARDE_S);
     t_txn_done();
+    t_txn_answers();
     t_txn_timeout();
     t_txn_phy_error();
     t_txn_no_retry();
@@ -5447,7 +8041,10 @@ int main(void)
     t_txn_held();
     t_txn_cancel();
     t_txn_window();
+    t_txn_after_held();
+    t_txn_held_end();
     t_txn_goto();
+    t_txn_goto_between();
     t_txn_seq();
     t_off();
     t_cold_start();
@@ -5458,9 +8055,7 @@ int main(void)
     t_01_once();
     t_01_reset();
     t_01_silent();
-    t_01_silent_cut();
     t_nocap();
-    t_cut_pending_pair();
     t_required_missing();
     t_optional_missing();
     t_10_missing();
@@ -5481,6 +8076,15 @@ int main(void)
     t_sony_cs_high();
     t_sony_edges_only();
     t_hs_journal();
+    t_lag_audit();
+    t_lag_steps();
+    t_lag_edge_in_step();
+    t_lag_home();
+    t_lag_waits();
+    t_lag_wait_dues();
+    t_lag_hs_up();
+    t_lag_hs_down();
+    t_lag_attach();
     t_loss();
     t_stale_telemetry();
     t_loss_from_entry();
@@ -5508,6 +8112,7 @@ int main(void)
     t_ring_role();
     t_ring_nocap();
     t_ring_aperture();
+    t_thirds();
     t_ring_no_range();
     t_ring_motion();
     t_ring_after_goto();
@@ -5516,6 +8121,8 @@ int main(void)
     t_ring_gesture();
     t_ring_sum();
     t_ring_cap();
+    t_ring_bound();
+    t_ring_bound_rest();
     t_ring_sony06();
     t_body08_journal();
     t_mark_letters();
@@ -5525,6 +8132,9 @@ int main(void)
     t_mark_dir();
     t_mark_async();
     t_mark_gestures();
+    t_mark_stored();
+    t_mark_store_fail();
+    t_mark_deadline();
     t_mark_homing();
     t_btn_busy();
     t_btn_homing();
@@ -5538,7 +8148,18 @@ int main(void)
     t_restore_rekey();
     t_restore_rekey_stop();
     t_restore_equal();
+    t_resume_ring();
+    t_resume_move();
+    t_resume_other();
+    t_resume_cold();
+    t_resume_reboot();
+    t_resume_restoring_loss();
     t_stop_link();
+    t_stop_goto_order();
+    t_stop_goto_variants();
+    t_stop_held();
+    t_stop_wait_q();
+    t_stop_held_host();
     t_stop_watch();
     t_stop_init_home();
     t_stop_unconfirmed();
@@ -5548,12 +8169,27 @@ int main(void)
     t_custom_others();
     t_custom_identity();
     t_custom_held_abort();
+    t_custom_other_40();
+    t_custom_late();
+    t_custom_desync_kept();
+    t_custom_desync_lifted();
+    t_custom_lost();
+    t_custom_held_lost();
+    t_custom_forget_free();
+    t_custom_d2_free();
+    t_custom_boot_free();
+    t_init_not_echo();
     t_txn_refused();
     t_btn_custom();
     t_ev_back();
     t_pair_late();
     t_step_bound();
     t_rail_fault_ignored();
+    t_aperture_domain();
+    t_ring_domain();
+    t_aperture_inverted();
+    t_limits_invalid();
+    t_limits_invalid_boot();
     printf("session scriptée : %d vérifications, %d échec(s)\n", checks, fails);
     return fails ? 1 : 0;
 }

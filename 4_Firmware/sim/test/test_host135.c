@@ -38,9 +38,17 @@
 
 static int checks, fails;
 
+/* La garde de durée, en secondes : 10 ; la passe sous sanitizers de 4_Firmware/run.sh et les mutants en -O0
+ * (sim/test/mutants.sh) la relèvent (-DGARDE_S). */
+#ifndef GARDE_S
+#define GARDE_S 10
+#endif
+#define TEXTE_(x) #x
+#define TEXTE(x) TEXTE_(x)
+
 static void too_long(int sig)
 {
-    static const char m[] = "  ECHEC : le programme ne termine pas en 10 s (boucle sans fin)\n";
+    static const char m[] = "  ECHEC : le programme ne termine pas en " TEXTE(GARDE_S) " s (boucle sans fin)\n";
     (void)sig;
     (void)!write(1, m, sizeof m - 1);
     _exit(1);
@@ -141,7 +149,7 @@ static void bench(void)
     bsk_session_init(&P);
     bsk_journal_init(phy_sim_now);
     bsk_journal_set(false, false);
-    bsk_host_init("1.3", "poweron");
+    bsk_host_init("1.3", "poweron", phy_sim_now);
     d2_due = 0;
     run_to(T0);
 }
@@ -168,7 +176,7 @@ static size_t n_jl;
 static size_t jdrain(void)
 {
     char b[sizeof JL[0]];
-    uint8_t g;
+    uint32_t g;
     size_t n;
     n_jl = 0;
     while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
@@ -383,6 +391,150 @@ static void t_power(void)
     ASK("b", "er nolens");                           /* OFF sans p0 : D2 absent */
     ASK("p1", "ok");                                 /* ok, sans rien sur le fil */
     T_HAS("present=0");
+}
+
+/* Le maintien de p0 à travers un retrait de l'objectif : p0, retrait, remise, b ; p0, retrait, b (le maintien levé,
+ * D2 absent), remise. Les réponses de `t` et de `b` sont celles de PROTOCOL.md (p0/p1, § 5 power_off). */
+static void t_hold_d2(void)
+{
+    printf("p0, retrait, remise, b : power_off=1 de bout en bout, b redémarre ; p0, retrait, b : maintien levé\n");
+    mounted();
+    ASK("p0", "ok");
+    d2(false);
+    run_for(400 * MS);
+    l135_power(&L, phy_sim_now(), false);
+    T_HAS("present=0");
+    T_HAS("power_off=1");                            /* le maintien survit au retrait */
+    l135_power(&L, phy_sim_now(), true);
+    d2(true);
+    run_for(3000 * MS);
+    T_HAS("boot_state=off");                         /* remis : aucun démarrage, le maintien tient */
+    T_HAS("power_off=1");
+    ASK("b", "ok");
+    T_HAS("power_off=0");
+    run_for(4000 * MS);
+    T_HAS("boot_state=ready");
+
+    mounted();
+    ASK("p0", "ok");
+    d2(false);
+    run_for(400 * MS);
+    l135_power(&L, phy_sim_now(), false);
+    ASK("b", "ok");                                  /* OFF après p0, D2 absent : CMD_ATTACH, le maintien levé */
+    T_HAS("boot_state=off");
+    T_HAS("power_off=0");
+    ASK("b", "er nolens");                           /* OFF sans p0 */
+    l135_power(&L, phy_sim_now(), true);
+    d2(true);
+    run_for(4000 * MS);
+    T_HAS("boot_state=ready");                       /* remis : le démarrage part seul */
+}
+
+/* Le maintien posé par la session sans HOTE : un CMD_DETACH déposé directement dans la boîte de la session, sous un seq
+ * que HOTE n'a pas alloué, comme le ferait un autre demandeur (un bouton, une sécurité). `t` et `b` le lisent dans
+ * l'instantané : power_off=1, b redémarre comme après p0 ; un CMD_ATTACH déposé de même lève le maintien de p0. */
+static void t_hold_session(void)
+{
+    bsk_cmd_t c = {.seq = 0x80000000u, .op = CMD_DETACH};
+    printf("le maintien posé par la session hors HOTE : t -> power_off=1, b -> ok et READY ; p0 levé hors HOTE : power_off=0\n");
+    mounted();
+    bsk_session_command(&c);
+    run_for(3000 * MS);
+    T_HAS("boot_state=off");
+    T_HAS("power_off=1");
+    ASK("b", "ok");                                  /* comme après p0 : CMD_ATTACH, pas er nolens */
+    run_for(4000 * MS);
+    T_HAS("boot_state=ready");
+    T_HAS("power_off=0");
+
+    ASK("p0", "ok");
+    run_for(100 * MS);
+    T_HAS("power_off=1");
+    c.seq++;
+    c.op = CMD_ATTACH;
+    bsk_session_command(&c);                         /* le maintien de p0 levé hors HOTE */
+    T_HAS("power_off=0");
+    run_for(4000 * MS);
+    T_HAS("boot_state=ready");
+    ASK("p0", "ok");
+    ASK("b", "ok");                                  /* toujours le maintien de la session : b redémarre */
+}
+
+/* p1 sur des alimentations établies, sans effet (ticket #686, décision de l'humain) : en READY au repos, aucune trame
+ * hors de la boucle 0x03/0x04 (ni l'init ni le homing), READY, la position, la marque et le résultat du déplacement
+ * gardés ; pendant un déplacement, `ok` et le déplacement suivi jusqu'au bout. */
+static void t_p1_ready(void)
+{
+    unsigned n0;
+    printf("p1 en READY : ok, sans effet ; ni init ni homing, READY à la même position, la marque et le suivi gardés\n");
+    mounted();
+    ASK("f20000", "ok");
+    run_for(3000 * MS);
+    ASK("js", "ok");
+    ASK("g", "ok");
+    n0 = n_once;
+    ASK("p1", "ok");
+    T_HAS("boot_state=ready");
+    run_for(4000 * MS);
+    CHECK(n_once == n0, "p1 en READY : %u trame(s) émise(s) hors de la boucle 0x03/0x04, attendu aucune", n_once - n0);
+    T_HAS("boot_state=ready");
+    ASK("f", "20000");
+    ASK("j", "20000");
+    ASK("g", "ok");
+    ASK("f25000", "ok");
+    run_for(150 * MS);
+    ASK("e", "y");
+    ASK("p1", "ok");                                 /* un déplacement en vol : ok, pas er busy */
+    run_for(3000 * MS);
+    ASK("f", "25000");
+    ASK("g", "ok");
+    D_HAS("move_rc=ok");
+    ASK("j", "20000");
+    T_HAS("last_op=boot:ok");
+}
+
+/* Un démarrage, une marque rangée à 30000 (le retour la vise), jusqu'à READY, par pas de 1 ms ; `p1` : la ligne envoyée
+ * à chaque pas. Rend la durée du démarrage ; `frames` : les trames émises hors de la boucle 0x03/0x04, `seen` : les
+ * états traversés (bit par état). */
+static uint64_t boot_to_ready(bool p1, unsigned *frames, unsigned *seen)
+{
+    bsk_status_t st = {0};
+    uint64_t t0;
+    unsigned n0;
+    bench();
+    store_sim_poke("01030800bf087", 30000);
+    l135_power(&L, phy_sim_now(), true);
+    d2(true);
+    t0 = phy_sim_now();
+    n0 = n_once;
+    *seen = 0;
+    for (int k = 0; k < 20000 && st.session_state != SESSION_READY; k++) {
+        run_for(1 * MS);
+        bsk_session_status(&st);
+        *seen |= 1u << st.session_state;
+        if (p1) ASK("p1", "ok");
+    }
+    *frames = n_once - n0;
+    return st.session_state == SESSION_READY ? phy_sim_now() - t0 : 0;
+}
+
+/* p1 pendant un démarrage et son retour à la marque (ticket #686) : `ok` à chaque pas, et le démarrage fait sur le fil
+ * ce qu'il fait sans p1, dans le même temps : rien n'est relancé. Le 135 fait son homing dans l'init (le 0x10 de
+ * l'init, pas de second homing : served) ; HOMING et RECOVERING, où p1 ne dépose rien non plus : test_host. */
+static void t_p1_boot(void)
+{
+    unsigned fa, fb, sa, sb;
+    uint64_t ta, tb;
+    printf("p1 pendant un démarrage (powering, identifying, restoring) : ok, la séquence continue, rien n'est relancé\n");
+    ta = boot_to_ready(false, &fa, &sa);
+    tb = boot_to_ready(true, &fb, &sb);
+    CHECK(ta > 0 && tb == ta, "le démarrage avec p1 à chaque ms : READY en %llu ms, attendu %llu ms comme sans p1",
+          (unsigned long long)(tb / MS), (unsigned long long)(ta / MS));
+    CHECK(fb == fa, "le démarrage avec p1 : %u trames hors de la boucle 0x03/0x04, attendu %u comme sans p1", fb, fa);
+    CHECK((sb & (1u << SESSION_POWERING)) && (sb & (1u << SESSION_IDENTIFYING)) && (sb & (1u << SESSION_RESTORING)),
+          "p1 envoyé en powering, identifying et restoring (états vus : 0x%x)", sb);
+    ASK("f", "30000");
+    ASK("j", "30000");
 }
 
 static void t_fault(void)
@@ -725,16 +877,33 @@ static void t_rail_fault(void)
     ASK("LOG OFF", "ok log=0 all=0");
 }
 
+/* `nvs` de DEBUG : l'état de la NVS que rend le magasin (bsk_store_nvs), passé par la SESSION (bsk_session_debug). */
+static void t_nvs(void)
+{
+    printf("DEBUG : nvs, l'état de la NVS rendu par le magasin, à travers la SESSION\n");
+    store_sim_reset();
+    D_HAS("nvs=ok");
+    g_store_sim.nvs = BSK_STORE_NVS_ERASED;
+    D_HAS("nvs=erased");
+    g_store_sim.nvs = BSK_STORE_NVS_BROKEN;
+    D_HAS("nvs=er");
+    store_sim_reset();
+}
+
 int main(void)
 {
     signal(SIGALRM, too_long);
-    alarm(10);
+    alarm(GARDE_S);
     t_boot();
     t_goto();
     t_stop();
     t_home();
     t_aperture();
     t_power();
+    t_hold_d2();
+    t_hold_session();
+    t_p1_ready();
+    t_p1_boot();
     t_fault();
     t_marks();
     t_journal();
@@ -742,6 +911,7 @@ int main(void)
     t_moonlite();
     t_custom();
     t_rail_fault();
+    t_nvs();
     printf("HOTE contre le faux 135 : %d vérifications, %d échec(s)\n", checks, fails);
     return fails ? 1 : 0;
 }

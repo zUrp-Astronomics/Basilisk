@@ -21,6 +21,8 @@
 #    test_led : le calcul de la LED de statut (components/led/led.c), des suites d'instantanés rejouées, sans PWM ;
 #    test_sht40 : le SHT40 de la carte v1.0 (components/sensor/sht40.c) contre le faux capteur bit par bit
 #    (sim/sht40_sim.c) ;
+#    test_store : le magasin de la carte (components/store/store.c) contre un ESP-IDF simulé (sim/idf) : l'absence et
+#    l'erreur à la lecture, l'état de la NVS à l'init, les écritures ;
 #    test_session_script : SESSION et TRANSACTION contre un répondeur minimal (sim/test/phy_script.c) ;
 #    test_session135 : SESSION et TRANSACTION contre le faux 135, requêtes d'init comparées aux traces ;
 #    test_host : la couche HOTE contre une session scriptée, et les motifs que la page applique aux réponses
@@ -28,13 +30,18 @@
 #    test_std : SESSION, TRANSACTION et HOTE contre le faux F051 ; les scénarios dont l'attendu n'est pas tenu sont
 #    inscrits dans sim/test/constats_std.txt, que test_std lit et affiche : vert tant que chaque échec y est, rouge si
 #    un scénario de la liste passe ;
+#    test_stop_goto135 : un arrêt puis un goto à chaque phase du cycle VD, contre le faux 135, jugés sur les trames
+#    émises et la position de l'objectif ; chaque cas juste (le constat de #730, en tête du programme, réglé par #787) ;
 # 5. sous ASan et UBSan : chaque programme de 3 et 4 recompilé avec -fsanitize=address,undefined et rejoué ; une erreur
 #    détectée le fait échouer (R6 ; la garde de durée de test_session135 relevée, GARDE_S) ;
 # 6. mutants : mutants.sh cherche le texte original sur le code seul, commentaires ignorés, dans la fonction que le
 #    bloc nomme (sim/test/test_mutants.sh, sur une source jouet) ; chaque mutation de sim/test/mutations.txt et de sim/test/mutations_std.txt doit faire
-#    échouer son programme (sim/test/mutants.sh).
-# Prérequis : gcc, et ses bibliothèques libasan et libubsan (étape 5). Rien n'est écrit dans le dépôt (compilation
-# dans un répertoire temporaire). Lus en place : les traces de l'objectif (traces/), CMakeLists.txt (PROJECT_VER) et
+#    échouer son programme (sim/test/mutants.sh) ; non jouée sous LCARS_PROBE=1 (la sonde de pertinence, 7_Docs/SUITES.md) ;
+# 7. l'outillage de release (sim/test/test_release.py) : la garde de la NVS (garde_nvs.py, que build.sh joue sur le
+#    flash_args du build) sur une table écrite à la main, les entrées du build et des copies fautives ; le manifeste
+#    (manifest.py) comparé à un attendu écrit à la main.
+# Prérequis : gcc, et ses bibliothèques libasan et libubsan (étape 5) ; python3 (étape 7). Rien n'est écrit dans le
+# dépôt (compilation dans un répertoire temporaire). Lus en place : les traces de l'objectif (traces/), CMakeLists.txt (PROJECT_VER) et
 # la page de banc, seul fichier lu hors de 4_Firmware/.
 # Se lance depuis n'importe quel répertoire : les chemins partent de celui de ce script. Chaque programme reçoit en
 # argument ce qu'il lit (programme_args, sim/test/programmes.sh) ; mutants.sh reçoit TRACES, PAGE et VERSION.
@@ -140,6 +147,12 @@ gcc "${CFLAGS[@]}" "${SOURCES[@]}" -o "$SORTIE/test_sht40"
 programme_args "$F2" test_sht40
 "$SORTIE/test_sht40" "${ARGS[@]}"
 
+echo "== le magasin de la carte : le vrai code (components/store/store.c) contre un ESP-IDF simulé (sim/idf)"
+programme_sources "$F2" test_store
+gcc "${CFLAGS[@]}" "${SOURCES[@]}" "${LIENS[@]}" -o "$SORTIE/test_store"
+programme_args "$F2" test_store
+"$SORTIE/test_store" "${ARGS[@]}"
+
 echo "== SESSION et TRANSACTION : par une PHY scriptée (sim/test/phy_script.c)"
 programme_sources "$F2" test_session_script
 gcc "${CFLAGS[@]}" "${SOURCES[@]}" "${LIENS[@]}" -o "$SORTIE/test_session_script"
@@ -170,14 +183,20 @@ gcc "${CFLAGS[@]}" "${SOURCES[@]}" "${LIENS[@]}" -o "$SORTIE/test_std"
 programme_args "$F2" test_std
 "$SORTIE/test_std" "${ARGS[@]}"
 
+echo "== q puis goto à chaque phase du cycle VD, contre le faux 135 : les trames émises et la position de l'objectif"
+programme_sources "$F2" test_stop_goto135
+gcc "${CFLAGS[@]}" "${SOURCES[@]}" "${LIENS[@]}" -o "$SORTIE/test_stop_goto135"
+programme_args "$F2" test_stop_goto135
+"$SORTIE/test_stop_goto135" "${ARGS[@]}"
+
 # R6 (audit statique du 2026-10-06) : la suite, comité de revue, passe aussi sous ASan et UBSan. Chaque programme de 3 et
 # 4, recompilé avec ses sources et ses options, puis -fsanitize=address,undefined : toute erreur détectée (débordement,
 # pointeur nul passé à memcpy, décalage hors borne, fuite…) arrête le programme en échec (-fno-sanitize-recover).
 # Les sanitizers ralentissent test_session135 au-delà de sa garde de 10 s : GARDE_S la relève, pour ce passage seul.
 echo "== sous ASan et UBSan : chaque programme de la suite, recompilé et rejoué"
 SAN=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -DGARDE_S=60)
-for p in test_lens135 test_lens_std test_phy test_bench_core replay test_journal test_led test_sht40 test_session_script \
-         test_session135 test_host test_host135 test_std; do
+for p in test_lens135 test_lens_std test_phy test_bench_core replay test_journal test_led test_sht40 test_store test_session_script \
+         test_session135 test_host test_host135 test_std test_stop_goto135; do
     programme_sources "$F2" "$p"
     gcc "${CFLAGS[@]}" "${SAN[@]}" "${SOURCES[@]}" "${LIENS[@]}" -o "$SORTIE/san_$p"
     programme_args "$F2" "$p"
@@ -189,8 +208,20 @@ for p in test_lens135 test_lens_std test_phy test_bench_core replay test_journal
     echo "   $p : sans erreur"
 done
 
-echo "== mutants : le texte original cherché sur le code seul, dans sa fonction, une source jouet (sim/test/test_mutants.sh)"
-bash "$F2/sim/test/test_mutants.sh"
+# Sous la sonde de pertinence (.gitea/workflows/probe-test-relevance.yml, seule à poser LCARS_PROBE=1), l'étape 6 n'est
+# pas jouée : la sonde demande si la suite remarque le retrait du code livré, et chaque programme qu'un mutant vise est
+# déjà joué, sur le code de l'arbre, en 3, 4 et 5 ; les mutants mesurent la force des tests, que le job `firmware` juge à
+# chaque PR. Joués deux fois, ils menaient la sonde au plafond de son job, sans verdict (7_Docs/SUITES.md). Partout
+# ailleurs, l'étape est jouée.
+if [ "${LCARS_PROBE:-}" = 1 ]; then
+    echo "== mutants : non joués sous la sonde de pertinence (LCARS_PROBE=1)"
+else
+    echo "== mutants : le texte original cherché sur le code seul, dans sa fonction, une source jouet (sim/test/test_mutants.sh)"
+    bash "$F2/sim/test/test_mutants.sh"
 
-echo "== mutants (sim/test/mutations.txt, sim/test/mutations_std.txt)"
-bash "$F2/sim/test/mutants.sh" "$TRACES" "$PAGE" "$VERSION"
+    echo "== mutants (sim/test/mutations.txt, sim/test/mutations_std.txt)"
+    bash "$F2/sim/test/mutants.sh" "$TRACES" "$PAGE" "$VERSION"
+fi
+
+echo "== l'outillage de release : la garde de la NVS (garde_nvs.py), le manifeste (manifest.py)"
+python3 "$F2/sim/test/test_release.py" "$F2/manifest.py" "$F2/garde_nvs.py"

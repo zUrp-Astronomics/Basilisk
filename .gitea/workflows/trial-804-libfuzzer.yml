@@ -1,0 +1,70 @@
+# La campagne libFuzzer de F4 (4_Firmware/sim/fuzz/README.md, « libFuzzer ») : sur le runner, sous ubuntu:24.04, clang 18
+# et libFuzzer installés par apt (clang, libclang-rt-18-dev ; llvm-18 pour llvm-symbolizer, qui nomme les lignes de la
+# couverture), gcc 13 pour le rejeu. Chaque cible de DUREES est jouée sa durée au plus, plafond posé avant de lancer
+# (-max_total_time, fuzz.sh libfuzzer), ses trouvailles rejouées par le pilote gcc et imprimées en hexadécimal, sa
+# couverture comparée à celle des graines. Il ne juge pas le projet : le banc est hors de la suite et de la CI ; il ne
+# rougit que si un harnais ne se construit pas.
+#
+# Le runner est partagé avec les juges et leurs sondes : un seul essai à la fois, 10 minutes au plus. Un essai joue les
+# quatre cibles l'une après l'autre, chacune sous son plafond (DUREES : 450 s en tout, le reste du temps du job va à
+# l'outillage, aux constructions, aux graines et à la couverture) ; son -seed est le numéro du run, imprimé, si bien que
+# deux essais du même commit explorent autrement. Chaque essai est compté dans le budget de la campagne (RAPPORT.txt, F4).
+#
+# Relancer : `ci_trial` (workflow: trial-804-libfuzzer.yml), ou Actions > « essai-fuzz-libfuzzer-f4 » > Run workflow.
+#
+# ⚠ `name:` ne commence pas par `CI` : ses statuts ne tombent pas sous le glob `CI / *` exigé par la protection de `main`.
+name: essai-fuzz-libfuzzer-f4
+
+on: workflow_dispatch
+
+jobs:
+  libfuzzer:
+    runs-on: shell
+    container: ubuntu:24.04
+    timeout-minutes: 10
+    env:
+      DUREES: "ligne:180 rx:150 lens_rx:60 bench:60"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Outillage (git, gcc, clang 18, libFuzzer, llvm-symbolizer)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git gcc libc6-dev clang libclang-rt-18-dev \
+            llvm-18 >/dev/null
+          gcc --version | head -n 1
+          clang --version | head -n 1
+          ls /usr/lib/llvm-18/bin/llvm-symbolizer
+      # La récupération du job `firmware` de ci.yml (voir là-bas pourquoi le jeton passe par un en-tête).
+      - name: Récupérer le commit essayé
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 -w0)"
+          git config --global --add safe.directory '*'
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          recup() { git -c http.extraHeader="$auth" -c protocol.version=2 fetch -q --no-tags --depth=1 origin "$1"; }
+          if ! recup "$GITHUB_SHA"; then
+            echo "récupération par sha refusée par la forge ; repli sur la ref ${GITHUB_REF}"
+            recup "$GITHUB_REF"
+          fi
+          obtenu=$(git rev-parse FETCH_HEAD)
+          if [ "$obtenu" != "$GITHUB_SHA" ]; then
+            echo "commit récupéré ${obtenu} ≠ commit essayé ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --oneline
+      - name: La campagne, cible par cible
+        run: |
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          echo "runner : $(nproc) processeurs, $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+          seed=${GITHUB_RUN_NUMBER:-1}
+          echo "-seed de libFuzzer : $seed (le numéro du run) ; plafonds : $DUREES"
+          for cd in $DUREES; do
+            bash 4_Firmware/sim/fuzz/fuzz.sh libfuzzer /tmp/fz "${cd%%:*}" "${cd#*:}" "$seed"
+          done

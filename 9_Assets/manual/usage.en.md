@@ -1,121 +1,63 @@
 ---
-date: 2026-10-20
-last-revision: 2026-10-20 (ticket #661, the site's review: one voice, no dated text, links between tabs)
-status: active — the Usage tab of the product page, read by the zUrp website
-referenced-by: 9_Assets/README.md
-derived-from: 7_Docs/MANUEL.md, 7_Docs/PROTOCOL.md, 4_Firmware/components/led/led.c, 6_Driver/indi/README.md
+date: 2026-10-26
+status: publication candidate
 ---
 
-## Plug in
+## Brancher, laisser démarrer
 
-Mount the lens, plug the USB-C cable. The board starts the lens **by itself** as soon as the lens's presence contact
-says it is there (held 300 ms): it powers the lens, initialises it as a camera body would, identifies it, runs its
-homing, then **returns to the mark** if there is one, and is ready. During that start, the commands that need the
-lens answer "busy".
+Monter l'objectif et brancher l'USB-C. Basilisk l'alimente, l'identifie, lui laisse faire son référencement puis revient à la marque enregistrée, s'il y en a une. Les commandes qui nécessitent l'objectif répondent occupé pendant le démarrage. Retirer l'objectif coupe son alimentation.
 
-The board never speaks first: it only answers what it is asked.
+Piloter le focus depuis le banc ou le logiciel astro. La plage autorisée vient de l'objectif, avec une marge de cinq pas à chaque extrémité. Il n'y a pas de calibration manuelle. Une consigne hors plage est refusée. Régler le diaphragme dans la plage annoncée ; la valeur affichée est relue sur l'objectif.
 
-Remove the lens, and the board cuts its power and puts its lines at rest.
+## Garder une marque de focus
 
-## Focus
+La marque appartient à **la carte**, associée à l'identité de l'objectif et à sa focale nominale arrondie au millimètre. Elle conserve une position et son sens d'approche. La poser à la position à retrouver ; y revenir depuis le banc ou le pilote INDI fourni. Un démarrage normal la rappelle automatiquement, avec le sens d'approche mémorisé pour reprendre le jeu mécanique.
 
-Drive the focus from Ekos, ASCOM or the bench page. The focus limits are **the ones the lens publishes itself**,
-narrowed by 5 steps; nothing is measured, and there is nothing to calibrate. A target outside them is refused before
-anything is sent to the lens. With the INDI driver of this repository, these limits become the range of the focus
-position, and Calibrate simply reads them again.
+Sur un objectif dont le bouton de fût est pris en charge, l'action est décidée au relâchement :
 
-## The mark
-
-The mark is a focus position remembered **in the board**, per lens and per focal length — nothing is written into
-the lens.
-
-- **The lens barrel button**, on a lens that has one, sets it and uses it, decided when you release it:
-  - **less than 1 s**: go to the mark;
-  - **1 to 4 s**: set the mark at the current position (the long press avoids overwriting it by accident);
-  - **longer**: nothing.
-
-  The button works only when the board is ready, and is ignored during a move.
-- **At the end of every start** (power-up, lens restart, recovery after a lost lens), the board goes back to the mark
-  by itself, arriving from the side it came from when the mark was set, to take up the mechanical play.
-- From the computer: in Ekos, with the INDI driver of this repository, the mark controls (set, go to, clear) and the
-  mark read back; on the bench page, **Mark** and **Go to mark**.
-
-## The lens ring and the aperture
-
-When the lens's switch gives its ring to the aperture, **turning the ring sets the aperture**, in third stops, three
-per second at most. On the Samyang AF 135, which position of its M1/M2 switch does that is a setting of the lens
-([Setup](setup.en.md) tab, *The M1/M2 switch*).
-
-From the computer, the aperture is set within the range the lens reports; the value shown is the one the lens reports
-back.
-
-## The status LED
-
-| What you see | What it means |
+| Durée de l'appui | Action |
 |---|---|
-| steady for 1 s, at power-up | the board has just powered up |
-| a soft swell every 10 s | no lens |
-| one long flash | a lens is detected |
-| a slow, faint blink | the lens is starting |
-| a quick rise | the lens is ready |
-| a fast flicker | going back to the mark |
-| steady for 1 s, after the fast flicker | arrived at the mark |
-| slow breathing | ready |
-| short, fast pulses | focus position increasing |
-| long, slow pulses | focus position decreasing |
-| one brief flash | the aperture changed |
-| three flashes | mark set |
-| a fade-out | mark cleared |
-| a double flash every 2 s | a start failed or the lens was lost: the board is retrying |
-| 1 flash, then a pause, repeated | stopped: the lens was lost |
-| 3 flashes, then a pause, repeated | stopped: the lens's homing failed |
+| Moins d'une seconde | Aller à la marque |
+| Au moins 1, moins de 4 secondes | Poser la marque ici |
+| 4 secondes ou plus | Aucune action |
 
-The patterns and their exact timings are at the top of
-[`4_Firmware/components/led/led.c`](../../4_Firmware/components/led/led.c).
+Le bouton est utilisé uniquement à l'état prêt, sans mouvement en cours. La marque de la carte est distincte d'une éventuelle fonction de preset native de l'objectif.
 
-**Brightness**: 0 to 100 %, 0 turns it off. The board forgets it at each power-up and comes back to 100 %; the INDI
-driver of this repository stores it in its INDI configuration and sends it again at each connection (Options tab,
-LED brightness).
+Lors d'une récupération après perte de l'objectif ou redémarrage à chaud de la carte, Basilisk tente de retrouver la cible du mouvement interrompu, sinon la dernière position connue, pour le même objectif à la même focale. Cette information reste en mémoire, sans écriture flash ; couper l'alimentation de la carte l'efface. La récupération peut déplacer et référencer à nouveau l'objectif. Elle ne garantit pas une continuité physique du focus.
 
-## Temperature, humidity, dew or frost point
+## Bague et diaphragme
 
-The board reads its SHT40 sensor once a second: the temperature in °C, the relative humidity in %RH, and the
-condensation threshold on the optics that the board computes from them — **the dew point** when it is zero or
-above, **the frost point** when it is below zero.
+Quand l'objectif annonce que sa bague commande le diaphragme, Basilisk traduit sa rotation en tiers de diaphragme, au maximum trois par seconde. Sur le Samyang AF 135, ce rôle dépend de l'affectation M1/M2 ; voir [Installation](setup.fr.md).
 
-- **Unknown is never a number.** While the board does not know a value (not read yet, sensor silent, wrong reading,
-  last reading older than 3 s), it says so; the bench page shows "—", and the INDI driver of this repository removes
-  the property rather than publish an old value. The threshold is also undefined at 0 % humidity, above 60 °C, or for
-  a frost point below -65 °C.
-- **Ekos reads the temperature** (`FOCUS_TEMPERATURE`) to refocus on a temperature change. The humidity and the dew
-  or frost point are shown by the driver, for information.
-- **The board does nothing else with them**: it does not compensate the focus — Ekos decides — and it does not act on
-  the dew or frost point, it reports it.
-- The sensor is on the board, against the back of the lens: what it measures of the air depends on the enclosure.
+## Lire la LED
 
-## The bench page
+| Motif | Signification |
+|---|---|
+| Fixe pendant 1 s à la mise sous tension | Carte alimentée |
+| Gonflement doux toutes les 10 s | Pas d'objectif |
+| Un éclair long, puis clignotement lent et faible | Objectif détecté, démarrage |
+| Montée rapide, puis respiration lente | Prêt |
+| Scintillement rapide, puis fixe pendant 1 s | Retour à la marque, puis arrivée |
+| Impulsions courtes et rapides / longues et lentes | Position de focus croissante / décroissante |
+| Un éclair bref | Diaphragme modifié |
+| Trois éclairs / extinction progressive | Marque posée / effacée |
+| Double éclair toutes les 2 s | Nouvelle tentative après échec du démarrage ou perte de l'objectif |
+| Groupes répétés de 1 / 3 éclairs, séparés par une pause | Arrêt après perte de l'objectif / échec du référencement |
 
-The bench page ([Setup](setup.en.md) tab) shows and drives everything above, from the browser:
+La luminosité se règle de 0 à 100 % ; zéro éteint la LED. La carte repart à 100 % après mise sous tension. Le pilote INDI fourni peut conserver le réglage dans sa configuration et le renvoyer à la connexion.
 
-- **Lens**: its name and the board's state; restart the lens, cut and restore its power.
-- **Board sensor**: temperature, humidity, dew or frost point, with or without a lens.
-- **Focus**: ±10 / ±100 steps, a slider between the limits with the mark on it, Go to, Stop, Mark, Go to mark.
-- **Aperture**: a third-stop slider between the lens's limits, ±⅓, wide open; the value shown is the one the lens
-  reports.
-- **Log**: the board's journal on demand, with each frame exchanged with the lens decoded; a free command line; the
-  log exports to a text file.
+## Température et humidité
 
-It reads the position and the motion five times a second, the rest once a second.
+Le SHT40 rapporte la température locale et l'humidité relative une fois par seconde. La carte calcule aussi un point de rosée ou de givre. **Le couplage thermique du capteur à l'air, à l'objectif et à l'électronique n'est pas caractérisé** : ces valeurs ne mesurent pas la condensation sur les optiques.
 
-## When something goes wrong
+Une mesure absente, invalide ou vieille de plus de trois secondes est indisponible dans le banc et l'extension INDI Basilisk. Le seuil calculé est aussi indisponible à humidité nulle, au-dessus de 60 °C ou sous un point de givre de −65 °C. Moonlite a le repli distinct décrit dans [Installation](setup.fr.md).
 
-- **The lens is lost** (no frame for 2 s): the board restarts it by itself. After four failed attempts in a row it
-  stops (the LED's repeated flashes); restart the lens from the computer (Ekos, the bench page), or unplug and replug
-  the lens.
-- **A power rail of the lens trips** (over-current, over-heating): the board counts it and reports it in its
-  diagnostic line (`DEBUG`, from the bench page's command line); it cuts nothing itself.
-- **To report a problem**, the bench page's log, with the journal on (`LOG ON`, or `LOG ALL` for every frame), exported
-  to a text file, is what tells what happened.
+Le firmware rapporte ces valeurs ; il ne compense pas le focus et ne commande pas de chauffage. Ekos peut exploiter la propriété de température selon sa propre politique de refocalisation.
 
-Every command, reply and error is in [`7_Docs/PROTOCOL.md`](../../7_Docs/PROTOCOL.md); the French manual,
-[`7_Docs/MANUEL.md`](../../7_Docs/MANUEL.md), says the same as this tab in more detail.
+## Quand la session déraille
+
+Si aucun des deux flux d'état n'arrive pendant deux secondes, la carte tente de redémarrer l'objectif. Elle s'arrête après quatre tentatives consécutives en échec. Relancer l'objectif depuis le banc ou le pilote INDI fourni, ou le retirer puis le remonter.
+
+Pour un signalement exploitable, ouvrir le journal du banc, activer `LOG ON` (`LOG ALL` pour toutes les trames), reproduire l'événement et exporter le texte. Joindre `DEBUG`, la version du firmware de la carte et l'identité de l'objectif. Un défaut d'alimentation est compté dans le diagnostic ; le seul silence de la carte n'en donne pas la cause. Elle n'émet les événements du journal qu'après activation.
+
+Le [contrat USB](../../7_Docs/PROTOCOL.md) définit chaque commande, réponse et erreur. Le [manuel du dépôt](../../7_Docs/MANUEL.md) ajoute le fonctionnement hors ligne et les choix de conception.

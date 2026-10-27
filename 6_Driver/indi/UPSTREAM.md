@@ -1,11 +1,12 @@
 # Défauts du driver Pinefeat d'origine
 
 **Date** : 2026-10-04
-**Dernière révision** : 2026-10-20 (ticket #648 : le firmware répond `1.3`) ; 2026-10-19 (ticket #645 : chaque défaut corrigé l'est par un patch de `patches/fixes/`, sur
+**Dernière révision** : 2026-10-23 (ticket #672 : la réponse bornée en octets, pas en temps, corrigée par `0007` ;
+L09-04 corrigé par `0008`, borné de même) ; 2026-10-20 (ticket #648 : le firmware répond `1.3`) ; 2026-10-19 (ticket #645 : chaque défaut corrigé l'est par un patch de `patches/fixes/`, sur
 l'amont, pour tout contrôleur ; ceux qui restent disent pourquoi) ; 2026-10-11 (ticket #600) ; 2026-10-08
-**Statut** : actif — constats sur l'amont ; corrigés par `patches/fixes/0001` à `0007` : la réponse rendue telle que
-lue (15 caractères, fin de ligne, L09-05), L09-08, L09-07, L09-09, le `Busy` sans fin, l'erreur répétée, L09-04 en
-partie ; restent : L09-03 contre un adaptateur Pinefeat, et la part de L09-04 qu'aucun driver ne peut corriger seul
+**Statut** : actif — constats sur l'amont ; corrigés par `patches/fixes/0001` à `0008` : la réponse rendue telle que
+lue (15 caractères, fin de ligne, L09-05), L09-08, L09-07, L09-09, le `Busy` sans fin, l'erreur répétée, la réponse
+bornée en octets et pas en temps, L09-04 en partie ; restent : L09-03 contre un adaptateur Pinefeat, et la part de L09-04 qu'aucun driver ne peut corriger seul
 **Référencé par** : `6_Driver/indi/README.md`, `6_Driver/indi/patches/fixes/PULL_REQUEST.md`
 
 L'amont est `drivers/focuser/pinefeat_cef.{h,cpp}` d'`indilib/indi` au commit
@@ -85,7 +86,26 @@ son dernier octet est le délimiteur. Contrôles : `pf_texts`, `pf_nc_whole` (le
 - **Correction** : journalisée à sa première venue, puis seulement si la réponse change ou après une position lue ;
   chaque connexion la journalise de nouveau. Contrôle : `pf_log_once`.
 
-## L09-04 — une réponse tardive prise pour la réponse suivante — corrigé en partie par `0007`
+## La réponse bornée en octets, pas en temps — corrigé par `0007`
+
+- **Où** : `sendCommand`.
+- **Symptôme** : `tty_nread_section` attend jusqu'à `CEF_TIMEOUT` (3 s) **chaque** octet et s'arrête à `CEF_BUF` (16)
+  octets : sa borne est en octets. Un appareil qui envoie, sans fin de ligne, un octet toutes les 2 s (un autre
+  appareil sur le port, des parasites, un contrôleur qui déraille) retient le driver des dizaines de secondes par
+  commande, et le client avec lui ; `pf_slow_line` le montre sur l'amont : l'erreur n'y vient pas dans la borne. Un
+  flux rapide, lui, déborde les 16 octets aussitôt : l'amont n'est pas figé par un flux, il l'est par un filet.
+- **Correction** : la réponse est lue octet par octet contre une seule échéance, `CEF_TIMEOUT` après l'envoi de la
+  commande : chaque octet n'est attendu que le temps qui en reste (`tty_read_expanded`, à la microseconde). Une réponse
+  arrivée à temps est lue comme avant, jusqu'à son délimiteur et au plus `CEF_BUF` octets, avec les mêmes erreurs
+  (`Timeout error`, `Read overflow error`). Un correctif et pas de l'extension : l'amont donne `CEF_TIMEOUT` à la
+  lecture ; seule l'attente au-delà change. Contrôle : `pf_slow_line` (un octet toutes les 1,5 s, sous le délai par
+  octet, au-dessus de l'échéance en cumul ; l'amont n'y rend pas l'erreur dans la borne).
+- **Pourquoi avant `0008`** : la ligne en retard lit la suite d'une ligne jusqu'à son délimiteur ; elle le fait dans
+  cette même échéance. Placée après, elle introduirait une attente sans borne que le patch suivant réparerait, ce qu'une
+  relecture amont ne prend pas (la version de ce correctif d'avant le ticket #672 le faisait : sa boucle attendait 3 s
+  par octet, et un flux sans fin de ligne figeait le driver).
+
+## L09-04 — une réponse tardive prise pour la réponse suivante — corrigé en partie par `0008`
 
 - **Où** : `sendCommand`.
 - **Symptôme** : une réponse qui arrive après l'échéance (`CEF_TIMEOUT`, 3 s) reste en route. `tcflush`, avant chaque
@@ -96,6 +116,11 @@ son dernier octet est le délimiteur. Contrôles : `pf_texts`, `pf_nc_whole` (le
   s'arrête ; si elle finit au milieu d'une ligne, la suite de cette ligne est lue et jetée avant la réponse. L'entrée
   n'est plus vidée après la réponse : ce qui la suit est laissé à la commande suivante, qui le jette de même. Contrôle :
   `pf_stale_line`.
+- **Ses bornes** : l'entrée en attente n'est lue que jusqu'où elle était reçue au début de la commande (un `FIONREAD`,
+  puis ce nombre d'octets, sans attente) ; la suite de la ligne est lue dans l'échéance de la réponse (`0007`). Un flux
+  sans fin de ligne fait échouer chaque commande au bout de `CEF_TIMEOUT`, et le driver continue. Contrôle :
+  `pf_endless_line`, joué aussi sur l'amont, qui le passe (il déborde `CEF_BUF` aussitôt) : c'est la non-régression de
+  ce correctif, pas le symptôme d'un défaut de l'amont.
 - **Son coût** : si la suite d'un fragment en attente n'arrive jamais (un contrôleur arrêté au milieu d'une ligne), la
   réponse de la commande suivante est prise pour cette suite et jetée, et la commande échoue au bout de `CEF_TIMEOUT`,
   comme sans réponse ; la ligne est de nouveau propre pour la commande d'après.

@@ -15,7 +15,8 @@
 
 /* Un 0x1D `1D lo hi 00 00` (unité 0, mode 0, extra 0) accroché à la prochaine trame 0x04 de la boucle qui part ; une
  * consigne pas encore partie est remplacée. Le bit AF du 0x03 (offset 12, bit 4) est tenu 30 paires à partir de là,
- * décomptées après chaque paire émise. Une paire qui ne part pas reporte le 0x1D, tel quel, à la suivante (bsk_txn.h). */
+ * décomptées après chaque paire émise dont le 0x03 est parti après le dépôt : déposé entre le 0x03 et le 0x04, la paire
+ * en cours ne compte pas. Une paire qui ne part pas reporte le 0x1D, tel quel, à la suivante (bsk_txn.h). */
 void drive_goto(uint16_t target);
 
 /* Le 0x1D du dernier drive_goto a pu partir deux fois : un 0x04 qui le portait a été tenté et a raté, et la paire suivante
@@ -27,6 +28,14 @@ bool drive_goto_failed(void);
  * attendue. Rend le résultat de bsk_txn_send : E_OK dit le 0x1C parti, ou, entre le 0x03 et le 0x04 de la boucle,
  * retenu jusqu'au 0x04 (bsk_txn.h). */
 bsk_err_t drive_stop(void);
+
+/* Le 0x1C du dernier drive_stop est-il retenu jusqu'au 0x04 ? Vrai, et `*place`, sa place dans la file de TRANSACTION
+ * (< BSK_TXN_HELD_MAX, bsk_txn.h), dont drive_stop_end lit l'issue. */
+bool drive_stop_held(uint8_t *place);
+
+/* L'issue du 0x1C retenu à `place` : faux tant qu'il attend le 0x04 ; vrai ensuite, `*e` E_OK s'il est parti, l'échec de
+ * son émission, ou E_ABORTED, la boucle arrêtée avant lui (bsk_txn_held_end). */
+bool drive_stop_end(uint8_t place, bsk_err_t *e);
 
 /* À l'arrêt de la boucle : la consigne pas encore partie et le bit AF sont oubliés, rien n'est émis ; rien d'une session
  * ne repart dans la suivante. */

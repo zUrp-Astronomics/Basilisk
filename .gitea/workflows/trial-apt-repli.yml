@@ -1,0 +1,94 @@
+# L'essai du repli d'apt_update sur l'instantané de l'archive (.gitea/setup_host.sh, jobs `indi` et `firmware`
+# de ci.yml) : rejouable à la main, jamais déclenché seul. Il ne juge pas le projet, il démontre que le job
+# `test` (et donc la sonde), `indi` et `firmware` survivent à un miroir de l'archive au Release incohérent
+# (le Hash Sum mismatch du 2026-10-24) et rougissent encore sur une vraie panne.
+#
+# Chaque cas joue, dans l'image du job visé, l'étape « Outillage… » de ce job telle que ci.yml la porte au
+# commit essayé, face à une panne posée par .gitea/essai_apt/essai.sh (scénarios et attendus en tête du
+# script). Un cas est vert si l'étape a fait ce que le scénario attend, rouge ou vert.
+#
+# Relancer : dans Gitea, Actions > « essai-apt-repli » > Run workflow, sur la branche voulue.
+#
+# ⚠ `name:` ne commence pas par `CI` : ses statuts ne tombent pas sous le glob `CI / *` exigé par la
+# protection de `main`, et son rouge ne bloque aucun merge.
+name: essai-apt-repli
+
+on: workflow_dispatch
+
+jobs:
+  copies:
+    runs-on: shell
+    container: catthehacker/ubuntu:act-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: apt_update identique dans ses trois copies
+        run: bash .gitea/garde_apt_update.sh
+
+  repli:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { job: test, image: "catthehacker/ubuntu:act-latest", scenario: sain }
+          - { job: test, image: "catthehacker/ubuntu:act-latest", scenario: incoherent }
+          - { job: test, image: "catthehacker/ubuntu:act-latest", scenario: injoignable }
+          - { job: test, image: "catthehacker/ubuntu:act-latest", scenario: incoherent-sans-instantane }
+          - { job: indi, image: "ubuntu:26.04", scenario: sain }
+          - { job: indi, image: "ubuntu:26.04", scenario: incoherent }
+          - { job: indi, image: "ubuntu:26.04", scenario: injoignable }
+          - { job: indi, image: "ubuntu:26.04", scenario: incoherent-sans-instantane }
+          - { job: firmware, image: "ubuntu:24.04", scenario: sain }
+          - { job: firmware, image: "ubuntu:24.04", scenario: incoherent }
+          - { job: firmware, image: "ubuntu:24.04", scenario: injoignable }
+          - { job: firmware, image: "ubuntu:24.04", scenario: incoherent-sans-instantane }
+    runs-on: shell
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # L'état apt de l'image est mis de côté AVANT toute installation : essai.sh le remet en place avant de
+      # jouer l'étape (index, /etc/hosts, et ca-certificates retiré s'il n'y était pas). git, python3 et
+      # python3-yaml (le clone, le faux miroir, la lecture de ci.yml) viennent du miroir de l'image, intact à ce
+      # moment-là.
+      - name: État apt initial, puis git, python3, python3-yaml
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          mkdir -p /tmp/etat-initial
+          cp -a /var/lib/apt/lists /tmp/etat-initial/lists
+          cp /etc/hosts /tmp/etat-initial/hosts
+          if dpkg-query -W -f='${Status}' ca-certificates 2>/dev/null | grep -q 'ok installed'; then
+            echo installé
+          else
+            echo absent
+          fi > /tmp/etat-initial/ca-certificates
+          echo "ca-certificates dans l'image : $(cat /tmp/etat-initial/ca-certificates)"
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git python3 python3-yaml >/dev/null
+      # La récupération des jobs `indi` et `firmware` de ci.yml (voir là-bas pourquoi le jeton passe par un en-tête).
+      - name: Récupérer le commit essayé
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 -w0)"
+          git config --global --add safe.directory '*'
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          recup() { git -c http.extraHeader="$auth" -c protocol.version=2 fetch -q --no-tags --depth=1 origin "$1"; }
+          if ! recup "$GITHUB_SHA"; then
+            echo "récupération par sha refusée par la forge ; repli sur la ref ${GITHUB_REF}"
+            recup "$GITHUB_REF"
+          fi
+          obtenu=$(git rev-parse FETCH_HEAD)
+          if [ "$obtenu" != "$GITHUB_SHA" ]; then
+            echo "commit récupéré ${obtenu} ≠ commit essayé ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --oneline
+      - name: ${{ matrix.job }}, ${{ matrix.scenario }}
+        run: bash .gitea/essai_apt/essai.sh "${{ matrix.job }}" "${{ matrix.image }}" "${{ matrix.scenario }}"

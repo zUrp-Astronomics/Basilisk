@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: captain <captain@lcars.local>
+Date: Thu, 22 Oct 2026 12:00:00 +0200
+Subject: [PATCH 7/9] Pinefeat CEF: give each reply CEF_TIMEOUT in all
+
+sendCommand() read the reply with tty_nread_section(), which waits up
+to CEF_TIMEOUT for each byte and stops at CEF_BUF bytes. Its bound is in
+bytes, not in time: a controller, or anything else on the port, that
+sends a byte every two seconds without a delimiter holds the driver
+until CEF_BUF bytes have come, tens of seconds, and the client with it.
+
+The reply is now read byte by byte against one deadline, CEF_TIMEOUT
+after the command was sent: each byte is waited for only as long as
+remains of it. A reply that comes in time, up to its delimiter and at
+most CEF_BUF bytes, is read as before, and the errors are those of
+tty_nread_section: a timeout, or an overflow at CEF_BUF bytes without a
+delimiter.
+---
+ drivers/focuser/pinefeat_cef.cpp | 33 +++++++++++++++++++++++++-------
+ 1 file changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/focuser/pinefeat_cef.cpp b/drivers/focuser/pinefeat_cef.cpp
+index 5f9d01b..a14d69b 100644
+--- a/drivers/focuser/pinefeat_cef.cpp
++++ b/drivers/focuser/pinefeat_cef.cpp
+@@ -522,6 +522,17 @@ void PinefeatCEF::TimerHit()
+     SetTimer(getCurrentPollingPeriod());
+ }
+ 
++// One byte from fd, waited for until deadline at most: TTY_TIME_OUT once it has passed
++static int readByte(int fd, char * c, std::chrono::steady_clock::time_point deadline)
++{
++    auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count();
++    if (left <= 0)
++        return TTY_TIME_OUT;
++
++    int nbytes_read = 0;
++    return tty_read_expanded(fd, c, 1, left / 1000000, left % 1000000, &nbytes_read);
++}
++
+ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
+ {
+     int nbytes_written = 0, nbytes_read = 0, rc = -1;
+@@ -544,16 +555,24 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res)
+         return true;
+     }
+ 
+-    if ((rc = tty_nread_section(PortFD, res, CEF_BUF, CEF_DEL, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
++    // The reply has CEF_TIMEOUT in all, from the command, up to its delimiter and at most CEF_BUF bytes, as before:
++    // each byte is waited for only until the deadline, so that a controller that sends without a delimiter, however
++    // slowly, can't hold the driver longer
++    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(int(CEF_TIMEOUT));
++    nbytes_read = 0;
++    do
+     {
+-        char errstr[MAXRBUF] = {0};
+-        tty_error_msg(rc, errstr, MAXRBUF);
+-        LOGF_ERROR("Serial read error: %s.", errstr);
+-        return false;
++        if ((rc = nbytes_read < CEF_BUF ? readByte(PortFD, res + nbytes_read, deadline) : int(TTY_OVERFLOW)) != TTY_OK)
++        {
++            char errstr[MAXRBUF] = {0};
++            tty_error_msg(rc, errstr, MAXRBUF);
++            LOGF_ERROR("Serial read error: %s.", errstr);
++            return false;
++        }
+     }
++    while (res[nbytes_read++] != CEF_DEL);
+ 
+-    // The reply as a string, without its line end: tty_nread_section keeps the delimiter, and writes no
+-    // terminating zero when the reply fills CEF_BUF
++    // The reply as a string, without its line end
+     while (nbytes_read > 0 && (res[nbytes_read - 1] == CEF_DEL || res[nbytes_read - 1] == '\r'))
+         res[--nbytes_read] = '\0';
+ 

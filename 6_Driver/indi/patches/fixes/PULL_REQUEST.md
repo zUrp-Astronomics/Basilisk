@@ -1,14 +1,15 @@
 # Pinefeat CEF: reply handling, refresh rate and Busy states fixes
 
 **Date** : 2026-10-19
-**Dernière révision** : 2026-10-19 (ticket #645)
+**Dernière révision** : 2026-10-23 (ticket #672 : chaque réponse bornée par `CEF_TIMEOUT` en tout, un correctif de
+plus, le 7 ; la ligne en retard bornée de même) ; 2026-10-19 (ticket #645)
 **Statut** : prêt — description de la pull request de `patches/fixes/` pour indilib/indi, non soumise (l'humain
 contactera Pinefeat d'abord) ; le titre ci-dessus est celui de la PR, son corps est tout ce qui suit le trait
 **Référencé par** : `6_Driver/indi/README.md`, `6_Driver/indi/UPSTREAM.md`
 
 ---
 
-This series fixes seven defects of the Pinefeat CEF focuser driver (`drivers/focuser/pinefeat_cef.{h,cpp}`), one
+This series fixes eight defects of the Pinefeat CEF focuser driver (`drivers/focuser/pinefeat_cef.{h,cpp}`), one
 commit per defect, and bumps the driver version to 1.2. It applies on `master` as of 1dd9b34f24 (v2.2.5). Nothing
 else changes: the protocol, the properties, their names and the commands sent are the same, except where a fix says
 otherwise.
@@ -41,15 +42,22 @@ otherwise.
 6. **Log a position that can't be read once, not at each refresh.** Without a lens, "Can't read focus position: lens
    is not attached." was logged at each refresh for as long as the lens was away. It is now logged when it first
    comes, and again only if the reply changes or after a position was read; each connection logs it anew.
-7. **Don't take the rest of a stale line for the next reply.** `tcflush()`, before each command and after each reply,
+7. **Give each reply `CEF_TIMEOUT` in all.** `tty_nread_section()` waits up to `CEF_TIMEOUT` for each byte and stops
+   at `CEF_BUF` bytes: its bound is in bytes, not in time. A controller, or anything else on the port, that sends a
+   byte every two seconds without a delimiter held the driver for tens of seconds, and the client with it. The reply is
+   now read byte by byte against one deadline, `CEF_TIMEOUT` after the command: each byte is waited for only as long as
+   remains of it. A reply that comes in time is read as before, with the same errors (a timeout, an overflow at
+   `CEF_BUF` bytes).
+8. **Don't take the rest of a stale line for the next reply.** `tcflush()`, before each command and after each reply,
    discards only what is already received: when it cut a late reply in two, the rest arrived after it and was read as
    the next command's reply. The pending input is now read and discarded instead, which shows where it ends; if it
-   ends inside a line, the rest of that line is discarded before the reply. The input is no longer flushed after the
-   reply. A late reply that arrives whole after the next command was sent is still taken for its reply: the protocol
-   carries nothing that ties a reply to its command. The cost: if the rest of a stale fragment never arrives, the next
-   command's reply is taken for it and discarded, and that command fails after `CEF_TIMEOUT`, as with no reply; the
-   line is clean again for the command after it.
-8. **Bump the driver version to 1.2.**
+   ends inside a line, the rest of that line is discarded before the reply, within the reply's deadline (fix 7); only
+   the input already received when the command starts is read, so that a controller that keeps sending can't hold the
+   driver. The input is no longer flushed after the reply. A late reply that arrives whole after the next command was
+   sent is still taken for its reply: the protocol carries nothing that ties a reply to its command. The cost: if the
+   rest of a stale fragment never arrives, the next command's reply is taken for it and discarded, and that command
+   fails after `CEF_TIMEOUT`, as with no reply; the line is clean again for the command after it.
+9. **Bump the driver version to 1.2.**
 
 ## How it was verified
 
@@ -57,10 +65,14 @@ otherwise.
 - The lines each commit touches pass `astyle` with the options of INDI's README, as `scripts/check-codestyle.sh` does.
 - The driver binary run on its own, spoken to in INDI XML on its standard input and output, against a scripted fake
   Pinefeat controller on a pty (`v f r e a d s c`, `er` to anything else). For each fix, a check shows the defect on
-  the unpatched driver, failing there with the symptom it declares, and passes with the series (fix 2 has no visible effect within the properties' range, and fix
-  1's read past the buffer has no deterministic symptom, so the unpatched driver is checked on the line end and on
-  `ERR_NC()`). The same checks of the driver's existing behaviour pass on both: connection with firmware 1.3, 1.2, 0.9
-  and 2.0 (`r` read only from minor 3, as before), absolute and relative moves, speed, aperture, `CALIBRATE`.
+  the unpatched driver, failing there with the symptom it declares, and passes with the series (fix 2 has no visible
+  effect within the properties' range, and fix 1's read past the buffer has no deterministic symptom, so the unpatched
+  driver is checked on the line end and on `ERR_NC()`). The same checks of the driver's existing behaviour pass on both:
+  connection with firmware 1.3, 1.2, 0.9 and 2.0 (`r` read only from minor 3, as before), absolute and relative moves,
+  speed, aperture, `CALIBRATE`; and a controller that sends without a delimiter for ever, fast: each command fails
+  within `CEF_TIMEOUT` (and a margin for the error to reach the test), and the driver goes on once it stops. That check
+  also passes on the unpatched driver, which overflows `CEF_BUF` at once: it guards fix 8, whose rest of a stale line is
+  read within the same deadline. The check of fix 7 is the slow case, a byte every 1.5 s: the unpatched driver fails it.
 - **Not verified on a Pinefeat adapter**: we have none. The fake controller follows the replies the driver itself
   reads; its timings are made up.
 

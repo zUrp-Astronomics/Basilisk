@@ -2,7 +2,8 @@
  * AUTHOR: engineer
  * DATE: 2026-10-03
  * STATUS: actif — la carte seule (NVS, FreeRTOS) ; joué par aucun test hôte (les tests ont sim/store_sim.c, en mémoire) ;
- *         ticket #528 : la tâche abonnée au chien de garde, son attente des dépôts bornée
+ *         ticket #528 : la tâche abonnée au chien de garde, son attente des dépôts bornée ; ticket #676 : l'état de la NVS
+ *         à l'init (bsk_store_nvs), une lecture en erreur distinguée d'une clé absente (err)
  *
  * Une tâche du magasin fait les opérations dans l'ordre de leur dépôt. Deux files : les dépôts (la SESSION n'y attend
  * jamais, pleine elle refuse) et les résultats (la tâche du magasin y attend, la SESSION les relève à chaque pas). */
@@ -44,16 +45,23 @@ typedef struct {
 } req_t;
 
 static QueueHandle_t reqs, results;
+static bsk_store_nvs_t state;   /* posé par bsk_store_init, avant la tâche ; lu par la SESSION */
 
-/* Sans borne sur la valeur : c'est la SESSION qui la lit. */
-static bool get(const char *key, uint32_t *v)
+/* Sans borne sur la valeur : c'est la SESSION qui la lit. La frontière entre absence et erreur (bsk_store.h) :
+ * ESP_ERR_NVS_NOT_FOUND est une absence, qu'il vienne de nvs_open en lecture seule (l'espace `mark` n'existe pas encore :
+ * carte neuve, NVS effacée à l'init, image -full.bin flashée ; « ESP_ERR_NVS_NOT_FOUND if namespace doesn't exist yet and
+ * mode is NVS_READONLY », API NVS d'ESP-IDF) ou de nvs_get_u32 (la clé absente) ; tout autre échec est une erreur, dont
+ * ESP_ERR_NVS_NOT_INITIALIZED quand l'init est en panne. */
+static void get(const char *key, bsk_store_res_t *r)
 {
     nvs_handle_t h;
-    esp_err_t e;
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
-    e = nvs_get_u32(h, key, v);
-    nvs_close(h);
-    return e == ESP_OK;
+    esp_err_t e = nvs_open(NS, NVS_READONLY, &h);
+    if (e == ESP_OK) {
+        e = nvs_get_u32(h, key, &r->value);
+        nvs_close(h);
+    }
+    r->ok = e == ESP_OK;
+    r->err = e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND;
 }
 
 static bool put(const char *key, uint32_t v)
@@ -97,20 +105,25 @@ static void store_task(void *arg)
         memset(&r, 0, sizeof r);
         r.op = q.op;
         memcpy(r.key, q.key, sizeof r.key);
-        if (q.op == BSK_STORE_GET) r.ok = get(q.key, &r.value);
+        if (q.op == BSK_STORE_GET) get(q.key, &r);
         else if (q.op == BSK_STORE_PUT) r.ok = put(q.key, q.value);
         else r.ok = del(q.key);
         (void)xQueueSend(results, &r, portMAX_DELAY);
     }
 }
 
+/* L'effacement sur NO_FREE_PAGES et NEW_VERSION_FOUND, l'usage d'ESP-IDF, perd les marques : il est dit (bsk_store_nvs,
+ * `nvs` de DEBUG). Une NVS en panne n'arrête rien : le magasin tourne, ses opérations échouent, la carte est sans marque. */
 void bsk_store_init(void)
 {
     esp_err_t e = nvs_flash_init();
+    state = BSK_STORE_NVS_OK;
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
+        e = nvs_flash_erase();
+        if (e == ESP_OK) e = nvs_flash_init();
+        state = BSK_STORE_NVS_ERASED;
     }
+    if (e != ESP_OK) state = BSK_STORE_NVS_BROKEN;
     MUST((reqs = xQueueCreate(DEPTH, sizeof(req_t))) != NULL);
     MUST((results = xQueueCreate(DEPTH, sizeof(bsk_store_res_t))) != NULL);
     MUST(xTaskCreatePinnedToCore(store_task, "store", STACK, NULL, PRIO, NULL, 0) == pdPASS);
@@ -125,3 +138,5 @@ bool bsk_store_request(bsk_store_op_t op, const char *key, uint32_t value)
 }
 
 bool bsk_store_result(bsk_store_res_t *r) { return xQueueReceive(results, r, 0) == pdTRUE; }
+
+bsk_store_nvs_t bsk_store_nvs(void) { return state; }

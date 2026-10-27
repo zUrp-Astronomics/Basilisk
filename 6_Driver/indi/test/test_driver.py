@@ -21,8 +21,11 @@ The fake controllers are the protocol of 7_Docs/PROTOCOL.md (Basilisk) and of up
 (Pinefeat); their timings are made up (a move takes 1 s), nothing is measured on hardware.
 """
 
+import itertools
 import os
+import random
 import re
+import select
 import subprocess
 import sys
 import tempfile
@@ -33,8 +36,14 @@ import xml.etree.ElementTree as ET
 
 DEVICE = "Pinefeat EF Lens Controller"
 EXT_PROPERTIES = ["APERTURE", "FOCUS_MARK", "FOCUS_MARK_CTL", "LED_BRIGHTNESS", "LENS_REBOOT", "LENS_INFO",
-                  "FOCUS_TEMPERATURE", "FOCUS_HUMIDITY", "FOCUS_DEW_POINT", "FOCUS_ABORT_MOTION"]
-EXT_LETTERS = re.compile(r"^(t|o|j|js|jg|jx|k\d*|b|i|w|n|z|g|q)$")
+                  "FOCUS_TEMPERATURE", "FOCUS_HUMIDITY", "FOCUS_DEW_POINT", "FOCUS_ABORT_MOTION", "BOARD_RESTART"]
+EXT_LETTERS = re.compile(r"^(t|o|j|js|jg|jx|k\d*|b|i|w|n|z|g|q|x)$")
+# A command fails within BOUND of the fake receiving it, whatever the controller keeps sending: CEF_TIMEOUT (3 s,
+# upstream's value) from the command, and 2 s for the error to reach the test (written by the driver, read through a
+# pipe and an XML parser), well beyond what a loaded runner adds to it; the defects it shows hold the driver for tens
+# of seconds, or for ever.
+BOUND = 3.0 + 2.0
+FLOOD = [b"0123456789abcdef0123456789abcdef"]      # 32 bytes every 5 ms, without a line end: a flow that doesn't stop
 ROM_LINES = [b"ESP-ROM:esp32c3-api1-20210207\r\n", b"Build:Feb  7 2021\r\n",
              b"rst:0x15 (USB_UART_CHIP_RESET),boot:0xd (SPI_FAST_FLASH_BOOT)\r\n", b"SPIWP:0xee\r\n",
              b"mode:DIO, clock div:1\r\n", b"load:0x3fcd5820,len:0x1714\r\n", b"entry 0x403cc71c\r\n"]
@@ -58,6 +67,7 @@ class Fake(threading.Thread):
         self.limits = (13873, 30738) if basilisk else (0, 25000)
         self.target = None
         self.move_end = 0.0
+        self.move_seconds = 1.0     # how long a move by `f` takes
         self.move_result = "-"
         self.next_result = "ok"
         self.mark = "16340"
@@ -65,12 +75,21 @@ class Fake(threading.Thread):
         self.name = "SAMYANG AF 135mm F1.8"
         self.climate = "21.37 48.02 9.91"
         self.aperture = "5.6"
+        self.reset = "poweron"      # `x`: the cause of the board's last restart, and when it restarted
+        self.boot = time.monotonic()
+        self.restarts = []          # (cause, ms): at each next `x`, the board has restarted for that cause ms ago
+        self.delay = 0.0            # each reply delayed at random up to this (s): a part before the board answers
+        self.rng = random.Random(704)   # (and reads its clock, `x`), the rest after; a board or a link slow at times
         self.lose_v = 0             # the next `v` sent while the board restarts: its ROM, no reply
         self.log_lines = False      # the board's log on (LOG ON): `* …` lines before each reply, one cut in two
         self.stale = None           # (command, bytes, rest): bytes written 20 ms after the next reply to command, the
         self.stale_rest = None      # last of a refresh, without their line end; the next `e`, the first command of the
         self.stale_hit = None       # next refresh, finds the rest of that line before its reply (its index here)
         self.script = {}            # command -> one-off answer
+        self.endless_on = None      # (command, chunks, period): that command starts the endless input (endless())
+        self.endless_from = None    # when the fake received it
+        self.flow = None            # the thread that writes the endless input, and the event that stops it
+        self.flow_stop = threading.Event()
         self.stop = False
         self.start()
 
@@ -87,7 +106,12 @@ class Fake(threading.Thread):
                 cmd = line.decode(errors="replace").strip("\r")
                 with self.lock:
                     self.received.append((time.monotonic(), cmd))
+                    before = self.rng.uniform(0, self.delay)
+                    after = self.rng.uniform(0, self.delay - before)
+                time.sleep(before)
+                with self.lock:
                     out = self.answer(cmd)
+                time.sleep(after)
                 self.send(out)
 
     def send(self, out):
@@ -107,8 +131,31 @@ class Fake(threading.Thread):
         except OSError:
             pass
 
+    def endless(self, chunks, period):
+        """From now on the controller answers nothing: it writes chunks one after the other, cycling, one every period
+        seconds, until end_endless() or close(). A chunk is written only when the pty has room for it, so that the
+        writer never blocks: a fast flow is as fast as the driver reads."""
+        def flow():
+            for chunk in itertools.cycle(chunks):
+                try:
+                    if select.select([], [self.master], [], 0)[1]:
+                        os.write(self.master, chunk)
+                except (OSError, ValueError):
+                    return
+                if self.flow_stop.wait(period):
+                    return
+        self.flow = threading.Thread(target=flow, daemon=True)
+        self.flow.start()
+
+    def end_endless(self):
+        if self.flow is not None:
+            self.flow_stop.set()
+            self.flow.join()
+            self.flow = None
+
     def close(self):
         self.stop = True
+        self.end_endless()
         for fd in (self.slave, self.master):
             try:
                 os.close(fd)
@@ -118,6 +165,10 @@ class Fake(threading.Thread):
     def commands(self, since=0.0):
         with self.lock:
             return [c for t, c in self.received if t >= since]
+
+    def received_from(self, since):
+        with self.lock:
+            return [(t, c) for t, c in self.received if t >= since]
 
     def times(self, cmd, since=0.0):
         with self.lock:
@@ -135,7 +186,24 @@ class Fake(threading.Thread):
         self.target = target
         self.move_end = time.monotonic() + seconds
 
+    def restart(self, cause, resume):
+        """The board restarts, the port open: `x` reports the new cause and a time from 0, then the board resumes its
+        lens, `e` at y for resume seconds (PROTOCOL.md, lines `x` and `e`). Returns when it restarted."""
+        with self.lock:
+            self.reset = cause
+            self.boot = time.monotonic()
+            self.start_move(self.pos, resume)
+            return self.boot
+
     def answer(self, cmd):
+        if self.flow is not None:
+            return None
+        if self.endless_on is not None and self.endless_on[0] == cmd:
+            _, chunks, period = self.endless_on
+            self.endless_on = None
+            self.endless_from = self.received[-1][0]
+            self.endless(chunks, period)
+            return None
         prefix = []
         if self.stale_rest is not None and cmd == "e":
             prefix.append(self.stale_rest)
@@ -198,7 +266,7 @@ class Fake(threading.Thread):
             target = self.pos + n if m.group(1) == "+" else self.pos - n if m.group(1) == "-" else n
             if not self.limits[0] <= target <= self.limits[1]:
                 return "er range limits"
-            self.start_move(target)
+            self.start_move(target, self.move_seconds)
             return "ok"
         return None
 
@@ -258,6 +326,11 @@ class Fake(threading.Thread):
             return self.name if self.lens else "er nolens"
         if cmd == "z":
             return self.climate
+        if cmd == "x":
+            if self.restarts:
+                self.reset, ms = self.restarts.pop(0)
+                self.boot = time.monotonic() - ms / 1000
+            return "%s %d" % (self.reset, int((time.monotonic() - self.boot) * 1000))
         return "er nocap"
 
 
@@ -272,6 +345,7 @@ class Driver:
         self.lock = threading.Lock()
         self.props = {}
         self.messages = []
+        self.message_times = []     # when each message was read, from the driver's standard output
         self.updates = []
         threading.Thread(target=self.read, daemon=True).start()
         self.send("<getProperties version='1.7'/>")
@@ -318,6 +392,7 @@ class Driver:
         tag = elem.tag
         if elem.get("message"):
             self.messages.append(elem.get("message"))
+            self.message_times.append(time.monotonic())
         if tag == "message":
             return
         if tag == "delProperty":
@@ -334,6 +409,8 @@ class Driver:
             p["defined"] = True
         if elem.get("state"):
             p["state"] = elem.get("state")
+        if elem.get("perm"):
+            p["perm"] = elem.get("perm")
         for child in elem:
             value = self.text(child)
             if "Number" in tag:
@@ -357,7 +434,7 @@ class Driver:
     def prop(self, name):
         with self.lock:
             p = self.props.get(name)
-            return None if p is None else {"defined": p["defined"], "state": p.get("state"),
+            return None if p is None else {"defined": p["defined"], "state": p.get("state"), "perm": p.get("perm"),
                                            "values": dict(p["values"]), "attrs": dict(p["attrs"])}
 
     def defined(self, name):
@@ -379,6 +456,12 @@ class Driver:
     def mark(self):
         with self.lock:
             return len(self.messages)
+
+    def read_errors(self, since_index=0):
+        """The `Serial read error` messages since since_index, each with the time it was read: (time, message)."""
+        with self.lock:
+            return [(t, x) for t, x in zip(self.message_times[since_index:], self.messages[since_index:])
+                    if "Serial read error" in x]
 
     def wait(self, what, cond, timeout=10.0):
         end = time.monotonic() + timeout
@@ -473,7 +556,7 @@ def pf_connect_versions(s):
 
 def pf_driver_version(s):
     """The version the driver declares (DRIVER_INFO, from setVersion): upstream's 1.1, 1.2 after the fixes series
-    (patch 0008), still 1.2 after the extended set, which doesn't change it (the human's decision, ticket #648)."""
+    (patch 0009), still 1.2 after the extended set, which doesn't change it (the human's decision, ticket #648)."""
     want = {"upstream": "1.1", "fixes": "1.2", "final": "1.2"}[s.kind]
     s.drv.wait("DRIVER_INFO", lambda: s.drv.value("DRIVER_INFO", "DRIVER_VERSION") is not None)
     got = s.drv.value("DRIVER_INFO", "DRIVER_VERSION")
@@ -612,7 +695,7 @@ def pf_log_once(s):
 
 
 def pf_stale_line(s):
-    """fix 7: a late reply partly received before a command: its rest is not that command's reply."""
+    """fix 8: a late reply partly received before a command: its rest is not that command's reply."""
     fake = s.connect()
     with fake.lock:
         fake.stale = ("a", b"LATE-PA", b"RT\n")
@@ -621,6 +704,48 @@ def pf_stale_line(s):
     # and the refresh goes on with `f`
     cmds = fake.commands()[fake.stale_hit:fake.stale_hit + 2]
     check(cmds == ["e", "f"], "the command after the stale bytes, and the next one: %s" % cmds)
+
+
+def bounded_errors(s, fake, m, count):
+    """The command that started the endless input and the count - 1 after it each fail, their error logged within
+    BOUND of the fake receiving them. Each failed command logs one `Serial read error` (sendCommand), in order: the
+    i-th error since the mark m is the i-th command's."""
+    t0 = fake.endless_from
+    for i in range(count):
+        s.drv.wait("command %d after the endless input began" % (i + 1), lambda: len(fake.received_from(t0)) > i, 10)
+        tc, cmd = fake.received_from(t0)[i]
+        s.drv.wait("the error of command %d (`%s`) within %.1f s" % (i + 1, cmd, BOUND),
+                   lambda: len(s.drv.read_errors(m)) > i, max(0.0, tc + BOUND - time.monotonic()))
+        te = s.drv.read_errors(m)[i][0]
+        check(te - tc <= BOUND, "the error of command %d (`%s`) %.2f s after it" % (i + 1, cmd, te - tc))
+
+
+def endless_then_back(s, fake, chunks, period, count):
+    """After an `e`, the controller sends chunks for ever and answers nothing: the `e` and the commands after it fail
+    within the bound (bounded_errors); once it stops, the refreshes go on: an `e` answered, then `f`."""
+    m = s.drv.mark()
+    with fake.lock:
+        fake.endless_on = ("e", chunks, period)
+    s.drv.wait("the endless input started", lambda: fake.endless_from is not None, 5)
+    bounded_errors(s, fake, m, count)
+    t1 = time.monotonic()
+    fake.end_endless()
+    s.drv.wait("the refreshes back: `f` sent", lambda: "f" in fake.commands(t1), 15)
+
+
+def pf_endless_line(s):
+    """A controller that sends bytes without a line end, fast and for ever: each command fails within the bound, and
+    the driver goes on. Upstream bounds the reply in bytes (CEF_BUF), not in time, and a fast flow overflows it at once;
+    the rest of a stale line (fix 8) and the stale input must be bounded too: this is the check of both."""
+    fake = s.connect()
+    endless_then_back(s, fake, FLOOD, 0.005, 3)
+
+
+def pf_slow_line(s):
+    """fix 7: a controller that sends a byte every 1.5 s without a line end, under the 3 s upstream waits for each byte
+    and over CEF_TIMEOUT in all: each command fails within the bound."""
+    fake = s.connect()
+    endless_then_back(s, fake, [b"7"], 1.5, 2)
 
 
 def pf_calibrate(s):
@@ -675,7 +800,9 @@ PINEFEAT = [
     (pf_cadence, "4", "consecutive `e` 0.0"),
     (pf_busy_ends, "5", "timed out waiting for Alert after the move"),
     (pf_log_once, "6", "error logged"),
-    (pf_stale_line, "7", "and the next one: ['e', 'e']"),
+    (pf_slow_line, "7", "timed out waiting for the error of command 1 (`e`)"),
+    (pf_stale_line, "8", "and the next one: ['e', 'e']"),
+    (pf_endless_line, None, ""),
 ]
 
 
@@ -900,6 +1027,185 @@ def bs_read_back(s):
                and s.drv.value("LENS_INFO", "LENS_NAME") == "", 4)
 
 
+def bs_climate_moving(s):
+    """`z` read while the focuser moves too: during a move of 10 s (`e` at y), a new value of `z` is published within
+    2 s of the board reporting it, and `-` deletes the properties within 2 s, as when still; the move ends Ok."""
+    fake = bs_connect(s)
+    with fake.lock:
+        fake.move_seconds = 10.0
+    t0 = time.monotonic()
+    s.goto(20000)
+    s.drv.wait("the move started", lambda: "f20000" in fake.commands(t0), 5)
+    climate = (("FOCUS_TEMPERATURE", "TEMPERATURE"), ("FOCUS_HUMIDITY", "HUMIDITY"), ("FOCUS_DEW_POINT", "DEW_POINT"))
+    for value, want in (("18.25 61.40 10.72", (18.25, 61.4, 10.72)), ("-", (None, None, None))):
+        with fake.lock:
+            fake.climate = value
+            tc = time.monotonic()
+        def seen():
+            return all(not s.drv.defined(p) if w is None else s.drv.defined(p) and s.drv.value(p, e) == w
+                       for (p, e), w in zip(climate, want))
+        s.drv.wait("z %r published within 2 s, while it moves" % value, seen, max(0.0, tc + 2.0 - time.monotonic()))
+        check(time.monotonic() < fake.move_end and s.drv.state("ABS_FOCUS_POSITION") == "Busy",
+              "z %r published after the move" % value)
+    s.wait_still(timeout=15)
+    check(s.drv.state("ABS_FOCUS_POSITION") == "Ok" and s.drv.value("ABS_FOCUS_POSITION", "FOCUS_ABSOLUTE_POSITION")
+          == 20000, "the move's end: %s" % s.drv.prop("ABS_FOCUS_POSITION"))
+
+
+# The warning of each cause that is not normal, written by hand (PROTOCOL.md, line `x`; the brief of ticket #694)
+RESTART_WARNINGS = {"panic": "The board restarted: its firmware crashed (panic).",
+                    "int_wdt": "The board restarted: its interrupt watchdog fired (int_wdt).",
+                    "task_wdt": "The board restarted: its task watchdog fired (task_wdt).",
+                    "wdt": "The board restarted: a hardware watchdog fired (wdt).",
+                    "brownout": "The board restarted: its supply voltage dropped (brownout).",
+                    "unknown": "The board restarted: its cause is unknown (unknown)."}
+RESTART_NORMAL = ("poweron", "sw", "usb", "jtag")
+
+
+def restart_warnings(s, since_index=0):
+    """The warnings about a restart of the board since since_index, each with the time it was read: (time, message)."""
+    with s.drv.lock:
+        return [(t, x) for t, x in zip(s.drv.message_times[since_index:], s.drv.messages[since_index:])
+                if "[WARNING]" in x and "The board restarted" in x]
+
+
+def bs_restart_causes(s):
+    """At the connection, BOARD_RESTART is the cause `x` reports, each of the ten of PROTOCOL.md; a cause that is not
+    normal is logged as a warning that names it, Alert; poweron, sw, usb and jtag are not, Ok. BOARD_RESTART is read
+    only, and the cause is read by `x`, never by `DEBUG` (PROTOCOL.md § 3: not for a driver)."""
+    for cause in list(RESTART_WARNINGS) + list(RESTART_NORMAL):
+        m = s.drv.mark()
+        fake = bs_connect(s, before=lambda f: setattr(f, "reset", cause))
+        check("x" in fake.commands(), "%s: x not sent at the connection" % cause)
+        check(not [c for c in fake.commands() if c.upper().startswith("DEBUG")], "%s: DEBUG sent" % cause)
+        check(s.drv.prop("BOARD_RESTART")["perm"] == "ro", "BOARD_RESTART perm %r" % s.drv.prop("BOARD_RESTART")["perm"])
+        s.drv.wait("BOARD_RESTART %s" % cause, lambda: s.drv.value("BOARD_RESTART", "CAUSE") == cause, 3)
+        if cause in RESTART_WARNINGS:
+            s.drv.wait("the warning of %s" % cause, lambda: restart_warnings(s, m), 3)
+            got = [x for _, x in restart_warnings(s, m)]
+            check(len(got) == 1 and got[0].endswith(RESTART_WARNINGS[cause]), "%s: warned %s" % (cause, got))
+            check(s.drv.state("BOARD_RESTART") == "Alert", "%s: %s" % (cause, s.drv.state("BOARD_RESTART")))
+        else:
+            s.barrier()
+            check(not restart_warnings(s, m), "%s: warned %s" % (cause, restart_warnings(s, m)))
+            check(s.drv.state("BOARD_RESTART") == "Ok", "%s: %s" % (cause, s.drv.state("BOARD_RESTART")))
+
+
+def bs_reconnect(s):
+    """A connection again to a board that has not restarted since the last one, still `panic`, its time grown (Ekos
+    reconnecting): each connection reports it, a warning each time and BOARD_RESTART at panic, Alert, though the
+    cause is the one the last connection read and the time did not go back (Handshake: restartKnown reset)."""
+    boot = time.monotonic()
+    for n in (1, 2):
+        m = s.drv.mark()
+        bs_connect(s, before=lambda f: (setattr(f, "reset", "panic"), setattr(f, "boot", boot - 3600 * n)))
+        s.drv.wait("the warning of connection %d" % n, lambda: restart_warnings(s, m), 3)
+        got = [x for _, x in restart_warnings(s, m)]
+        check(len(got) == 1 and got[0].endswith(RESTART_WARNINGS["panic"]), "connection %d: warned %s" % (n, got))
+        check(s.drv.value("BOARD_RESTART", "CAUSE") == "panic" and s.drv.state("BOARD_RESTART") == "Alert",
+              "connection %d: BOARD_RESTART %r %s" % (n, s.drv.value("BOARD_RESTART", "CAUSE"),
+                                                       s.drv.state("BOARD_RESTART")))
+
+
+def bs_restart_live(s):
+    """The board restarts while the driver stays connected, the port open, then resumes its lens (`e` at y for 4 s):
+    within 3 s of the restart, while it resumes, BOARD_RESTART is the new cause and the warning is logged, once for
+    that restart; a second restart of the same cause gives a second warning; seconds without a restart give none."""
+    m = s.drv.mark()
+    fake = bs_connect(s)
+    t0 = time.monotonic()
+    s.drv.wait("four `x` without a restart", lambda: len(fake.times("x", t0)) >= 4, 10)
+    s.barrier()
+    check(not restart_warnings(s, m), "warned without a restart: %s" % restart_warnings(s, m))
+    check(s.drv.value("BOARD_RESTART", "CAUSE") == "poweron", "BOARD_RESTART %r" % s.drv.value("BOARD_RESTART", "CAUSE"))
+    for n in (1, 2):
+        tr = fake.restart("task_wdt", 4.0)
+        s.drv.wait("warning %d within 3 s of restart %d" % (n, n), lambda: len(restart_warnings(s, m)) >= n,
+                   max(0.0, tr + 3.0 - time.monotonic()))
+        te, x = restart_warnings(s, m)[n - 1]
+        # under 3 s, while the resume of 4 s goes on: no `f` sent since the restart, the driver saw `e` at y only
+        check(te - tr < 3.0, "warning %d %.2f s after restart %d" % (n, te - tr, n))
+        check(not [t for t in fake.times("f", tr) if t < te], "warning %d after the resume ended" % n)
+        check(x.endswith(RESTART_WARNINGS["task_wdt"]), "warning %d: %s" % (n, x))
+        check(s.drv.value("BOARD_RESTART", "CAUSE") == "task_wdt" and s.drv.state("BOARD_RESTART") == "Alert",
+              "BOARD_RESTART %r %s" % (s.drv.value("BOARD_RESTART", "CAUSE"), s.drv.state("BOARD_RESTART")))
+        # the resume over, then seconds more: still one warning for this restart
+        s.drv.wait("the resume over", lambda: len(fake.times("f", tr)) >= 1, 10)
+        tf = time.monotonic()
+        s.drv.wait("three `x` after the resume", lambda: len(fake.times("x", tf)) >= 3, 10)
+        s.barrier()
+        check(len(restart_warnings(s, m)) == n, "%d warnings after %d restarts: %s"
+              % (len(restart_warnings(s, m)), n, restart_warnings(s, m)))
+    check(not [c for c in fake.commands() if c.upper().startswith("DEBUG")], "DEBUG sent")
+
+
+def bs_restart_close(s):
+    """Two restarts of the same cause a second apart: `x` reports `panic 300`, then, at the next read about a second
+    later, `panic 900`. Its time did not go back, yet it is less than it would be without a restart: BOARD_RESTART is
+    set again and the warning is logged, once for that restart."""
+    m = s.drv.mark()
+    fake = bs_connect(s)
+    t0 = time.monotonic()
+    s.drv.wait("an `x` while connected", lambda: fake.times("x", t0), 5)
+    with fake.lock:
+        fake.restarts = [("panic", 300), ("panic", 900)]
+        t1 = time.monotonic()
+    s.drv.wait("the two restarts read", lambda: len(fake.times("x", t1)) >= 2, 5)
+    xa, xb = fake.times("x", t1)[:2]
+    check(xb - xa < 1.5, "the two `x` %.2f s apart" % (xb - xa))
+    s.drv.wait("the warning of the second restart", lambda: len(restart_warnings(s, m)) >= 2, 3)
+    with s.drv.lock:
+        updated = [t for t, name, _, _ in s.drv.updates if name == "BOARD_RESTART" and t > xb]
+    check(updated, "BOARD_RESTART not set again")
+    check(s.drv.value("BOARD_RESTART", "CAUSE") == "panic" and s.drv.state("BOARD_RESTART") == "Alert",
+          "BOARD_RESTART %r %s" % (s.drv.value("BOARD_RESTART", "CAUSE"), s.drv.state("BOARD_RESTART")))
+    t2 = time.monotonic()
+    s.drv.wait("three `x` more", lambda: len(fake.times("x", t2)) >= 3, 10)
+    s.barrier()
+    got = [x for _, x in restart_warnings(s, m)]
+    check(len(got) == 2 and all(x.endswith(RESTART_WARNINGS["panic"]) for x in got), "warned %s" % got)
+
+
+def bs_no_false_restart(s):
+    """A board that does not restart, its last restart a `panic` an hour ago, each reply delayed at random up to 0.4 s:
+    over 30 s connected and the `x` read meanwhile, one warning only, the connection's."""
+    m = s.drv.mark()
+    def slow(fake):
+        fake.reset = "panic"
+        fake.boot = time.monotonic() - 3600
+        fake.delay = 0.4
+    fake = bs_connect(s, before=slow)
+    s.drv.wait("the warning of the connection", lambda: restart_warnings(s, m), 5)
+    t0 = time.monotonic()
+    while time.monotonic() < t0 + 30:
+        time.sleep(0.5)
+        check(len(restart_warnings(s, m)) == 1, "warned without a restart: %s" % restart_warnings(s, m))
+    s.barrier()
+    n = len(fake.times("x", t0))
+    check(n >= 5, "%d `x` in 30 s" % n)
+    check(len(restart_warnings(s, m)) == 1, "warned without a restart: %s" % restart_warnings(s, m))
+
+
+def bs_endless_lines(s):
+    """The lines the extended set skips, without end: at `v`, lines that are not a version, for ever; after `e`, a
+    line of the log (`* …`) that never ends. Each command fails within the bound: the board is not detected, then a
+    board that answers is, and its refreshes go on once the endless line stops."""
+    s.disconnect()
+    s.fake = Fake(True, "1.3")
+    with s.fake.lock:
+        s.fake.endless_on = ("v", ROM_LINES, 0.01)
+    s.drv.new("Text", "DEVICE_PORT", {"PORT": s.fake.port})
+    s.drv.wait("DEVICE_PORT set", lambda: s.drv.value("DEVICE_PORT", "PORT") == s.fake.port)
+    m = s.drv.mark()
+    s.drv.new("Switch", "CONNECTION", {"CONNECT": "On", "DISCONNECT": "Off"})
+    s.drv.wait("the endless lines started", lambda: s.fake.endless_from is not None, 5)
+    bounded_errors(s, s.fake, m, 3)
+    s.drv.wait("the board not detected", lambda: any("Can't detect the controller" in x for x in s.drv.logged(m)), 10)
+    check(s.drv.value("CONNECTION", "CONNECT") != "On", "connected")
+    fake = bs_connect(s)
+    endless_then_back(s, fake, [b"* rx 05 len=65 ring=focus "] + FLOOD * 8, 0.005, 3)
+
+
 def bs_back_to_pinefeat(s):
     """After the board, a Pinefeat controller on the same driver: no extended set, the range of upstream."""
     bs_connect(s)
@@ -914,6 +1220,9 @@ def bs_back_to_pinefeat(s):
 
 BASILISK = [(bs_restart, None, ""), (bs_bounds, None, ""), (bs_moves, None, ""), (bs_relative, None, ""),
             (bs_unreadable_ends, None, ""), (bs_led_config, None, ""), (bs_mark_led_reboot, None, ""), (bs_read_back, None, ""),
+            (bs_climate_moving, None, ""), (bs_restart_causes, None, ""), (bs_reconnect, None, ""),
+            (bs_restart_live, None, ""), (bs_restart_close, None, ""), (bs_no_false_restart, None, ""),
+            (bs_endless_lines, None, ""),
             (bs_back_to_pinefeat, None, "")]
 
 
@@ -946,6 +1255,8 @@ def main():
                     except Failure:
                         pass
                     s.drv.close()
+                    if s.fake is not None:
+                        s.fake.close()
             label = "%-28s %s" % (fn.__name__, "(fix %s)" % fix if fix else "")
             if expect_fail:
                 # The defect the fix names, not any failure: the check's failure carries its symptom

@@ -4,8 +4,8 @@
  * STATUS: actif — joué par 4_Firmware/run.sh (job `firmware` de la CI), chaque vérification tenue par une mutation
  *
  * Le journal seul : éteint au démarrage, LOG ON / ALL / OFF, la forme des lignes, les périodiques tus sous LOG ON, les
- * morceaux de 64 octets, le plafond de 30 lignes/s et `* rxflood`, l'anneau de 8 Ko, LOG OFF, `dropped`, la forme
- * différence de LOG ALL et `* lost <n>`. Contre de vraies trames (un goto du faux 135) : sim/test/test_host135.c.
+ * morceaux de 64 octets, le plafond de 30 lignes/s et `* rxflood`, les transitions hors de lui sous leur propre compte,
+ * l'anneau de 8 Ko, LOG OFF, `dropped`, la forme différence de LOG ALL et `* lost <n>`. Contre de vraies trames (un goto du faux 135) : sim/test/test_host135.c.
  *
  * Les octets attendus d'une trame sont écrits à la main, d'après la règle du codec (bsk_phy.h : F0, longueur
  * sur deux octets, classe, séquence, message, somme des octets 1 à longueur − 4, 55) : ils ne sont pas
@@ -25,9 +25,17 @@
 
 static int checks, fails;
 
+/* La garde de durée, en secondes : 10 ; la passe sous sanitizers de 4_Firmware/run.sh et les mutants en -O0
+ * (sim/test/mutants.sh) la relèvent (-DGARDE_S). */
+#ifndef GARDE_S
+#define GARDE_S 10
+#endif
+#define TEXTE_(x) #x
+#define TEXTE(x) TEXTE_(x)
+
 static void too_long(int sig)
 {
-    static const char m[] = "  ECHEC : le programme ne termine pas en 10 s (boucle sans fin)\n";
+    static const char m[] = "  ECHEC : le programme ne termine pas en " TEXTE(GARDE_S) " s (boucle sans fin)\n";
     (void)sig;
     (void)!write(1, m, sizeof m - 1);
     _exit(1);
@@ -52,13 +60,13 @@ static const bsk_phy_raw_t NONE;
 
 /* Les lignes sorties de l'anneau depuis le dernier appel, une par entrée. */
 static char out[400][400];
-static uint8_t out_gen[400];
+static uint32_t out_gen[400];
 static size_t n_out;
 
 static size_t drain(void)
 {
     char b[sizeof out[0]];
-    uint8_t g;
+    uint32_t g;
     size_t n;
     n_out = 0;
     while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
@@ -105,8 +113,8 @@ static void t_off_by_default(void)
     bsk_journal_body08(0x02, true);
     bsk_journal_btn(BSK_BTN_SHORT, BSK_BTN_OK, NULL);
     bsk_journal_mark(BSK_MARK_CLEAR, "01030800bf087", NULL);
-    bsk_journal_restore(&(bsk_mark_t){20000, BSK_APPROACH_UNKNOWN}, 200, 20200);
-    bsk_journal_restore_skip("nomark", NULL);
+    bsk_journal_restore(&(bsk_mark_t){20000, BSK_APPROACH_UNKNOWN}, false, 200, 20200);
+    bsk_journal_restore_skip("nomark", false, NULL);
     bsk_journal_restore_end("arrived");
     bsk_journal_xdetect(false, clk);
     bsk_journal_xdetect_bounce(clk);
@@ -179,8 +187,9 @@ static void t_lines(void)
     bsk_journal_mark(BSK_MARK_SET, "0107258005018", &(bsk_mark_t){0, BSK_APPROACH_UNKNOWN});
     bsk_journal_mark(BSK_MARK_CLEAR, "01030800bf087", NULL);
     bsk_journal_mark(BSK_MARK_STORE_ER, "01030800bf087", NULL);
+    bsk_journal_mark(BSK_MARK_LOAD_ER, "01030800bf087", NULL);
     drain();
-    CHECK(n_out == 9, "neuf lignes (%zu)", n_out);
+    CHECK(n_out == 10, "dix lignes (%zu)", n_out);
     CHECK(!strcmp(out[0], "* btn 123456 press=short result=ok"), "le bouton : « %s »", out[0]);
     CHECK(!strcmp(out[1], "* btn 123456 press=long result=er why=limit"), "« %s »", out[1]);
     CHECK(!strcmp(out[2], "* btn 123456 press=held result=ignore"), "« %s »", out[2]);
@@ -190,15 +199,19 @@ static void t_lines(void)
     CHECK(!strcmp(out[6], "* mark 123456 set key=0107258005018 pos=0 dir=unknown"), "« %s »", out[6]);
     CHECK(!strcmp(out[7], "* mark 123456 clear key=01030800bf087"), "« %s »", out[7]);
     CHECK(!strcmp(out[8], "* mark 123456 store=er key=01030800bf087"), "« %s »", out[8]);
+    CHECK(!strcmp(out[9], "* mark 123456 load=er key=01030800bf087"), "la lecture en erreur : « %s »", out[9]);
 
-    bsk_journal_restore(&(bsk_mark_t){20000, BSK_APPROACH_UNKNOWN}, 200, 20200);
-    bsk_journal_restore(&(bsk_mark_t){14400, BSK_APPROACH_INCREASING}, 63, -1);
-    bsk_journal_restore(&(bsk_mark_t){14400, BSK_APPROACH_DECREASING}, 1, 14401);
-    bsk_journal_restore_skip("timeout", NULL);
-    bsk_journal_restore_skip("limit", &(bsk_mark_t){13000, BSK_APPROACH_INCREASING});
+    bsk_journal_restore(&(bsk_mark_t){20000, BSK_APPROACH_UNKNOWN}, false, 200, 20200);
+    bsk_journal_restore(&(bsk_mark_t){14400, BSK_APPROACH_INCREASING}, false, 63, -1);
+    bsk_journal_restore(&(bsk_mark_t){14400, BSK_APPROACH_DECREASING}, false, 1, 14401);
+    bsk_journal_restore_skip("timeout", false, NULL);
+    bsk_journal_restore_skip("limit", false, &(bsk_mark_t){13000, BSK_APPROACH_INCREASING});
     bsk_journal_restore_end("stall");
+    bsk_journal_restore(&(bsk_mark_t){21000, BSK_APPROACH_DECREASING}, true, 200, -1);
+    bsk_journal_restore(&(bsk_mark_t){21000, BSK_APPROACH_INCREASING}, true, 200, 20800);
+    bsk_journal_restore_skip("limit", true, &(bsk_mark_t){31000, BSK_APPROACH_UNKNOWN});
     drain();
-    CHECK(n_out == 6, "six lignes (%zu)", n_out);
+    CHECK(n_out == 9, "neuf lignes (%zu)", n_out);
     CHECK(!strcmp(out[0], "* restore 123456 mark=20000 dir=unknown x=200 path=overshoot via=20200"),
           "l'entrée en RESTORING, avec dépassement : « %s »", out[0]);
     CHECK(!strcmp(out[1], "* restore 123456 mark=14400 dir=inc x=63 path=direct"), "... direct : « %s »", out[1]);
@@ -206,6 +219,9 @@ static void t_lines(void)
     CHECK(!strcmp(out[3], "* restore 123456 skip=timeout"), "sans RESTORING : « %s »", out[3]);
     CHECK(!strcmp(out[4], "* restore 123456 skip=limit mark=13000"), "... la marque hors des bornes : « %s »", out[4]);
     CHECK(!strcmp(out[5], "* restore 123456 end=stall"), "la sortie : « %s »", out[5]);
+    CHECK(!strcmp(out[6], "* restore 123456 pos=21000 dir=dec x=200 path=direct"), "la position de reprise : « %s »", out[6]);
+    CHECK(!strcmp(out[7], "* restore 123456 pos=21000 dir=inc x=200 path=overshoot via=20800"), "« %s »", out[7]);
+    CHECK(!strcmp(out[8], "* restore 123456 skip=limit pos=31000"), "... hors des bornes : « %s »", out[8]);
 
     bsk_journal_xdetect(false, 7655999);
     bsk_journal_xdetect(true, 7956000);
@@ -269,7 +285,7 @@ static void t_xdetect_cap(void)
     bsk_journal_set(true, false);
     d0 = bsk_journal_dropped();
     bsk_journal_xdetect(true, clk);
-    for (int i = 0; i < 31; i++) bsk_journal_session(SESSION_READY, E_OK);
+    for (int i = 0; i < 31; i++) bsk_journal_lens(62, 0x03);
     bsk_journal_xdetect(false, clk);
     drain();
     CHECK(n_out == 32 && !strncmp(out[0], "* xdetect ", 10) && !strncmp(out[31], "* xdetect ", 10),
@@ -288,9 +304,9 @@ static void t_gesture_cap(void)
     fresh();
     bsk_journal_set(true, false);
     d0 = bsk_journal_dropped();
-    bsk_journal_session(SESSION_READY, E_OK);                            /* la fenêtre ouverte */
+    bsk_journal_lens(62, 0x03);                                          /* la fenêtre ouverte */
     bsk_journal_gesture(4, 2, 4, 0);
-    for (int i = 0; i < 30; i++) bsk_journal_session(SESSION_READY, E_OK);
+    for (int i = 0; i < 30; i++) bsk_journal_lens(62, 0x03);
     bsk_journal_gesture(-1, 0, 1, 0);
     drain();
     CHECK(n_out == 32 && strstr(out[1], " gesture pulses=4 thirds=2 frames=4") &&
@@ -307,14 +323,59 @@ static void t_body08_cap(void)
     fresh();
     bsk_journal_set(true, false);
     d0 = bsk_journal_dropped();
-    bsk_journal_session(SESSION_IDENTIFYING, E_OK);                       /* la fenêtre ouverte */
+    bsk_journal_lens(62, 0x03);                                           /* la fenêtre ouverte */
     bsk_journal_body08(0x02, true);
-    for (int i = 0; i < 30; i++) bsk_journal_session(SESSION_IDENTIFYING, E_OK);
+    for (int i = 0; i < 30; i++) bsk_journal_lens(62, 0x03);
     bsk_journal_body08(0x00, false);
     drain();
     CHECK(n_out == 32 && strstr(out[1], " step=08 body_flags=02 samyang=yes") && strstr(out[31], " step=08 body_flags=00 samyang=no"),
           "une ligne, un 0x08, 30 lignes de plus, un 0x08 au-delà du plafond : 32 lignes (%zu)", n_out);
     CHECK(bsk_journal_dropped() == d0 + 1, "seule la 31e ligne du plafond est perdue, comptée");
+}
+
+/* Ticket #714 : `* session`, `* motion` et `* restore` hors du plafond, sans place dans sa fenêtre, sous leur propre compte
+ * de 30 par seconde. Les lignes de remplissage, `* lens`, sont sous le plafond. */
+static void t_transition_cap(void)
+{
+    static const bsk_mark_t mk = {20000, BSK_APPROACH_UNKNOWN};
+    uint32_t d0;
+    size_t k;
+    printf("transitions : hors du plafond de 30 lignes par seconde, 30 par seconde à part ; au-delà, perdues et comptées\n");
+    fresh();
+    bsk_journal_set(true, false);
+    d0 = bsk_journal_dropped();
+    bsk_journal_session(SESSION_POWERING, E_OK);                          /* la fenêtre ouverte par une transition */
+    for (int i = 0; i < 30; i++) bsk_journal_lens(62, 0x03);
+    bsk_journal_lens(62, 0x03);                                           /* la 31e du plafond */
+    bsk_journal_session(SESSION_RESTORING, E_OK);
+    bsk_journal_session(SESSION_FAULT, E_LOST);
+    bsk_journal_motion(MOTION_COMMANDED);
+    bsk_journal_restore(&mk, false, 200, -1);
+    bsk_journal_restore(&mk, false, 200, 20200);
+    bsk_journal_restore_skip("limit", false, &mk);
+    bsk_journal_restore_skip("nomark", false, NULL);
+    bsk_journal_restore_end("arrived");
+    drain();
+    CHECK(n_out == 39 && !strncmp(out[0], "* session ", 10) && !strncmp(out[30], "* lens ", 7) &&
+              bsk_journal_dropped() == d0 + 1,
+          "une transition, 30 lignes du plafond, toutes, la 31e perdue : la transition n'y a pas pris de place (%zu, %lu)", n_out,
+          (unsigned long)(bsk_journal_dropped() - d0));
+    for (k = 31; k < n_out && k < 39; k++)
+        CHECK(!strncmp(out[k], "* session ", 10) || !strncmp(out[k], "* motion ", 9) || !strncmp(out[k], "* restore ", 10),
+              "au plafond, chaque transition sort : « %s »", out[k]);
+
+    for (int i = 0; i < 21; i++) bsk_journal_motion(MOTION_MOVING);       /* 9 et 21 : les 30 de la fenêtre */
+    bsk_journal_motion(MOTION_ARRIVED);
+    bsk_journal_session(SESSION_READY, E_OK);
+    drain();
+    CHECK(n_out == 21 && bsk_journal_dropped() == d0 + 3, "la 31e et la 32e transition de la seconde : perdues, comptées (%zu, %lu)",
+          n_out, (unsigned long)(bsk_journal_dropped() - d0));
+    clk += 1000 * MS;
+    bsk_journal_session(SESSION_READY, E_OK);
+    drain();
+    CHECK(n_out == 1 && !strncmp(out[0], "* session ", 10) && bsk_journal_dropped() == d0 + 3,
+          "la seconde suivante : leur compte repart (%zu)", n_out);
+    bsk_journal_set(false, false);
 }
 
 static void t_periodic(void)
@@ -404,14 +465,14 @@ static void t_rate(void)
     CHECK(n_out == 2 && !strcmp(out[0], "* rxflood 11") && !strncmp(out[1], "* rx 50001000 ", 14),
           "la seconde suivante : « * rxflood 11 » (les trames reçues tues), puis la trame (%zu : « %s »)", n_out, out[0]);
     clk = base + 1000 * MS;
-    for (int i = 0; i < 28; i++) bsk_journal_session(SESSION_READY, E_OK);
+    for (int i = 0; i < 28; i++) bsk_journal_lens(62, 0x03);
     CHECK(drain() == 28, "rxflood et la trame comptent : 28 lignes de plus (%zu)", n_out);
-    bsk_journal_session(SESSION_READY, E_OK);
+    bsk_journal_lens(62, 0x03);
     CHECK(drain() == 0 && bsk_journal_dropped() - d0 == 13, "la 31e : perdue");
     clk = base + 2000 * MS;
     bsk_journal_rx(&big, clk);
     CHECK(drain() == 2, "fenêtre suivante, sans trame reçue tue : pas de rxflood, les deux morceaux (%zu)", n_out);
-    for (int i = 0; i < 27; i++) bsk_journal_motion(MOTION_MOVING);
+    for (int i = 0; i < 27; i++) bsk_journal_lens(62, 0x03);
     CHECK(drain() == 27, "27 lignes de plus : 29");
     d1 = bsk_journal_dropped();
     bsk_journal_rx(&big, clk);
@@ -422,7 +483,7 @@ static void t_rate(void)
     bsk_journal_error(E_FRAMING, &NONE, clk);
     CHECK(drain() == 0 && bsk_journal_dropped() - d1 == 3, "au plafond, une erreur de réception : perdue");
     clk = base + 3000 * MS;
-    bsk_journal_motion(MOTION_IDLE);
+    bsk_journal_lens(62, 0x03);
     drain();
     CHECK(n_out == 2 && !strcmp(out[0], "* rxflood 2"), "rxflood compte les réceptions tues, une par trame : la trame, l'erreur (« %s »)",
           out[0]);
@@ -505,20 +566,20 @@ static void t_rx_bytes(void)
     printf("les octets rejetés sous le plafond de 30 lignes par seconde : admis ensemble, comptés dans dropped et rxflood\n");
     bsk_journal_set(true, false);
     clk = (uint64_t)60000000 * MS;
-    for (int i = 0; i < 27; i++) bsk_journal_motion(MOTION_MOVING);
+    for (int i = 0; i < 27; i++) bsk_journal_lens(62, 0x03);
     r = raw(300, b, 256);
     bsk_journal_error(E_FRAMING, &r, clk);
     CHECK(drain() == 27 && bsk_journal_dropped() - d0 == 4, "à 27 lignes, quatre morceaux : perdus ensemble, quatre comptés (%zu, %lu)",
           n_out, (unsigned long)(bsk_journal_dropped() - d0));
-    bsk_journal_motion(MOTION_MOVING);
-    bsk_journal_motion(MOTION_MOVING);
-    bsk_journal_motion(MOTION_MOVING);
+    bsk_journal_lens(62, 0x03);
+    bsk_journal_lens(62, 0x03);
+    bsk_journal_lens(62, 0x03);
     CHECK(drain() == 3, "les trois lignes qui restent passent");
     clk += 1000 * MS;
-    bsk_journal_motion(MOTION_IDLE);
+    bsk_journal_lens(62, 0x03);
     drain();
     CHECK(n_out == 2 && !strcmp(out[0], "* rxflood 1"), "la seconde suivante : « * rxflood 1 », l'erreur tue (« %s »)", out[0]);
-    for (int i = 0; i < 24; i++) bsk_journal_motion(MOTION_MOVING);
+    for (int i = 0; i < 24; i++) bsk_journal_lens(62, 0x03);
     bsk_journal_error(E_FRAMING, &r, clk);
     CHECK(drain() == 28, "à 26 lignes, les quatre morceaux tiennent : 30 (%zu)", n_out);
 }
@@ -532,16 +593,16 @@ static void t_ring(void)
     fresh();
     bsk_journal_set(true, false);
     d0 = bsk_journal_dropped();
-    /* 20 s, 30 lignes par seconde, jamais vidé : 600 lignes. « * session <ms> recovering » à 8 chiffres fait
-     * 29 octets, 32 avec l'en-tête : 255 entrées tiennent dans 8191 octets et en laissent 31, assez pour la
-     * ligne mais pas pour son en-tête. */
-    clk = (uint64_t)20000000 * MS;
+    /* 20 s, 30 lignes par seconde, jamais vidé : 600 lignes. « * session <ms> powering » à 7 chiffres fait
+     * 26 octets, 32 avec l'en-tête (2 octets de longueur, 4 de génération) : 255 entrées tiennent dans 8191 octets et en
+     * laissent 31, assez pour la ligne mais pas pour son en-tête. */
+    clk = (uint64_t)2000000 * MS;
     for (int s = 0; s < 20; s++) {
         clk += 1000 * MS;
-        for (int i = 0; i < 30; i++) bsk_journal_session(SESSION_RECOVERING, E_OK);
+        for (int i = 0; i < 30; i++) bsk_journal_session(SESSION_POWERING, E_OK);
     }
     kept = drain();
-    CHECK(kept == 255 && strlen(out[0]) == 29, "l'anneau garde ce que tiennent 8 Ko : 8191 octets utiles, 3 d'en-tête par ligne (%zu)",
+    CHECK(kept == 255 && strlen(out[0]) == 26, "l'anneau garde ce que tiennent 8 Ko : 8191 octets utiles, 6 d'en-tête par ligne (%zu)",
           kept);
     CHECK(bsk_journal_dropped() - d0 == 600 - kept, "le reste compté (%lu)", (unsigned long)(bsk_journal_dropped() - d0));
     clk += 1000 * MS;
@@ -554,15 +615,16 @@ static void t_ring(void)
 /* L08-01 de l'audit : sous LOG ON, une trame en morceaux que l'anneau ne prend qu'en partie est dite, `* lost <n>` (ses
  * morceaux perdus), avant le morceau ou la ligne suivante qui tient ; perdue entière, rien n'est dit (comme une ligne
  * seule, t_ring) ; chaque morceau perdu compté dans dropped. L'anneau rempli à la main de lignes « * session <ms>
- * recovering » (ms à 8 chiffres : 29 octets, 32 avec l'en-tête), 30 par seconde : il en reste 8191 − 32 k octets. La trame :
- * un 0x08 de 72 octets de message, 80 octets, deux morceaux, de 64 octets (« * rx <ms> +0/80#<id> » et 192 octets, 215
- * environ avec l'en-tête) et de 16 (« * rx <ms> +64/80#<id> » et 48 octets, 72 environ), à quelques chiffres de <id> près :
- *   - k = 248, 255 octets libres : le premier tient, il en reste 40 environ, le second est perdu ; `* lost 1` devant la
+ * recovering » (ms à 8 chiffres : 29 octets, 35 avec l'en-tête de 6), 30 par seconde : il en reste 8191 − 35 k octets. La
+ * trame : un 0x08 de 72 octets de message, 80 octets, deux morceaux, de 64 octets (« * rx <ms> +0/80#<id> » et 192
+ * octets, 218 avec l'en-tête et les chiffres de <id>) et de 16 (« * rx <ms> +64/80#<id> » et 48 octets, 75 et ces
+ * chiffres) :
+ *   - k = 227, 246 octets libres : le premier tient, il en reste 25 environ, le second est perdu ; `* lost 1` devant la
  *     ligne suivante ;
- *   - k = 250, 191 octets libres : le premier est perdu, le second tient, `* lost 1` (11 octets) devant lui ;
- *   - k = 255, 31 octets libres : les deux perdus, rien n'est dit ;
- *   - sous LOG ALL, k = 248 : une perte dite une fois, pas deux (par put, et par hex_lines).
- * Le remplissage tient dans neuf fenêtres d'une seconde (lignes 0, 30… 240) ; la trame, dans la dixième, à <base> + 9000
+ *   - k = 229, 176 octets libres : le premier est perdu, le second tient, `* lost 1` (14 octets) devant lui ;
+ *   - k = 234, 1 octet libre : les deux perdus, rien n'est dit ;
+ *   - sous LOG ALL, k = 227 : une perte dite une fois, pas deux (par put, et par hex_lines).
+ * Le remplissage tient dans huit fenêtres d'une seconde (lignes 0, 30… 210) ; la trame, dans la neuvième, à <base> + 8000
  * ms. */
 static void fill(uint64_t base_ms, int k)
 {
@@ -584,12 +646,12 @@ static void t_on_partial(void)
     fresh();
     bsk_journal_set(true, false);
     d0 = bsk_journal_dropped();
-    fill(30000000, 248);
+    fill(30001000, 227);
     bsk_journal_rx(&f, clk);
     drain();
-    CHECK(n_out == 249 && !strncmp(out[248], "* rx 30009000 +0/80#", 20) && bsk_journal_dropped() - d0 == 1,
-          "255 octets libres : le premier morceau écrit, le second perdu, compté (%zu, « %.24s », %lu)", n_out,
-          n_out == 249 ? out[248] : "", (unsigned long)(bsk_journal_dropped() - d0));
+    CHECK(n_out == 228 && !strncmp(out[227], "* rx 30009000 +0/80#", 20) && bsk_journal_dropped() - d0 == 1,
+          "246 octets libres : le premier morceau écrit, le second perdu, compté (%zu, « %.24s », %lu)", n_out,
+          n_out == 228 ? out[227] : "", (unsigned long)(bsk_journal_dropped() - d0));
     bsk_journal_session(SESSION_READY, E_OK);
     drain();
     CHECK(n_out == 2 && !strcmp(out[0], "* lost 1") && !strcmp(out[1], "* session 30009000 ready"),
@@ -598,13 +660,13 @@ static void t_on_partial(void)
     fresh();
     bsk_journal_set(true, false);
     d0 = bsk_journal_dropped();
-    fill(31000000, 250);
+    fill(31001000, 229);
     bsk_journal_rx(&f, clk);
     drain();
-    CHECK(n_out == 252 && !strcmp(out[250], "* lost 1") && !strncmp(out[251], "* rx 31009000 +64/80#", 21) &&
+    CHECK(n_out == 231 && !strcmp(out[229], "* lost 1") && !strncmp(out[230], "* rx 31009000 +64/80#", 21) &&
               bsk_journal_dropped() - d0 == 1,
-          "191 octets libres : le premier perdu, compté, « * lost 1 » devant le second (%zu, « %s »)", n_out,
-          n_out == 252 ? out[250] : "");
+          "176 octets libres : le premier perdu, compté, « * lost 1 » devant le second (%zu, « %s »)", n_out,
+          n_out == 231 ? out[229] : "");
     bsk_journal_session(SESSION_READY, E_OK);
     drain();
     CHECK(n_out == 1 && !strcmp(out[0], "* session 31009000 ready"), "dit une fois (« %s »)", n_out ? out[0] : "");
@@ -612,10 +674,10 @@ static void t_on_partial(void)
     fresh();
     bsk_journal_set(true, false);
     d0 = bsk_journal_dropped();
-    fill(32000000, 255);
+    fill(32001000, 234);
     bsk_journal_rx(&f, clk);
     drain();
-    CHECK(n_out == 255 && bsk_journal_dropped() - d0 == 2, "31 octets libres : les deux perdus, comptés (%zu, %lu)", n_out,
+    CHECK(n_out == 234 && bsk_journal_dropped() - d0 == 2, "1 octet libre : les deux perdus, comptés (%zu, %lu)", n_out,
           (unsigned long)(bsk_journal_dropped() - d0));
     bsk_journal_session(SESSION_READY, E_OK);
     drain();
@@ -623,10 +685,11 @@ static void t_on_partial(void)
           n_out ? out[0] : "");
 
     /* LOG ALL : put() dit déjà chaque morceau perdu ; une erreur de réception de 80 octets rejetés passe par les morceaux
-     * (« * rx <ms> err=framing n=80 +0/80#<id> » et 192 octets, 235 environ avec l'en-tête : il en reste 20 environ). */
+     * (« * rx <ms> err=framing n=80 +0/80#<id> » et 192 octets, 238 avec l'en-tête et les chiffres de <id> : il en reste 5
+     * environ). */
     fresh();
     bsk_journal_set(true, true);
-    fill(33000000, 248);
+    fill(33001000, 227);
     {
         uint8_t b[80] = {0xF0};
         bsk_phy_raw_t r = {.n = 80, .len = 80};
@@ -634,8 +697,8 @@ static void t_on_partial(void)
         bsk_journal_error(E_FRAMING, &r, clk);
     }
     drain();
-    CHECK(n_out == 249 && !strncmp(out[248], "* rx 33009000 err=framing n=80 +0/80#", 37),
-          "LOG ALL, 255 octets libres : le premier morceau écrit, le second perdu (%zu)", n_out);
+    CHECK(n_out == 228 && !strncmp(out[227], "* rx 33009000 err=framing n=80 +0/80#", 37),
+          "LOG ALL, 246 octets libres : le premier morceau écrit, le second perdu (%zu)", n_out);
     bsk_journal_session(SESSION_READY, E_OK);
     drain();
     CHECK(n_out == 2 && !strcmp(out[0], "* lost 1"), "LOG ALL : « * lost 1 », dit une fois (« %s »)", n_out ? out[0] : "");
@@ -644,7 +707,7 @@ static void t_on_partial(void)
 
 static void t_gen(void)
 {
-    uint8_t g0;
+    uint32_t g0;
     printf("LOG OFF change la génération : la ligne d'avant porte l'ancienne\n");
     fresh();
     bsk_journal_set(true, false);
@@ -652,7 +715,7 @@ static void t_gen(void)
     bsk_journal_session(SESSION_READY, E_OK);
     bsk_journal_set(false, false);
     CHECK(!bsk_journal_on(), "LOG OFF : éteint");
-    CHECK(bsk_journal_gen() == (uint8_t)(g0 + 1), "génération suivante");
+    CHECK(bsk_journal_gen() == g0 + 1, "génération suivante");
     drain();
     CHECK(n_out == 1 && out_gen[0] == g0 && out_gen[0] != bsk_journal_gen(), "la ligne d'avant LOG OFF porte l'ancienne génération");
     bsk_journal_session(SESSION_READY, E_OK);
@@ -660,6 +723,29 @@ static void t_gen(void)
     bsk_journal_set(true, false);
     bsk_journal_session(SESSION_READY, E_OK);
     CHECK(drain() == 1 && out_gen[0] == bsk_journal_gen(), "rallumé : la génération courante");
+}
+
+/* La génération tient 2^32 LOG OFF (en tête de journal.c) : une ligne, et une perte dite sous LOG ALL, restées dans
+ * l'anneau pendant 256 LOG OFF, et 256 de plus, restent périmées ; sur 8 bits, la 256e les rendait courantes. */
+static void t_gen_wide(void)
+{
+    uint32_t g0;
+    printf("LOG OFF 256 fois, puis 512 : la ligne et la perte d'avant restent périmées\n");
+    for (unsigned off = 256; off <= 512; off += 256) {
+        fresh();
+        bsk_journal_set(true, true);
+        g0 = bsk_journal_gen();
+        bsk_journal_lost();
+        bsk_journal_session(SESSION_READY, E_OK);
+        for (unsigned i = 0; i < off; i++) bsk_journal_set(false, false);
+        CHECK(bsk_journal_gen() == g0 + off, "%u LOG OFF : la génération avancée de %u", off, off);
+        drain();
+        CHECK(n_out == 2 && !strcmp(out[0], "* lost 1") && out_gen[0] == g0 && out_gen[0] != bsk_journal_gen(),
+              "%u LOG OFF : la perte porte l'ancienne génération, pas la courante (%zu : « %s »)", off, n_out,
+              n_out ? out[0] : "");
+        CHECK(n_out == 2 && !strncmp(out[1], "* session ", 10) && out_gen[1] == g0 && out_gen[1] != bsk_journal_gen(),
+              "%u LOG OFF : la ligne porte l'ancienne génération, pas la courante (« %s »)", off, n_out > 1 ? out[1] : "");
+    }
 }
 
 /* ─────────────────────────── LOG ALL : la forme différence ─────────────────────────── */
@@ -836,7 +922,7 @@ static void t_all_cap(void)
         bsk_frame_t f = fr(1, (uint8_t)i, S03, sizeof S03);
         bsk_journal_tx(&f);
         if (i == 150)
-            for (int k = 0; k < 31; k++) bsk_journal_session(SESSION_READY, E_OK);
+            for (int k = 0; k < 31; k++) bsk_journal_lens(62, 0x03);
     }
     drain();
     CHECK(n_out == 330 && bsk_journal_dropped() == d0 + 1, "300 trames et 30 lignes d'événements, seule la 31e tue (%zu, %lu)",
@@ -848,7 +934,7 @@ static void t_all_cap(void)
 static void t_all_ring(void)
 {
     uint32_t d0, lost;
-    uint8_t g0;
+    uint32_t g0;
     printf("LOG ALL, l'anneau plein : « * lost <n> » à la place des lignes perdues, puis entière\n");
     fresh();
     bsk_journal_set(true, true);
@@ -861,7 +947,7 @@ static void t_all_ring(void)
     lost = bsk_journal_dropped() - d0;
     {                                                        /* une ligne de place : la trame tient, pas avec son repère */
         char one[400];
-        uint8_t g;
+        uint32_t g;
         bsk_frame_t f = fr(2, 0, M07, sizeof M07);
         CHECK(bsk_journal_take(one, sizeof one, &g) == 43, "une ligne de 43 octets retirée");
         bsk_journal_tx(&f);
@@ -901,7 +987,7 @@ static void t_names(void)
         {E_OK, "ok"},           {E_TIMEOUT, "timeout"},     {E_FRAMING, "framing"},   {E_REJECTED, "rejected"},
         {E_BUS, "bus"},         {E_STALL, "stall"},         {E_LIMIT, "limit"},       {E_HOME_FAILED, "home_failed"},
         {E_IDENTITY, "identity"}, {E_FORBIDDEN, "forbidden"}, {E_BUSY, "busy"},     {E_LOST, "lost"},
-        {E_ABORTED, "aborted"}, {E_NOCAP, "nocap"},
+        {E_ABORTED, "aborted"}, {E_NOCAP, "nocap"}, {E_STORE, "store"}, {E_DESYNC, "desync"},
     };
     printf("les noms : états en minuscules, jetons = nom de l'erreur sans E_ (spec § 4.5.1, § 4.5.3)\n");
     for (size_t i = 0; i < 8; i++) CHECK(!strcmp(bsk_state_name((uint8_t)i), st[i]), "état %zu : %s", i, bsk_state_name((uint8_t)i));
@@ -912,7 +998,7 @@ static void t_names(void)
 int main(void)
 {
     signal(SIGALRM, too_long);
-    alarm(10);
+    alarm(GARDE_S);
     bsk_journal_init(clock_us);
     t_off_by_default();
     t_lines();
@@ -922,9 +1008,11 @@ int main(void)
     t_xdetect_cap();
     t_gesture_cap();
     t_body08_cap();
+    t_transition_cap();
     t_rx_bytes();
     t_ring();
     t_gen();
+    t_gen_wide();
     t_all_form();
     t_all_unknown();
     t_all_cap();

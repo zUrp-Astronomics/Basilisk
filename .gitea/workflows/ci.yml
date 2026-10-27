@@ -7,18 +7,18 @@ name: CI
 # Quatre jobs, et plus aucun placeholder. Chaque étape appelle le script d'entrée d'un composant, qui
 # vit dans ce composant et résout ses chemins depuis sa propre place : la CI ne connaît de l'arbre que
 # le nom de ces scripts.
-#   - `test`  : les tests de la page de banc (5_App/run.sh — la première commande de `## Test` du
-#               CLAUDE.md) : test_app_vm.cjs, test_app.js ; puis le test de l'outil tool_station
-#               (5_App/tool_station/run.sh) ;
+#   - `test`  : les trois copies d'apt_update comparées (.gitea/garde_apt_update.sh), puis les tests de la
+#               page de banc (5_App/run.sh — la première commande de `## Test` du CLAUDE.md) :
+#               test_app_vm.cjs, test_app.js ; puis le test de l'outil tool_station (5_App/tool_station/run.sh) ;
 #   - `indi`  : le driver INDI 6_Driver/indi/ compilé ET lié par son CMakeLists.txt (6_Driver/indi/build.sh),
 #               puis ce que démontre 6_Driver/indi/test.sh : l'amont et ses deux séries de patchs, le style
 #               d'indilib, les trois états joués contre un faux contrôleur Pinefeat et une fausse carte Basilisk ;
 #               contre la libindi-dev 2 du PPA d'INDI, sur Ubuntu 26.04 ;
 #   - `firmware` : le firmware : ses en-têtes partagés compilés, le faux
 #               Samyang AF 135 compilé, ses tests de comportements et de pannes, son rejeu contre
-#               les traces de l'objectif (4_Firmware/run.sh) ;
+#               les traces de l'objectif, puis l'outillage de release (4_Firmware/run.sh) ;
 #   - `firmware-build` : le firmware construit par ESP-IDF 5.3.2 pour sa cible, esp32c3 (la carte
-#               v1.0), console muette vérifiée sur le build (4_Firmware/build.sh).
+#               v1.0), console muette vérifiée sur le build, flash_args hors de la NVS (4_Firmware/build.sh).
 #
 # ⚠ LE WORKFLOW S'APPELLE `CI` ET DOIT LE RESTER. Gitea compose le contexte d'un statut ainsi :
 # `<workflow> / <job> (<déclencheur>)` → `CI / test (push)`, `CI / firmware-build (pull_request)`…
@@ -61,6 +61,9 @@ jobs:
             /opt/pw-browsers
             node_modules
           key: playwright-${{ hashFiles('package.json') }}
+      # apt_update vit en trois copies (setup_host.sh, et en ligne dans `indi` et `firmware`) : une dérive rougit ici.
+      - name: apt_update identique dans ses trois copies (.gitea/garde_apt_update.sh)
+        run: bash .gitea/garde_apt_update.sh
       # gcc, le module playwright (node_modules/ à la racine) et Chromium sous /opt/pw-browsers —
       # hors de $HOME, pour que la sonde les trouve aussi sous `env -i` avec un HOME vierge.
       - name: Outillage (gcc, Playwright, Chromium)
@@ -96,7 +99,21 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update -qq
+          # apt_update : la fonction de .gitea/setup_host.sh, au caractère près (voir là-bas son repli sur
+          # l'instantané de l'archive, et pourquoi) ; en ligne parce qu'apt vient ici avant git.
+          apt_update() {
+              apt-get update -qq && return
+              local veille
+              veille=$(date -u -d '1 day ago' +%Y%m%dT%H%M%SZ)
+              echo "apt-get update : miroir de l'image en échec, sources Ubuntu sur l'instantané $veille" >&2
+              printf '%s\n' 'Types: deb' "URIs: https://snapshot.ubuntu.com/ubuntu/$veille/" \
+                  "Suites: $(. /etc/os-release && echo "$VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-security")" \
+                  'Components: main restricted universe multiverse' \
+                  'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' > /etc/apt/sources.list.d/ubuntu.sources
+              echo 'Acquire::https::snapshot.ubuntu.com::Verify-Peer "false";' > /etc/apt/apt.conf.d/99instantane
+              apt-get update -qq
+          }
+          apt_update
           apt-get install -y -qq --no-install-recommends ca-certificates curl gpg git cmake make g++ pkg-config \
             astyle python3 >/dev/null
           empreinte=F81D4F8C16975C8882D7B38333E72D44A5F2E962
@@ -106,7 +123,7 @@ jobs:
           gpg --dearmor < /tmp/indi-ppa.asc > /usr/share/keyrings/indi-ppa.gpg
           printf '%s\n' 'Types: deb' 'URIs: https://ppa.launchpadcontent.net/mutlaqja/ppa/ubuntu' 'Suites: resolute' \
             'Components: main' 'Signed-By: /usr/share/keyrings/indi-ppa.gpg' > /etc/apt/sources.list.d/indi-ppa.sources
-          apt-get update -qq
+          apt_update
           apt-get install -y -qq --no-install-recommends libindi-dev >/dev/null
           echo "libindi $(dpkg-query -W -f='${Version}' libindi-dev), $(g++ --version | head -n 1), $(cmake --version | head -n 1), $(astyle --version)"
       # Clone manuel avec le jeton du job (pas d'`actions/checkout`, action JS node20 : ni cette image
@@ -142,7 +159,8 @@ jobs:
   # ── Firmware, build ESP-IDF ──
   # 4_Firmware/build.sh : le projet ESP-IDF de 4_Firmware/ (PHY réelle, bench_core, app_main), pour
   # sa cible, esp32c3, dans 4_Firmware/build/esp32c3, avec la même récupération du commit que le job
-  # `indi` ; il échoue si le build ne porte pas la console muette (journal et bootloader à 0). À chaque
+  # `indi` ; il échoue si le build ne porte pas la console muette (journal et bootloader à 0), ou si une entrée de
+  # flash_args écrit sur la partition nvs de la table du build (4_Firmware/garde_nvs.py). À chaque
   # run, PR comprises, il publie un artefact, `firmware-esp32c3` : le dossier build/esp32c3/artefact/ que
   # build.sh a rempli, à plat (les fichiers basilisk_FW-v<version>-esp32c3…, l'image unique -full.bin,
   # flash_args, flash.sh et flash.cmd).
@@ -200,7 +218,8 @@ jobs:
   # ── Firmware ──
   # 4_Firmware/run.sh : les en-têtes partagés du firmware compilés un par un, puis le faux
   # Samyang AF 135 compilé sans avertissement, ses tests (comportements de la référence, pannes
-  # reçues et émises) et son rejeu contre les traces de l'objectif. gcc seul suffit.
+  # reçues et émises) et son rejeu contre les traces de l'objectif, puis l'outillage de release (garde de la NVS,
+  # manifeste). gcc et python3.
   # ⚠ IMAGE `ubuntu:24.04`, étiquette fixe : le compilateur jugé (gcc 13 de noble) ne change pas sans commit, et
   # -Werror ne rougit pas sur une montée d'image.
   # Ni node ni git dans l'image : git vient d'apt, puis le même clone manuel que le job `indi`.
@@ -211,13 +230,28 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Outillage (git, gcc)
+      - name: Outillage (git, gcc, python3)
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends ca-certificates git gcc libc6-dev >/dev/null
+          # apt_update : la fonction de .gitea/setup_host.sh, au caractère près (voir là-bas son repli sur
+          # l'instantané de l'archive, et pourquoi) ; en ligne parce qu'apt vient ici avant git.
+          apt_update() {
+              apt-get update -qq && return
+              local veille
+              veille=$(date -u -d '1 day ago' +%Y%m%dT%H%M%SZ)
+              echo "apt-get update : miroir de l'image en échec, sources Ubuntu sur l'instantané $veille" >&2
+              printf '%s\n' 'Types: deb' "URIs: https://snapshot.ubuntu.com/ubuntu/$veille/" \
+                  "Suites: $(. /etc/os-release && echo "$VERSION_CODENAME $VERSION_CODENAME-updates $VERSION_CODENAME-security")" \
+                  'Components: main restricted universe multiverse' \
+                  'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' > /etc/apt/sources.list.d/ubuntu.sources
+              echo 'Acquire::https::snapshot.ubuntu.com::Verify-Peer "false";' > /etc/apt/apt.conf.d/99instantane
+              apt-get update -qq
+          }
+          apt_update
+          apt-get install -y -qq --no-install-recommends ca-certificates git gcc libc6-dev python3 >/dev/null
           gcc --version | head -n 1
+          python3 --version
       # Même récupération que le job `indi` (voir là-bas pourquoi le jeton passe par un en-tête).
       - name: Récupérer le commit testé
         env:

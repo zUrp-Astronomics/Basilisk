@@ -1,77 +1,39 @@
 ---
-date: 2026-10-20
-last-revision: 2026-10-20 (ticket #661, the site's review: one voice, no dated text, links between tabs)
-status: active — the Assembly tab of the product page, read by the zUrp website
-referenced-by: 9_Assets/README.md
-derived-from: 2_Hardware/README.md, 3_3D-Models/README.md, README.md (§ Build), 1_Board/README.md
+date: 2026-10-26
+status: publication candidate
 ---
 
-## What you need
+## Les pièces sur l'établi
 
-- **The Basilisk board v1.0** — see *The board* below.
-- **The printed enclosure**: the core (top and bottom) and the USB surround, from
-  [`3_3D-Models/`](../../3_3D-Models/README.md).
-- **One half kit of Meike MK-S-AF3A.** The kit is a pair of 10 mm and 16 mm macro extension tubes: only the male
-  metal barrel, its screws and its latch are used.
-- **Three M2.5×12 screws**, for the camera (see *The camera screws*).
-- **A compatible camera** — the list is in the [Overview](overview.en.md) tab and in
-  [`2_Hardware/README.md`](../../2_Hardware/README.md).
-
-The bill of materials outside the board is [`2_Hardware/Basilisk_v1.0_BoM.csv`](../../2_Hardware/Basilisk_v1.0_BoM.csv);
-the board has its own, in [`1_Board/`](../../1_Board/README.md).
-
-## The board
-
-**The easy way — assembled by JLCPCB.** Send the Gerber, BoM and pick-and-place files from
-[`1_Board/`](../../1_Board/README.md) and order the board assembled, top side only. The ten lens contacts are single
-pogo pins (P1–P10), listed with the other top-side parts. The PCB options are in
-[`1_Board/Basilisk-v1.0_0-README.txt`](../../1_Board/Basilisk-v1.0_0-README.txt): 2 layers, 1.0 mm, 1 oz copper,
-black solder mask, white silkscreen, HASL RoHS.
-
-**The hard way — do it all yourself.** Everything is in [`1_Board/`](../../1_Board/README.md). Expect fine-pitch work:
-a QFN microcontroller, 0402 passives and tiny exposed-pad power parts.
-
-## Printing the enclosure
-
-| File | Parts |
+| Pièce | Source |
 |---|---|
-| [`Basilisk_v1.0_enclosure.3mf`](../../3_3D-Models/Basilisk_v1.0_enclosure.3mf) | the enclosure core: the top and the bottom |
-| [`Basilisk_v1.0_USB.3mf`](../../3_3D-Models/Basilisk_v1.0_USB.3mf) | the USB surround |
+| Carte Basilisk v1.0 et composants | [Dossier de fabrication](../../1_Board/README.md) |
+| Boîtier, parties haute et basse | [3MF du boîtier](../../3_3D-Models/Basilisk_v1.0_enclosure.3mf) |
+| Entourage USB | [3MF USB](../../3_3D-Models/Basilisk_v1.0_USB.3mf) |
+| Fût métallique mâle, vis et loquet | Un demi-kit de bagues Meike MK-S-AF3A 10/16 mm |
+| Fixation de la caméra | Trois vis M2.5×12 |
+| Caméra | Un modèle indiqué dans [La bête](overview.fr.md) |
 
-These two files are not yet checked on a final assembly. Their CAD source, all the parts in one STEP file, is
-[`2_Hardware/Basilisk_v1.0_enclosure.step`](../../2_Hardware/Basilisk_v1.0_enclosure.step).
+La [nomenclature mécanique](../../2_Hardware/Basilisk_v1.0_BoM.csv) est distincte de celle de la carte. L'[assemblage STEP](../../2_Hardware/Basilisk_v1.0_enclosure.step) contient les pièces du boîtier à adapter.
 
-### Materials
+## Commander la carte
 
-**Core (top and bottom)**
+Utiliser les Gerber, BoM et fichiers de placement du dossier de fabrication. Les paramètres sont **2 couches, épaisseur 1,0 mm, cuivre 1 oz, masque noir, sérigraphie blanche, HASL RoHS**. L'assemblage se fait sur la face supérieure uniquement. P1–P10 sont dix pogo pins individuels ; CN2 n'est pas monté comme connecteur séparé.
 
-- **PC-CF: validated.** Stable in temperature, strong and stiff; the material of our finished parts.
-- **PETG: should do the job**, slightly less durable.
-- **ABS, ASA: should hold**; we have not tried them.
-- **PLA: not to be used.**
+L'assemblage JLCPCB est la voie documentée. À la main, il faut souder un microcontrôleur QFN, des passifs 0402 et de petits composants de puissance à pad exposé.
 
-**USB surround**
+## Imprimer et ajuster
 
-- **Clear PETG: the chosen material**, to let the light of the LEDs through.
-- **Clear PLA: should be suitable**; we have not tried it, so we have no opinion.
+Pour les parties structurelles haute et basse, **le PC-CF est le matériau utilisé et validé sur les pièces du projet**. Le PETG est une alternative envisagée ; ABS et ASA n'ont pas été essayés. Ne pas utiliser de PLA pour ces pièces structurelles. L'entourage USB est en PETG transparent pour laisser voir la LED.
 
-The USB surround is not the most critical part.
+Vérifier l'ajustement du loquet avec votre matériau et votre imprimante : une reprise de quelques dixièmes de millimètre peut être nécessaire. Les trois vis M2.5×12 remplacent les M2.5×8 de la plaque avant de la caméra ; elles compensent la hauteur ajoutée et maintiennent des filets en prise.
 
-### Tolerances
+## État de l'assemblage
 
-They work for us. Depending on your material and your printer, they may need a marginal touch-up: to the tenth of a
-millimetre for the latch, for example.
+L'assemblage final v1.0 avec les 3MF fournis n'a pas encore été vérifié et aucune séquence de montage pas à pas n'est validée. Les fichiers et indications de matériaux sont disponibles ; il manque encore ce dernier contrôle d'ajustement et ses photographies pour constituer un guide de reproduction complet. Aucun couple, épaisseur de cale ou ordre de serrage n'est inventé pour combler ce manque.
 
-## The camera screws
+![Boîtier Basilisk, rendu CAO de la précédente révision v1.0b](../basilisk-enclosure.webp)
 
-The three M2.5×12 screws replace the three original M2.5×8 screws of the camera's front plate: they compensate the
-added height and keep the threads engaged.
+L'illustration montre la **v1.0b**, révision précédente ; utiliser les fichiers v1.0 liés ci-dessus.
 
-## Putting it together
-
-**The step-by-step procedure is not written yet.** The final assembly is not yet checked; the procedure will be
-published here once it is. Until then, the parts, the screws and the materials above are all the repository states.
-
-![Basilisk enclosure v1.0b, CAD render: the E-mount ring with its pogo-pin contacts and the USB-C port](../basilisk-enclosure.webp)
-
-*The enclosure v1.0b, the previous revision: no render of the v1.0 enclosure is provided yet.*
+Après vérification du montage, passer à l'[Installation](setup.fr.md).

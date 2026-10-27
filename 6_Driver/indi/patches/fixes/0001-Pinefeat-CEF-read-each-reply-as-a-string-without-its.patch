@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: captain <captain@lcars.local>
 Date: Mon, 19 Oct 2026 18:54:26 +0200
-Subject: [PATCH 1/8] Pinefeat CEF: read each reply as a string without its
+Subject: [PATCH 1/9] Pinefeat CEF: read each reply as a string without its
  line end
 
 tty_nread_section() keeps the delimiter in the buffer and writes no

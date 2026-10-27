@@ -165,7 +165,7 @@ class Test(unittest.TestCase):
             self.assertEqual(p.lines, [], argv)
 
     def test_board_errors(self):
-        for reply in ("er nocap custom", "er nolens", "er busy boot", "er link timeout", "ok 00 00"):
+        for reply in ("er nocap custom", "er nolens", "er busy boot", "er link timeout", "er link desync", "er link aborted", "ok 00 00"):
             p = FauxPort(read_reply=reply)
             rc, out, ask = run(["--M1", "MF", "--yes"], p)
             self.assertEqual(rc, 1, reply)
@@ -211,13 +211,27 @@ class Test(unittest.TestCase):
         self.assertEqual(p.cfg, 0x12)
 
     def test_rom_lines_before_first_reply(self):
-        # Audit R5 : l'ouverture du port peut redémarrer la carte ; les lignes de la ROM de l'ESP32-S3 (son démarrage
-        # ordinaire, documenté par ESP-IDF, la console de la carte étant muette au-delà) et des octets hors ASCII
-        # arrivent après l'envoi de la première commande, pendant l'attente de sa réponse. Aucune n'est prise pour elle.
-        rom = [b"ESP-ROM:esp32s3-20210327\r\n", b"Build:Mar 27 2021\r\n",
-               b"rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)\r\n", b"Saved PC:0x40378ad6\r\n",
-               b"SPIWP:0xee\r\n", b"mode:DIO, clock div:1\r\n", b"load:0x3fce3810,len:0x178c\r\n",
-               b"entry 0x403c9900\r\n", b"\x00\xff\xfe\x1b\r\n"]
+        # Audit R5 : l'ouverture du port peut redémarrer la carte ; les lignes de la ROM de l'ESP32-C3 (son démarrage
+        # ordinaire, la console de la carte étant muette au-delà) et des octets hors ASCII arrivent après l'envoi de la
+        # première commande, pendant l'attente de sa réponse. Aucune n'est prise pour elle. Les lignes sont celles de
+        # ../test/test_app_vm.cjs (bloc « Audit R5 »), d'où elles viennent :
+        # - `ESP-ROM:esp32c3-api1-20210207` : capturée sur la carte, reçue par la page de banc à l'ouverture du port
+        #   (atelier, ready-room/samyang.txt @ e99c861, ligne 1, trace du 2026-10-19) ;
+        # - `rst:0x15 (USB_UART_CHIP_RESET),boot:0xc (SPI_FAST_FLASH_BOOT)` : la forme de la ligne,
+        #   `rst:0xNN (REASON),boot:0xNN (MODE)`, et SPI_FAST_FLASH_BOOT, le démarrage normal sur la flash :
+        #   esptool v4.8.1, docs/en/advanced-topics/boot-mode-selection.rst, § Boot Mode Message ; 0x15 =
+        #   USB_UART_CHIP_RESET : ESP-IDF v5.3.2, components/esp_rom/include/esp32c3/rom/rtc.h (RESET_REASON). Non
+        #   sourcée : la valeur 0xc des broches de strapping (choisie ; l'outil ne lit pas la ligne) ;
+        # - `SPIWP:0xee`, `mode:DIO, clock div:1` : esptool, même page, § Software Bootloader Header Info ;
+        # - `load:0x…,len:0x…`, `entry 0x…` : la forme de la même page, § Software Bootloader Load Segments. Non
+        #   sourcées : les adresses et les longueurs (inventées ; celles du bootloader de notre build ne sont pas
+        #   relevées) ;
+        # - les octets hors ASCII (00 FF FE 1B) : non sourcés, inventés.
+        rom = [b"ESP-ROM:esp32c3-api1-20210207\r\n",
+               b"rst:0x15 (USB_UART_CHIP_RESET),boot:0xc (SPI_FAST_FLASH_BOOT)\r\n", b"SPIWP:0xee\r\n",
+               b"mode:DIO, clock div:1\r\n", b"load:0x3fcd5820,len:0x1714\r\n",
+               b"load:0x403cc710,len:0x968\r\n", b"load:0x403ce710,len:0x2f9c\r\n", b"entry 0x403cc71a\r\n",
+               b"\x00\xff\xfe\x1b\r\n"]
 
         class Rom(FauxPort):
             def write(self, b):
@@ -278,7 +292,11 @@ class Test(unittest.TestCase):
         self.assertEqual(p.lines, [])
         for needle in ("0x40 'P' 0xFA", "0x40 'P' 0x38", "0x30 + configuration", "(M1 << 4) | M2", "0 = APERTURE (AP), 1 = AF, 2 = MF",
                        "RAM", "CUSTOM READ", "CUSTOM WRITE", "0x10 : M1 = AF, M2 = APERTURE", "--M1 AF --M2 AP", "1.06",
-                       "AUX RISQUES DE L'UTILISATEUR", "LensType2 8", "boot_state=ready", "DÉBRANCHER PUIS REBRANCHER", "pyserial"):
+                       "AUX RISQUES DE L'UTILISATEUR", "LensType2 8", "boot_state=ready", "DÉBRANCHER PUIS REBRANCHER", "pyserial",
+                       "la carte refuse ensuite CUSTOM", "« er link desync » (CUSTOM refusé, rien n'est envoyé à",
+                       "depuis un « er link timeout » ou un « er link aborted » de l'objectif resté branché",
+                       "« er link aborted » (l'objectif a été retiré, ou la carte a perdu sa télémétrie",
+                       "s'il n'a pas été retiré, débrancher puis\n    rebrancher l'objectif"):
             self.assertIn(needle, out, needle)
 
     def test_help_is_the_manual(self):

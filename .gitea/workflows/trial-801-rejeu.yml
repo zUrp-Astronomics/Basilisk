@@ -1,0 +1,65 @@
+# Le rejeu des cas du banc de fuzzing (4_Firmware/sim/fuzz/README.md) sur le compilateur de la CI : l'image et l'outillage
+# du job `firmware` de ci.yml (ubuntu:24.04, gcc 13 de noble), les harnais compilés avec les options de la suite
+# (-std=c11 -Wall -Wextra -Wpedantic -Werror -O2) et la ligne de sanitizers de 4_Firmware/run.sh (SAN), puis chaque cas
+# rangé sous 4_Firmware/sim/fuzz/cas/ rejoué deux fois (sorties comparées, verdict attendu), puis une courte campagne de
+# chaque harnais. Il ne juge pas le projet : le banc est hors de la suite et de la CI. Celui de F3 (#801) : les cas de F1,
+# F2 et F3, les dix harnais, dont fuzz_session, fuzz_hote (l'hôte fou) et fuzz_commande (le harnais secondaire), joués
+# 100 cas seulement (un cas de SESSION coûte quelques dixièmes de seconde de processeur, contre quelques microsecondes
+# ailleurs).
+#
+# Relancer : `ci_trial` (workflow: trial-801-rejeu.yml), ou Actions > « essai-fuzz-rejeu-f3 » > Run workflow.
+#
+# ⚠ `name:` ne commence pas par `CI` : ses statuts ne tombent pas sous le glob `CI / *` exigé par la protection de `main`.
+name: essai-fuzz-rejeu-f3
+
+on: workflow_dispatch
+
+jobs:
+  rejeu:
+    runs-on: shell
+    container: ubuntu:24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Outillage (git, gcc), comme le job `firmware`
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git gcc libc6-dev >/dev/null
+          gcc --version | head -n 1
+      # La récupération du job `firmware` de ci.yml (voir là-bas pourquoi le jeton passe par un en-tête).
+      - name: Récupérer le commit essayé
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 -w0)"
+          git config --global --add safe.directory '*'
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          recup() { git -c http.extraHeader="$auth" -c protocol.version=2 fetch -q --no-tags --depth=1 origin "$1"; }
+          if ! recup "$GITHUB_SHA"; then
+            echo "récupération par sha refusée par la forge ; repli sur la ref ${GITHUB_REF}"
+            recup "$GITHUB_REF"
+          fi
+          obtenu=$(git rev-parse FETCH_HEAD)
+          if [ "$obtenu" != "$GITHUB_SHA" ]; then
+            echo "commit récupéré ${obtenu} ≠ commit essayé ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --oneline
+      - name: Les harnais compilés par gcc 13
+        run: bash 4_Firmware/sim/fuzz/fuzz.sh construit /tmp/fz
+      - name: Chaque cas rangé, rejoué deux fois
+        run: bash 4_Firmware/sim/fuzz/fuzz.sh rejoue-tout /tmp/fz
+      - name: Une courte campagne de chaque harnais (1000 cas, graine 1 ; 100 pour session, hote et commande)
+        run: |
+          for c in rx lens_rx bench sht40 journal climat rtc; do
+            /tmp/fz/fuzz_$c campagne 1 1000 /tmp | grep -E '^(BILAN|ECHEC)'
+          done
+          for c in session hote commande; do
+            /tmp/fz/fuzz_$c campagne 1 100 /tmp | grep -aE '^(BILAN|ECHEC|COUVERTURE|LIGNES|B4|DIFFEREES|COMMANDES)'
+          done

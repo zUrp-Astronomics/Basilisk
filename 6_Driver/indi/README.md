@@ -1,7 +1,10 @@
 # Driver INDI `pinefeat_cef` — l'amont, ses correctifs, l'extension Basilisk
 
 **Date** : 2026-09-24
-**Dernière révision** : 2026-10-20 (ticket #648 : le driver en 1.2, l'extension ne monte plus la version, vérifiée
+**Dernière révision** : 2026-10-23 (ticket #694 : le dernier redémarrage de la carte, `x`, dans `BOARD_RESTART`, et
+l'avertissement d'un redémarrage anormal, port ouvert compris) ; 2026-10-23 (ticket #672 : chaque commande rend la main au plus `CEF_TIMEOUT` après son envoi,
+quoi que le port envoie : un correctif de plus, `0007`, la ligne en retard devient `0008` ; les flux sans fin joués) ;
+2026-10-20 (ticket #648 : le driver en 1.2, l'extension ne monte plus la version, vérifiée
 après chaque série ; le firmware en 1.3) ; 2026-10-19 (ticket #645, reprise de la revue de la PR #646 : le relatif et les fins illisibles
 sous `ext=1` joués, le symptôme de chaque correctif vérifié sur l'amont, la réponse à `v` hors forme fixée) ; 2026-10-19
 (ticket #645 : le driver redevient l'amont, plus deux séries de patchs proposables à
@@ -14,7 +17,7 @@ indilib, les correctifs puis l'extension ; le nom, l'identité et la numérotati
 Le driver de ce répertoire est le focuser Pinefeat d'INDI, `pinefeat_cef`, pris dans `indilib/indi`, enrichi de deux
 séries de patchs, chacune proposable telle quelle à indilib comme une pull request distincte :
 
-1. **`patches/fixes/`, les correctifs** : sept défauts de l'amont, un patch par défaut, et la version du driver
+1. **`patches/fixes/`, les correctifs** : huit défauts de l'amont, un patch par défaut, et la version du driver
    montée à 1.2 ; ils valent pour tout contrôleur ;
 2. **`patches/basilisk/`, l'extension Basilisk** : un patch, par-dessus, qui ajoute le lot de notre carte, défini
    seulement pour une carte qui l'annonce (`ext=1`) ; elle ne change pas la version, 1.2 (décision de l'humain).
@@ -49,8 +52,9 @@ le défaut, et pourquoi il est un correctif.
 | `0004` | l'état relu à chaque passage du minuteur, 50 ms, au lieu d'une fois par seconde (L09-09) |
 | `0005` | un `Busy` de déplacement ou de `CALIBRATE` sans fin quand l'état ne se lit plus |
 | `0006` | la même erreur de position au journal à chaque relecture, tant que l'objectif manque |
-| `0007` | le reste d'une ligne en retard pris pour la réponse suivante (L09-04, en partie) |
-| `0008` | la version du driver, 1.2 |
+| `0007` | la réponse bornée en octets et pas en temps : `CEF_TIMEOUT` attendu pour chaque octet, un filet sans fin de ligne retient le driver des dizaines de secondes ; désormais une seule échéance, `CEF_TIMEOUT` après l'envoi, pour toute la réponse |
+| `0008` | le reste d'une ligne en retard pris pour la réponse suivante (L09-04, en partie), lu dans l'échéance de `0007` |
+| `0009` | la version du driver, 1.2 |
 
 Contre un adaptateur Pinefeat, sans `ext=1`, le driver de ce répertoire est l'amont avec ces seules différences.
 
@@ -73,8 +77,9 @@ propriété du lot, aucune de ses lettres n'est envoyée, pas même si un client
 | fin d'un déplacement | `g` | la position absolue (et relative, pour un déplacement relatif) | lue quand `e` répond `n` après un déplacement lancé par le driver (absolu, relatif, `jg`), puis pendant la fenêtre de l'arrêt (ci-dessous) |
 | redémarrer l'objectif | `b` | `LENS_REBOOT` (`REBOOT`) | le dernier recours |
 | nom de l'objectif | `i` | `LENS_INFO` (`LENS_NAME`, lecture, onglet « Lens ») | relu chaque seconde à l'arrêt |
-| température, humidité, point de rosée ou de givre | `z` | `FOCUS_TEMPERATURE` (`TEMPERATURE`, °C) ; `FOCUS_HUMIDITY` (`HUMIDITY`, %RH) ; `FOCUS_DEW_POINT` (`DEW_POINT`, °C), en lecture | relues chaque seconde à l'arrêt ; **définies seulement tant que la carte les connaît** (ci-dessous) |
+| température, humidité, point de rosée ou de givre | `z` | `FOCUS_TEMPERATURE` (`TEMPERATURE`, °C) ; `FOCUS_HUMIDITY` (`HUMIDITY`, %RH) ; `FOCUS_DEW_POINT` (`DEW_POINT`, °C), en lecture | relues chaque seconde, à l'arrêt comme en mouvement ; **définies seulement tant que la carte les connaît** (ci-dessous) |
 | bornes de la position | `r` | la plage de la position absolue et de `FOCUS_MAX` ; `CALIBRATE` | ci-dessous |
+| dernier redémarrage de la carte | `x` | `BOARD_RESTART` (`CAUSE`, lecture, onglet Info) | le jeton de la cause ; lu à la connexion, puis chaque seconde, à l'arrêt comme en mouvement ; un redémarrage anormal est un avertissement au journal (ci-dessous) |
 
 **La fin d'un déplacement se lit par `g`**, jamais par `DEBUG` (les majuscules ne sont pas pour un driver) :
 
@@ -91,6 +96,26 @@ driver relit `g` à chaque passage du minuteur pendant 5 s (`unconfirmed` arrive
 confirmed: the motor state is unknown.` ; s'il change autrement, ou à la fin des 5 s, le suivi s'arrête. Un déplacement
 lancé dans la fenêtre l'arrête aussi. **Tout `Busy` posé par le lot se termine** quand `e` répond `n` : un déplacement
 par `g`, `b` par `f` (`Ok` s'il rend une position, `Alert` sinon).
+
+**Le dernier redémarrage de la carte se lit par `x`**, jamais par `DEBUG` : `x` rend sa cause et le temps écoulé depuis,
+en ms (`PROTOCOL.md`, ligne `x`). `BOARD_RESTART` porte le jeton de la cause, `Alert` pour une cause anormale, `Ok`
+sinon. La carte peut redémarrer sans que le port se ferme (on ne sait pas si l'USB du C3 survit à un panic), et elle
+reprend alors son objectif (`PROTOCOL.md` § 7) : le focus bouge. Un redémarrage, c'est la première réponse de la
+connexion, puis une réponse dont la cause a changé ou dont le temps est plus petit qu'il ne peut l'être sans
+redémarrage (il repart de 0 à chaque redémarrage : deux redémarrages de même cause se distinguent, même rapprochés).
+Sans redémarrage, le temps de la carte a grandi depuis la réponse précédente d'au moins le temps de l'hôte entre
+l'arrivée de cette réponse et l'envoi de la commande suivante, quel que soit le retard de l'une ou l'autre : la carte
+lit son horloge après avoir reçu la commande et avant que sa réponse arrive. La marge est de 10 ms et 0,1 % de ce
+temps : la carte tronque son temps à la milliseconde, et son horloge et celle de l'hôte ne battent pas exactement au
+même rythme. `x` est lu chaque seconde même pendant que `e` répond `y`, pour que l'avertissement arrive pendant la
+reprise, que la carte fait avec `e` à `y`, et non après elle ; `z` aussi, pour qu'une mesure que la carte ne connaît
+plus (périmée au bout de 3 s, `PROTOCOL.md`, ligne `z`) ne reste pas publiée pendant un long déplacement. Le reste du
+lot est lu à l'arrêt seulement.
+
+| Cause | Journal, une fois par redémarrage |
+|---|---|
+| `panic`, `int_wdt`, `task_wdt`, `wdt`, `brownout`, `unknown` | un avertissement qui la nomme en clair : `The board restarted: its firmware crashed (panic).` |
+| `poweron`, `sw`, `usb` (l'ouverture du port peut redémarrer la carte), `jtag` | rien |
 
 **Les bornes de `r` sont la plage de la position.** Contre notre carte, ce sont celles que l'objectif publie
 (`PROTOCOL.md`, ligne `r`) : rien n'est mesuré, il n'y a rien à calibrer (décision de l'humain, ticket #600). À chaque
@@ -131,7 +156,8 @@ c'est tout ce qu'un adaptateur Pinefeat en voit :
   distingue) ; s'il ne répondait rien, la connexion attendrait 3 s de plus et le journal dirait une erreur de lecture.
 - **Une ligne qui commence par `*` n'est jamais une réponse** : la page de banc peut laisser notre carte en `LOG ON`, qui
   émet des lignes `* …` (`PROTOCOL.md` § 3). Elle est sautée jusqu'à sa fin de ligne, quelle que soit sa longueur, et la
-  réponse est la ligne suivante, jusqu'à 3 s après la commande. Aucune réponse de Pinefeat ne commence par `*`.
+  réponse est la ligne suivante, jusqu'à 3 s après la commande (l'échéance de `0007`, que rien ne prolonge : une ligne
+  `*` qui ne finit pas fait échouer la commande au bout de 3 s). Aucune réponse de Pinefeat ne commence par `*`.
 - **À `v`, seule une ligne de la forme d'une version est la réponse** (`<majeur>.<mineur>`, ce que l'amont lit déjà
   comme version), lue dans un grand tampon. L'ouverture du port peut redémarrer notre carte, et les lignes de sa ROM
   (`ESP-ROM:…`, `SPIWP:0xee`…) arrivent après l'envoi de `v` : sautées jusqu'à la version ou 3 s après la commande ;
@@ -186,23 +212,43 @@ Le job `indi` de `.gitea/workflows/ci.yml` (Ubuntu 26.04, libindi-dev 2 du PPA d
      driver (§ « Ce qu'un Pinefeat en voit »). Chaque contrôle d'un correctif passe sur les correctifs et sur le driver,
      et échoue sur l'amont **avec le symptôme qu'il déclare** (un fragment de son message d'échec : `'1.3\n'`,
      « lens is not attached » pour `oops`, `%.f`, deux `e` à moins de 0,1 s, l'attente d'`Alert` qui expire, l'erreur
-     journalisée plus d'une fois, `e` suivi de `e` après la ligne en retard) : un échec d'une autre cause est un échec du
-     jeu. Seul celui de la réponse de 15 caractères n'est pas joué sur l'amont, dont la lecture au-delà du tampon ne
+     journalisée plus d'une fois, l'erreur d'un `e` qui ne vient pas dans la borne sous un filet d'un octet toutes les
+     1,5 s, `e` suivi de `e` après la ligne en retard) : un échec d'une autre cause est un échec du jeu. Seul celui de la réponse de 15 caractères n'est pas joué sur l'amont, dont la lecture au-delà du tampon ne
      donne pas de symptôme certain. La ligne en retard est écrite après la dernière commande d'une relecture, et sa
-     suite arrive devant le `e` de la suivante : la confusion avec la cadence de l'amont (L09-09) est écartée.
+     suite arrive devant le `e` de la suivante : la confusion avec la cadence de l'amont (L09-09) est écartée. **Un flux
+     sans fin de ligne** (32 octets toutes les 5 ms, sans fin) après un `e`, joué sur les trois états : cette commande
+     et les deux suivantes échouent chacune, leur `Serial read error` lue au plus tard 5 s après que le faux contrôleur
+     a reçu la commande (`CEF_TIMEOUT`, et 2 s pour que l'erreur traverse le tube et l'analyseur XML jusqu'au test) ; le
+     flux arrêté, les relectures reprennent (`f` envoyé). L'amont le passe (il déborde `CEF_BUF` aussitôt) : c'est la
+     non-régression de `0008`, dont la suite d'une ligne en retard est lue dans l'échéance de `0007`.
    - **Contre une fausse Basilisk** (`ext=1`), le driver : la connexion à travers le redémarrage (les lignes de la ROM
      au premier `v`) et un journal `LOG ON` devant chaque réponse, une ligne coupée autour d'une commande ; le lot
      défini, `w` et `n` jamais envoyées ; les bornes de `r` et `CALIBRATE` ; la fin d'un déplacement absolu **et
      relatif** par `g` (`ok`, `stall`, `aborted` par `q`, puis `unconfirmed`, sur `ABS_FOCUS_POSITION` comme sur
      `REL_FOCUS_POSITION`) ; une fin dont `f` ne se lit plus, `Alert` malgré `g` à `ok`, et un redémarrage (`b`) après
-     lequel `f` ne répond pas, `Alert` ; la marque ; la LED, posée, sauvée dans la config INDI et renvoyée (`k40`, relue)
-     à une carte neuve à la connexion suivante ; le redémarrage ; `o`, `i`, `z` et ses formes inconnues ;
-     puis un Pinefeat sur le même driver, sans lot et sur la plage de l'amont.
+     lequel `f` ne répond pas, `Alert` ; la marque ; la LED, posée, sauvée dans la config INDI et renvoyée (`k40`,
+     relue) à une carte neuve à la connexion suivante ; le redémarrage ; `o`, `i`, `z` et ses formes inconnues ; `z`
+     pendant un déplacement de 10 s (`e` à `y`) : une valeur nouvelle publiée, puis `-` qui retire les propriétés,
+     chacun moins de 2 s après que la carte le rend, avant la fin du déplacement ; le dernier redémarrage de la carte
+     (`x`) : chacune des dix causes dans `BOARD_RESTART` à la connexion, l'avertissement des six anormales, son texte
+     écrit à la main, et d'elles seules, `BOARD_RESTART` en lecture seule, `DEBUG` jamais envoyé ; une reconnexion à une
+     carte qui n'a pas redémarré depuis la connexion d'avant, toujours `panic`, son temps grandi : un avertissement à
+     chaque connexion ; une connexion de quelques secondes sans redémarrage, sans avertissement ; puis un redémarrage
+     port ouvert, suivi d'une reprise de 4 s (`e` à `y`) : l'avertissement en moins de 3 s, pendant la reprise, une
+     seule fois ; un second redémarrage de même cause, un second avertissement ; deux redémarrages de même cause à une
+     seconde d'écart, `panic 300` puis `panic 900` (le temps n'a pas reculé) : un avertissement chacun ; 30 s sans
+     redémarrage, la dernière cause `panic`, chaque réponse retardée au hasard jusqu'à 0,4 s : aucun avertissement après
+     celui de la connexion ; les lignes que l'extension saute, sans fin (des lignes de la ROM à `v`, en boucle : chacun
+     des trois `v` échoue dans la même borne de 5 s et la carte n'est pas détectée ; une ligne `* …` qui ne finit jamais
+     après un `e` : la commande et les deux suivantes échouent dans la borne, puis les relectures reprennent) ; puis un
+     Pinefeat sur le même driver, sans lot et sur la plage de l'amont.
 
    Les contrôles attendent des événements (une commande reçue, un état publié), pas des durées : un runner lent ne les
    fait qu'attendre plus. Quand un contrôle vérifie une absence (aucune lettre envoyée), il attend que le driver ait
    traité tout ce qui précède : `FOCUS_SPEED` posé et relu. La cadence se juge sur l'écart entre deux `e` consécutifs
-   (au moins 0,9 s), qu'une charge ne peut qu'allonger.
+   (au moins 0,9 s), qu'une charge ne peut qu'allonger. Seule exception, la borne elle-même : une erreur doit arriver
+   au plus 5 s après sa commande, `CEF_TIMEOUT` et 2 s de marge, quand les défauts qu'elle montre retiennent le driver
+   des dizaines de secondes ou pour toujours.
 
 Ce que ces faux contrôleurs font est écrit dans `test/test_driver.py` : le protocole de `PROTOCOL.md` pour la carte, la
 lecture que fait l'amont de ses réponses pour le Pinefeat, des durées inventées (un déplacement dure 1 s). Aucun

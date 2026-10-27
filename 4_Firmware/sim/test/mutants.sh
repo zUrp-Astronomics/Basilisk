@@ -17,6 +17,13 @@
 # exactement un endroit, un mutant qui ne compile pas, un mutant qui survit, ou qui meurt autrement (signal, délai),
 # font échouer ce script. Prérequis : gcc, bash, coreutils, awk. Rien n'est écrit dans le dépôt.
 #
+# La garde de durée : un programme qui en a une (GARDE_S) écrit sa ligne « ECHEC : le programme ne termine pas en <n> s
+# (boucle sans fin) » et sort en 1 quand elle échoit. Un mutant qui en meurt est « tué … par la garde de durée », compté
+# à part dans le total : il ne rend plus la main, ou il a ralenti son programme plus de 10 fois, car la garde est
+# relevée ici (GARDE_O0, -DGARDE_S) à au moins 10 fois la durée du programme honnête le plus lent en -O0 sous la charge
+# de ce script ; un ralentissement moindre n'est jamais compté tué. Un programme sans garde, ou dont la garde ne dit
+# rien, est arrêté par `timeout` au-delà : refusé.
+#
 # Le code seul : dans un fichier .c ou .h, un commentaire ne fait rien, il ne doit donc ni retrouver ni
 # perdre une ancre. Le fichier visé de la copie est remplacé par son code seul — chaque commentaire retiré avec les
 # blancs qui le précèdent (un blanc reste s'il séparait deux codes, l'indentation reste), puis les blancs de fin de
@@ -53,7 +60,13 @@ F2=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 LISTES=("$F2/sim/test/mutations.txt" "$F2/sim/test/mutations_std.txt")
 SORTIE=$(mktemp -d)
 trap 'rm -rf "$SORTIE"' EXIT
-CFLAGS=(-std=c11 -Wall -Wextra -Wpedantic -Werror -O0)
+# La garde de durée des programmes qui en ont une (GARDE_S, too_long), relevée en -O0 : au moins 10 fois la durée du
+# programme honnête le plus lent qu'un mutant vise, en -O0 et sous la charge de ce script (7_Docs/SUITES.md, la mesure).
+GARDE_O0=180
+CFLAGS=(-std=c11 -Wall -Wextra -Wpedantic -Werror -O0 -DGARDE_S=$GARDE_O0)
+# La ligne qu'écrit la garde de durée d'un programme : un mutant qui sort en 1 avec elle est tué par la garde (une boucle
+# sans fin), pas par une vérification ; il est dit tel et compté à part.
+GARDE="ECHEC : le programme ne termine pas en [0-9]* s (boucle sans fin)"
 
 # Le code seul : stdin -> stdout, sort en 3 si un commentaire a été retiré (règle en tête de ce fichier).
 CODE_SEUL="$SORTIE/code_seul"
@@ -296,8 +309,12 @@ jouer() {
         echo refus > "$st"; return
     fi
     statut=0
-    timeout 120 "$dir/$prog" "${ARGS[@]}" > "$dir/run.log" 2>&1 || statut=$?
-    if [ "$statut" -eq 1 ]; then
+    timeout $((GARDE_O0 + 120)) "$dir/$prog" "${ARGS[@]}" > "$dir/run.log" 2>&1 || statut=$?
+    if [ "$statut" -eq 1 ] && grep -aq "$GARDE" "$dir/run.log"; then
+        echo "   tué    #$num $prog par la garde de durée, $(grep -ac ECHEC "$dir/run.log") échec(s), les 20 premiers :"
+        grep -a ECHEC "$dir/run.log" | sed "s|^ *ECHEC $dir/sim/test/|          |" | cut -c 1-150 | awk 'NR <= 20'
+        echo garde > "$st"
+    elif [ "$statut" -eq 1 ]; then
         echo "   tué    #$num $prog, $(grep -ac ECHEC "$dir/run.log") échec(s) :"
         grep -a ECHEC "$dir/run.log" | sed "s|^ *ECHEC $dir/sim/test/|          |" | cut -c 1-150
         echo tue > "$st"
@@ -362,14 +379,16 @@ done
 
 wait
 tues=0
+gardes=0
 refus=0
 for ((r = 0; r < rangs; r++)); do
     [ -f "$SORTIE/r$r.out" ] && cat "$SORTIE/r$r.out"
     case $(cat "$SORTIE/r$r.st" 2>/dev/null || true) in
         tue) tues=$((tues + 1)) ;;
+        garde) tues=$((tues + 1)); gardes=$((gardes + 1)) ;;
         refus) refus=$((refus + 1)) ;;
         *) echo "   REFUS  ligne $r du journal : le jeu du mutant n'a rendu aucune issue"; refus=$((refus + 1)) ;;
     esac
 done
-echo "mutants : $total, tués : $tues, refusés ou survivants : $refus"
+echo "mutants : $total, tués : $tues (dont $gardes par la garde de durée), refusés ou survivants : $refus"
 [ "$total" -gt 0 ] && [ "$refus" -eq 0 ] && [ "$tues" -eq "$total" ]

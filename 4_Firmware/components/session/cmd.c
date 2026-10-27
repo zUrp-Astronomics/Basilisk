@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "bsk_journal.h"
+#include "bsk_store.h"
 #include "bsk_txn.h"
 #include "init.h"
 #include "lens_rx.h"
@@ -23,13 +24,32 @@ static void reject(const bsk_cmd_t *c, bsk_err_t why) { session_ack(c->seq, ACK_
  * l'écriture de la flash, non mesurée. */
 #define CUSTOM_MS 1000u
 
-/* CMD_LENS_CUSTOM en vol, la sous-commande émise, et les données de la dernière réponse. */
+/* CMD_LENS_CUSTOM en vol, les données de la dernière réponse, et le canal désynchronisé. Désynchronisé : un CUSTOM a
+ * atteint son échéance, et sa réponse peut encore arriver, aussi tard que rien ne borne (aucune borne du retard n'est
+ * établie, correlation-reponses.md § 4 de l'atelier) ; deux lectures sont le même message, et la réponse en retard de
+ * la première serait prise pour celle de la seconde (bsk_txn.h). Un CUSTOM émis et sans réponse quand la session est
+ * oubliée (cmd_forget) désynchronise de même : sa réponse peut encore arriver. CMD_LENS_CUSTOM est alors refusée,
+ * E_DESYNC, rien d'émis, jusqu'à ce que les rails soient coupés (cmd_rails_cut) : l'objectif qui n'est plus alimenté
+ * n'a plus de réponse en attente. L'oubli de la session ne le lève pas : la reprise garde les rails (décision de
+ * l'humain du 2026-10-23), et l'objectif sa réponse en attente. Rien n'est émis pour resynchroniser (décision de
+ * l'humain du 2026-10-23 : les conditions propres à un fabricant ne reposent que sur l'analyse statique). */
 static struct {
     bool     wait;
+    bool     desync;
     uint32_t seq;
-    uint8_t  sub;
     uint8_t  data[BSK_CUSTOM_DATA];
 } cu;
+
+/* Le geste de marque servi (CMD_SET_MARK, CMD_CLEAR_MARK, l'appui long), de son dépôt au résultat de son écriture ou à
+ * son échéance (BSK_STORE_WRITE_MS) : l'accusé final de seq, ou pour le bouton (board) sa ligne `* btn`. Un seul : mark.c
+ * refuse un geste tant que l'écriture du précédent attend son résultat. Il n'exclut aucune autre commande : aucune ligne
+ * de l'hôte n'arrive pendant sa réponse différée (bsk_host.h), et l'appui court du bouton va à la marque rangée. */
+static struct {
+    bool     wait;
+    bool     board;
+    uint32_t seq;
+    uint64_t due;
+} mk;
 
 /* Hors READY : E_BUSY dans les états de séquence et en OFF, la raison du FAULT en FAULT. La couche HOTE répond d'après
  * l'état publié, pas d'après la raison. */
@@ -37,7 +57,8 @@ static bsk_err_t not_ready(void) { return session_state() == SESSION_FAULT ? ses
 
 /* CMD_FOCUS_STOP, dans chaque état : jamais E_BUSY à cause d'une commande en vol. Un homing ne s'interrompt pas : celui
  * du pilote (HOMING), et le 0x10 de l'init en vol (IDENTIFYING, init_homing) ; l'état est lu d'abord, init_homing ne vaut
- * qu'en IDENTIFYING (init.h). */
+ * qu'en IDENTIFYING (init.h). Là où le 0x1C part, MOUVEMENT rend l'accusé final : celui du 0x1C, à son départ s'il est
+ * retenu jusqu'au 0x04 (motion.h), si bien que q n'est pas toujours fini dans l'appel. */
 static void stop(const bsk_cmd_t *c)
 {
     if (session_state() == SESSION_HOMING ||
@@ -45,16 +66,15 @@ static void stop(const bsk_cmd_t *c)
         reject(c, E_BUSY);
         return;
     }
-    bsk_err_t e = E_OK;
     session_ack(c->seq, ACK_ACCEPTED, E_OK);
     if (session_state() == SESSION_READY) {         /* le 0x1C sans condition, même sans mouvement */
-        e = motion_stop(session_now());             /* le mouvement en cours, ABORTED */
+        motion_q(c->seq, session_now());            /* le mouvement en cours, ABORTED */
     } else if (session_state() == SESSION_RESTORING) {   /* le retour à la marque arrêté : le 0x1C, READY */
-        e = motion_stop(session_now());             /* READY même si le 0x1C n'est pas parti : la consigne est retirée */
+        motion_q(c->seq, session_now());            /* READY même si le 0x1C n'est pas parti : la consigne est retirée */
         session_restore_stop();
-    }                                               /* ailleurs rien n'est émis : aucun mouvement à arrêter */
-    if (e == E_OK) session_ack(c->seq, ACK_COMPLETED, E_OK);
-    else session_ack(c->seq, ACK_FAILED, e);        /* le 0x1C pas émis */
+    } else {                                        /* ailleurs rien n'est émis : aucun mouvement à arrêter */
+        session_ack(c->seq, ACK_COMPLETED, E_OK);
+    }
 }
 
 /* ring.h : la consigne, bornée à la plage du 0x08, posée pour le prochain 0x03 : le chemin de CMD_APERTURE_SET, que la
@@ -86,8 +106,39 @@ static void aperture_cmd(const bsk_cmd_t *c)
     session_ack(c->seq, ACK_COMPLETED, E_OK);
 }
 
-/* CMD_SET_MARK et CMD_CLEAR_MARK : en READY, finies tout de suite ; mark.c décide (E_NOCAP sans identité, E_LIMIT,
- * E_BUSY si le magasin ne prend plus rien). */
+/* Un geste de marque servi par mark.c, son écriture déposée : en vol jusqu'à son résultat. */
+static void mark_fly(bool board, uint32_t seq)
+{
+    mk.wait = true;
+    mk.board = board;
+    mk.seq = seq;
+    mk.due = session_now() + (uint64_t)BSK_STORE_WRITE_MS * 1000u;
+    cmd_mark_poll(session_now());                   /* le résultat déjà relevé (mark.c le relève au dépôt) */
+}
+
+void cmd_mark_poll(uint64_t now)
+{
+    bool ok = false;
+    bsk_err_t e;
+    if (!mk.wait || (!mark_written(&ok) && now < mk.due)) return;
+    mk.wait = false;
+    e = ok ? E_OK : E_STORE;                        /* l'écriture ratée, ou pas rendue à l'échéance */
+    if (mk.board) bsk_journal_btn(BSK_BTN_LONG, ok ? BSK_BTN_OK : BSK_BTN_ER, ok ? NULL : bsk_err_token(e));
+    else session_ack(mk.seq, ok ? ACK_COMPLETED : ACK_FAILED, e);
+}
+
+uint64_t cmd_mark_due(void) { return mk.wait ? mk.due : UINT64_MAX; }
+
+void cmd_init(void)
+{
+    memset(&mk, 0, sizeof mk);
+    memset(&cu, 0, sizeof cu);   /* rien en vol ; au reset, R1 et R4 tiennent les /EN hauts : rails coupés (phy.c, en_init) */
+}
+
+void cmd_rails_cut(void) { cu.desync = false; }
+
+/* CMD_SET_MARK et CMD_CLEAR_MARK : en READY ; mark.c décide (E_NOCAP sans identité, E_LIMIT, E_BUSY si le magasin ne
+ * prend plus rien) ; finies au résultat de l'écriture, ACK_COMPLETED rangée, ACK_FAILED E_STORE sinon (cmd_mark_poll). */
 static void mark_cmd(const bsk_cmd_t *c)
 {
     bsk_err_t e;
@@ -101,7 +152,7 @@ static void mark_cmd(const bsk_cmd_t *c)
         return;
     }
     session_ack(c->seq, ACK_ACCEPTED, E_OK);
-    session_ack(c->seq, ACK_COMPLETED, E_OK);
+    mark_fly(false, c->seq);
 }
 
 /* CMD_FOCUS_GOTO et CMD_FOCUS_MOVE : en READY, MOUVEMENT les vérifie (les bornes, E_LIMIT) et les tient jusqu'à leur accusé
@@ -117,9 +168,9 @@ static void focus(const bsk_cmd_t *c)
 
 /* CMD_LENS_CUSTOM : le message de service du 135, [0x40]['P'][sous-commande][16 octets de données], en requête de
  * classe 2 (samyang.md § 6.1). arg < 0 : la lecture, 'P' 0xFA, octet de données 0x00 (la branche « JIG » ; jamais 0x53,
- * le drapeau « MTF », § 6.3) ; sinon l'écriture, 'P' 0x38, octet de données 0x30 + arg (§ 6.3). La valeur
- * n'est pas vérifiée ici : bench_core vérifie l'octet émis et refuse ce que le 135 n'écrirait pas. En vol jusqu'à la réponse
- * (cmd_custom_poll). */
+ * le drapeau « MTF », § 6.3) ; sinon l'écriture, 'P' 0x38, octet de données 0x30 + arg (§ 6.3). La valeur n'est pas
+ * vérifiée ici : bench_core vérifie l'octet émis et refuse ce que le 135 n'écrirait pas. Le canal désynchronisé (cu,
+ * ci-dessus) : refusée, E_DESYNC. En vol jusqu'à la réponse (cmd_custom_poll). */
 static void custom_cmd(const bsk_cmd_t *c)
 {
     uint8_t m[19] = {0x40, 'P', 0xFA};
@@ -129,6 +180,10 @@ static void custom_cmd(const bsk_cmd_t *c)
     }
     if (init_lens() != BSK_BENCH_SAMYANG135) {     /* le 135 seul : bench_core ne laisse qu'à lui cette exception */
         reject(c, E_NOCAP);
+        return;
+    }
+    if (cu.desync) {
+        reject(c, E_DESYNC);
         return;
     }
     if (c->arg >= 0) {
@@ -143,16 +198,17 @@ static void custom_cmd(const bsk_cmd_t *c)
     session_ack(c->seq, ACK_ACCEPTED, E_OK);
     cu.wait = true;
     cu.seq = c->seq;
-    cu.sub = m[2];
 }
 
 /* La réponse du 135 : 19 octets, l'écho de MainCmd et SubCmd puis 16 octets de données, différée (samyang.md § 6.1).
- * Une autre 0x40 n'est pas la réponse : E_FRAMING, ses octets ne sont pas rendus. Le 135 n'en émet pas d'autre à cette
- * carte, qui ne lui envoie que 'P' FA et 'P' 38 : ses notifications 'W' ne partent que si 'M' les a armées, ses 'H'/'L'
- * qu'en mode service, que seuls 'I', 'M' ou 'X' posent (§ 6.4, § 6.5), et l'écho immédiat de 'F' FB ne répond qu'à lui
- * (§ 6.3).
- * Ces drapeaux vivent dans sa RAM : seul un 135 qui les a reçus d'un autre maître sans être coupé depuis en émet (le
- * firmware de la carte au temps des traces envoyait 'M' à chaque démarrage, samyang.md § 6.5) ; ce cas finit ici. */
+ * Une autre 0x40 n'est pas la réponse et ne termine pas la requête (TRANSACTION la juge sur la MainCmd et la
+ * sous-commande, bsk_txn.h) : l'attente continue, jusqu'à la réponse ou l'échéance. Le 135 n'en émet pas d'autre à
+ * cette carte, qui ne lui envoie que 'P' FA et 'P' 38 : ses notifications 'W' ne partent que si 'M' les a armées, ses
+ * 'H'/'L' qu'en mode service, que seuls 'I', 'M' ou 'X' posent (§ 6.4, § 6.5), et l'écho immédiat de 'F' FB ne répond
+ * qu'à lui (§ 6.3). Ces drapeaux vivent dans sa RAM : seul un 135 qui les a reçus d'un autre maître sans être coupé
+ * depuis en émet (le firmware de la carte au temps des traces envoyait 'M' à chaque démarrage, samyang.md § 6.5). La
+ * réponse trop courte pour ses 16 octets de données : E_FRAMING, ses octets ne sont pas rendus. L'échéance (E_TIMEOUT)
+ * désynchronise le canal (cu, ci-dessus). */
 bool cmd_custom_poll(void)
 {
     const bsk_frame_t *r = bsk_txn_reply();
@@ -160,8 +216,9 @@ bool cmd_custom_poll(void)
     if (!cu.wait || (t != TXN_DONE && t != TXN_FAILED)) return false;
     cu.wait = false;
     if (t == TXN_FAILED) {
+        if (bsk_txn_error() == E_TIMEOUT) cu.desync = true;
         session_ack(cu.seq, ACK_FAILED, bsk_txn_error());
-    } else if (r->len < 19 || r->msg[1] != 'P' || r->msg[2] != cu.sub) {
+    } else if (r->len < 19) {
         session_ack(cu.seq, ACK_FAILED, E_FRAMING);
     } else {
         memcpy(cu.data, r->msg + 3, sizeof cu.data);
@@ -171,8 +228,15 @@ bool cmd_custom_poll(void)
     return true;
 }
 
+/* L'oubli de la session (forget, session.c) : le CUSTOM en vol finit E_ABORTED. Encore en WAIT, il est parti sans
+ * réponse, et désynchronise le canal (cu, ci-dessus) : la perte, qui ne coupe pas les rails ; à la retombée de D2, to_off
+ * coupe les rails ensuite (cmd_rails_cut). Retenu jusqu'au 0x04, il n'est jamais parti : forget arrête la boucle
+ * d'abord (bsk_txn_loop(false)), qui le passe en FAILED, E_ABORTED, sans l'émettre (bsk_txn.h), et aucune réponse ne
+ * peut lui revenir. La perte ne vient qu'après cmd_custom_poll, au pas qui la constate (S_WATCH, advance) : une réponse
+ * ou une échéance l'y ont déjà fini. */
 void cmd_forget(void)
 {
+    if (cu.wait && bsk_txn_state() == TXN_WAIT) cu.desync = true;
     if (cu.wait) session_ack(cu.seq, ACK_FAILED, E_ABORTED);
     cu.wait = false;
 }
@@ -244,8 +308,9 @@ static bsk_err_t board_goto(int32_t pos)
 /* Au relâchement : court, aller à la marque telle quelle ; long, la poser ici ; 4 s ou plus, rien. Un appui commencé hors
  * de READY est oublié, et un appui pendant une commande en vol (un mouvement, ou CMD_LENS_CUSTOM : la même exclusion que
  * bsk_session_command) est ignoré, long compris ; chaque relâchement est
- * journalisé, 4 s ou plus aussi. Le relâchement a lieu en READY quand l'appui y a commencé : toute sortie de READY oublie
- * la session, l'appui avec elle. */
+ * journalisé, 4 s ou plus aussi, l'appui long servi au résultat de son écriture (cmd_mark_poll) : refusé par mark.c
+ * (E_BUSY) pendant celle d'un autre geste. Le relâchement a lieu en READY quand l'appui y a commencé : toute sortie de
+ * READY oublie la session, l'appui avec elle. */
 void cmd_button(uint64_t t)
 {
     bsk_btn_t b;
@@ -267,6 +332,10 @@ void cmd_button(uint64_t t)
     }
     if (b == BSK_BTN_LONG) {
         e = mark_set(BSK_MARK_HERE);
+        if (e == E_OK) {
+            mark_fly(true, 0);
+            return;
+        }
     } else if (!mark_get(&m)) {
         bsk_journal_btn(b, BSK_BTN_ER, "nomark");
         return;

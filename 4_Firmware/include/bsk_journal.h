@@ -64,15 +64,17 @@ typedef enum { BSK_BTN_SHORT, BSK_BTN_LONG, BSK_BTN_HELD } bsk_btn_t;
 typedef enum { BSK_BTN_OK, BSK_BTN_ER, BSK_BTN_IGNORE } bsk_btn_result_t;
 void bsk_journal_btn(bsk_btn_t press, bsk_btn_result_t r, const char *why);
 
-/* La marque sous la clé `key` ; m : la marque posée (set), NULL sinon (clear, store=er). Seuls les gestes de
- * l'utilisateur et leurs échecs : une relecture (changement d'objectif ou de focale) n'écrit rien. */
-typedef enum { BSK_MARK_SET, BSK_MARK_CLEAR, BSK_MARK_STORE_ER } bsk_mark_ev_t;
+/* La marque sous la clé `key` ; m : la marque posée (set), NULL sinon (clear, store=er, load=er). Les gestes de
+ * l'utilisateur et leurs échecs, et une lecture en erreur (load=er) : une relecture réussie, ou d'une clé absente
+ * (changement d'objectif ou de focale), n'écrit rien. */
+typedef enum { BSK_MARK_SET, BSK_MARK_CLEAR, BSK_MARK_STORE_ER, BSK_MARK_LOAD_ER } bsk_mark_ev_t;
 void bsk_journal_mark(bsk_mark_ev_t ev, const char *key, const bsk_mark_t *m);
 
 /* L'entrée en RESTORING (via < 0 : le trajet direct), la fin d'un démarrage sans RESTORING (m : NULL, ou la
- * marque hors des bornes), la sortie de RESTORING ; why : le jeton de `skip=` ou de `end=`. */
-void bsk_journal_restore(const bsk_mark_t *m, int32_t x, int32_t via);
-void bsk_journal_restore_skip(const char *why, const bsk_mark_t *m);
+ * cible hors des bornes), la sortie de RESTORING ; why : le jeton de `skip=` ou de `end=`. La cible m : la marque
+ * (`mark=`), ou la position de reprise si last (`pos=`). */
+void bsk_journal_restore(const bsk_mark_t *m, bool last, int32_t x, int32_t via);
+void bsk_journal_restore_skip(const char *why, bool last, const bsk_mark_t *m);
 void bsk_journal_restore_end(const char *why);
 
 /* Un changement de présence rendu par la PHY, à son instant (t_us : l'interruption, pour une retombée). */
@@ -100,9 +102,9 @@ void bsk_journal_giveup(uint8_t type, bsk_err_t why);
  * d'avant `LOG OFF` ne sort après son `ok`. Une écriture ratée est comptée par bsk_journal_lost ; sous LOG ALL, les
  * écritures ratées sont dites par la ligne `* lost <n>`, que bsk_journal_take rend avant la ligne suivante de l'anneau,
  * sous la génération où elles ont été comptées. */
-size_t  bsk_journal_take(char *buf, size_t cap, uint8_t *gen);
-uint8_t bsk_journal_gen(void);
-void    bsk_journal_lost(void);
+size_t   bsk_journal_take(char *buf, size_t cap, uint32_t *gen);
+uint32_t bsk_journal_gen(void);
+void     bsk_journal_lost(void);
 
 /* Lignes perdues depuis le démarrage : plafond, anneau plein, écriture ratée. */
 uint32_t bsk_journal_dropped(void);

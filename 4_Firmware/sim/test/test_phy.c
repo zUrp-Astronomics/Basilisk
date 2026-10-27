@@ -30,11 +30,19 @@ static l135_t L;
 static l135_params_t P;
 static int checks, fails;
 
+/* La garde de durée, en secondes : 10 ; la passe sous sanitizers de 4_Firmware/run.sh et les mutants en -O0
+ * (sim/test/mutants.sh) la relèvent (-DGARDE_S). */
+#ifndef GARDE_S
+#define GARDE_S 10
+#endif
+#define TEXTE_(x) #x
+#define TEXTE(x) TEXTE_(x)
+
 /* Une réception qui ne rend plus la main (des octets rejugés sans fin) est un échec, pas un plantage : la garde de durée
  * le dit comme une vérification (sortie 1), et mutants.sh le compte tué. */
 static void too_long(int sig)
 {
-    static const char m[] = "  ECHEC : le programme ne termine pas en 10 s (boucle sans fin)\n";
+    static const char m[] = "  ECHEC : le programme ne termine pas en " TEXTE(GARDE_S) " s (boucle sans fin)\n";
     (void)sig;
     (void)!write(1, m, sizeof m - 1);
     _exit(1);
@@ -604,6 +612,8 @@ static void t_lens_emission(void)
     printf("émissions de l'objectif injectées : octets écartés, trame trop longue, 4096 écartés, le 55 du Sony après LENS_CS\n");
     l135_init(&L, &P);
     bench_init(lens_sim_135(&L), T0);
+    phy_sim_mounted();                       /* sans lui, le verrou de XDETECT refuse les lignes */
+    CHECK(bsk_phy_lines(true), "les lignes pilotées : la réception ouverte (relâchées, rien ne remonte : t_rx_window)");
 
     /* la réponse au 0x07 (full:12), puis 5 octets sans F0 : 48 octets, un tous les 13 µs, LENS_CS retombée
      * 200 µs après le dernier (byte_us et lens_cs_tail_us du faux 135) ; les 5 octets rapportés quand le flux s'est tu
@@ -668,6 +678,84 @@ static void t_lens_emission(void)
         CHECK(g_bench.n - from == 3 && BENCH_EV(from + 2).frame.len == 33 && BENCH_EV(from + 2).frame.msg[32] == 0x00,
               "ses 33 octets de message");
     }
+}
+
+/* ─────────────────────────── la fenêtre d'écoute ─────────────────────────── */
+
+/* La réception n'est ouverte que lignes pilotées (bsk_phy.h, bsk_phy_lines) : hors d'elles, un octet reçu est perdu et
+ * une erreur du pilote UART n'est pas rapportée ; LENS_CS reste publiée. Ce que la réception tient quand les lignes se
+ * relâchent, ou que la retombée de D2 les coupe, n'est jamais rendu, ni pris dans une trame de la fenêtre suivante. Les
+ * instants attendus : un octet tous les 13 µs, LENS_CS retombée 200 µs après le dernier (byte_us et lens_cs_tail_us du
+ * faux 135, hors tension). */
+static void t_rx_window(void)
+{
+    static const uint8_t junk[] = {0x01, 0x02, 0x03};
+    uint8_t b[64], c[16];
+    size_t n = r07(b), from;
+    uint64_t t, t2;
+    long k;
+    printf("fenêtre d'écoute : la réception ouverte lignes pilotées seulement, vidée quand elles se relâchent\n");
+    l135_init(&L, &P);
+    bench_init(lens_sim_135(&L), T0);
+    phy_sim_mounted();
+
+    from = g_bench.n;
+    t = emit(b, n);
+    phy_sim_bus_error();
+    bench_run_for(100 * MS);
+    {
+        const want_t w[] = {{BSK_PHY_LENS_CS, t, 1}, {BSK_PHY_LENS_CS, t + 43 * 13 + 200, 0}};
+        CHECK(events_are(from, w, 2, "lignes au repos"),
+              "lignes au repos : la réponse au 0x07 perdue, l'E_BUS non rapportée, LENS_CS publiée");
+    }
+
+    /* les 8 premiers octets d'une trame lignes au repos, ses 35 derniers lignes pilotées : aucune trame faite des deux ;
+     * les 35 écartés, puis la même trame entière, lue seule et juste */
+    from = g_bench.n;
+    t = phy_sim_now();
+    phy_sim_lens_raw(b, 8);
+    bench_run_for(1 * MS);
+    CHECK(bsk_phy_lines(true), "les lignes pilotées, 8 octets reçus avant");
+    t2 = phy_sim_now();
+    phy_sim_lens_raw(b + 8, n - 8);
+    phy_sim_lens_raw(b, n);
+    bench_run_for(100 * MS);
+    {
+        uint64_t t3 = t2 + 35 * 13 + 200;
+        const want_t w[] = {{BSK_PHY_LENS_CS, t, 1},       {BSK_PHY_LENS_CS, t + 8 * 13 + 200, 0},
+                            {BSK_PHY_LENS_CS, t2, 1},      {BSK_PHY_LENS_CS, t2 + 35 * 13 + 200, 0},
+                            {BSK_PHY_LENS_CS, t3, 1},      {BSK_PHY_ERROR, t3 + 43 * 13, E_FRAMING},
+                            {BSK_PHY_FRAME, t3 + 43 * 13, 0x07}, {BSK_PHY_LENS_CS, t3 + 43 * 13 + 200, 0}};
+        CHECK(events_are(from, w, 8, "le début avant, la suite après"),
+              "8 octets avant les lignes pilotées, 35 après, la trame entière : les 35 écartés, puis la trame entière, "
+              "à son dernier octet");
+    }
+    CHECK(raw_is(35, 35, b + 8), "l'E_FRAMING : les 35 octets reçus lignes pilotées, aucun d'avant");
+    k = (long)g_bench.n - 2;
+    CHECK(bench_count_kind(from, BSK_PHY_FRAME) == 1 && BENCH_EV(k).kind == BSK_PHY_FRAME && BENCH_EV(k).frame.len == 35 &&
+              !memcmp(BENCH_EV(k).frame.msg, b + 5, 35),
+          "une seule trame, la réponse au 0x07 telle qu'émise");
+
+    /* relâchées, ce que la réception tenait (3 octets écartés pas encore rapportés, un début de trame) n'est pas rendu */
+    memcpy(c, junk, sizeof junk);
+    memcpy(c + sizeof junk, b, 8);
+    phy_sim_lens_raw(c, sizeof junk + 8);
+    bench_run_for(1 * MS);
+    from = g_bench.n;
+    CHECK(bsk_phy_lines(false), "les lignes relâchées, 3 octets écartés et un début de trame en attente");
+    bench_run_for(100 * MS);
+    CHECK(g_bench.n == from, "100 ms après : rien n'est rendu (%zu événement(s))", g_bench.n - from);
+
+    /* de même à la coupure de la retombée de D2 */
+    CHECK(bsk_phy_lines(true), "les lignes pilotées de nouveau");
+    phy_sim_lens_raw(c, sizeof junk + 8);
+    bench_run_for(1 * MS);
+    from = g_bench.n;
+    t = phy_sim_now() + DROP;
+    phy_sim_d2(false);
+    bench_run_for(100 * MS);
+    CHECK(g_bench.n == from + 1 && BENCH_EV(from).kind == BSK_PHY_PRESENCE && !BENCH_EV(from).level && BENCH_EV(from).t == t,
+          "D2 retombé, la même attente : l'absence seule, rien de la réception (%zu événement(s))", g_bench.n - from);
 }
 
 /* ─────────────────────────── D2 et le verrou ─────────────────────────── */
@@ -942,43 +1030,50 @@ static void t_pres_task(void)
 static void t_presence_kept(void)
 {
     bsk_phy_event_t e;
-    size_t n_bus = 0, n_pres = 0;
+    size_t n_bus = 0, n_fault = 0, n_pres = 0;
     bool first = false, alt = true, last = true;
     uint64_t t1, t2;
     printf("présence : jamais perdue par la file pleine, rendue à son rang, alternée\n");
+    /* La file remplie derrière la retombée par les changements du FAULT d'un rail, qui y passent à toute heure : la
+     * coupure ferme la réception (bsk_phy.h, bsk_phy_lines), une E_BUS n'y entre plus. Celle d'avant, lignes pilotées, y
+     * est. */
     l135_init(&L, &P);
     bench_init(lens_sim_135(&L), T0);
     phy_sim_mounted();
+    (void)bsk_phy_lines(true);
     t1 = phy_sim_now();
     phy_sim_bus_error();                             /* en file, avant la retombée */
     phy_sim_run(t1 + 1 * MS);
     t2 = phy_sim_now() + DROP;
     phy_sim_d2(false);
     phy_sim_run(t2);                                 /* la retombée décidée */
-    for (int i = 0; i < 1100; i++) phy_sim_bus_error();   /* EV_CAP = 1024 : la file déborde, le plus ancien est jeté */
+    for (int i = 0; i < 1100; i++) phy_sim_rail_fault(BSK_RAIL_MOTOR, i % 2 == 0);   /* EV_CAP = 1024 : la file déborde */
     while (bsk_phy_poll(&e)) {
         if (e.kind == BSK_PHY_ERROR) n_bus++;
+        if (e.kind == BSK_PHY_FAULT) n_fault++;
         if (e.kind == BSK_PHY_PRESENCE) {
-            if (!n_pres) first = n_bus == 0 && e.t_us == t2 && !e.u.present;
+            if (!n_pres) first = n_bus + n_fault == 0 && e.t_us == t2 && !e.u.present;
             n_pres++;
         }
     }
     CHECK(n_pres == 1 && first, "file débordée derrière la retombée : l'absence est rendue, une fois, à son instant");
-    CHECK(n_bus == 1024, "la file a jeté les plus anciens E_BUS, dont celui d'avant la retombée (%zu)", n_bus);
+    CHECK(n_bus == 0 && n_fault == 1024,
+          "la file a jeté les plus anciens événements, dont l'E_BUS d'avant la retombée (%zu E_BUS, %zu FAULT)", n_bus, n_fault);
 
     l135_init(&L, &P);
     bench_init(lens_sim_135(&L), T0);
     phy_sim_mounted();
+    (void)bsk_phy_lines(true);
     t1 = phy_sim_now();
     phy_sim_bus_error();
     phy_sim_run(t1 + 1 * MS);
     phy_sim_d2(false);
     phy_sim_run(t1 + 4 * MS);                        /* la retombée décidée à 3 ms */
-    phy_sim_bus_error();
+    phy_sim_rail_fault(BSK_RAIL_MOTOR, true);
     CHECK(bsk_phy_poll(&e) && e.kind == BSK_PHY_ERROR && e.t_us == t1, "dans l'ordre des instants : l'E_BUS d'avant");
     CHECK(bsk_phy_poll(&e) && e.kind == BSK_PHY_PRESENCE && !e.u.present && e.t_us == t1 + 1 * MS + DROP,
           "puis l'absence");
-    CHECK(bsk_phy_poll(&e) && e.kind == BSK_PHY_ERROR && e.t_us == t1 + 4 * MS, "puis l'E_BUS d'après");
+    CHECK(bsk_phy_poll(&e) && e.kind == BSK_PHY_FAULT && e.t_us == t1 + 4 * MS, "puis le FAULT d'après");
 
     /* Rien n'est lu : présent lu, retombée, insertion confirmée, retombée, insertion confirmée, retombée. */
     l135_init(&L, &P);
@@ -1077,10 +1172,86 @@ static void t_rail_fault(void)
           (unsigned long)st.fault_logic);
 }
 
+/* La broche FAULT# de la carte vue par fault_settle (phy_common.h), à la place de ses registres (fault_isr de phy.c) : son
+ * niveau, le statut de son front, posé par chaque front et effacé à l'entrée de la prise et par `again`, et des fronts
+ * placés avant le n-ième accès de la prise (une relecture du niveau ou du statut), comptés depuis le premier front. La prise
+ * est celle du service d'interruption des GPIO d'ESP-IDF : tant que le statut est posé, il l'efface, puis appelle
+ * l'interruption (pin_isr). */
+static struct {
+    bool     low, status;     /* low : FAULT# à 0, actif */
+    unsigned k;               /* les accès faits depuis le premier front */
+    unsigned at;              /* un second front, avant l'accès `at` ; ~0u : aucun */
+} pin;
+
+static void pin_access(void)
+{
+    if (pin.k++ == pin.at) {
+        pin.low = !pin.low;
+        pin.status = true;
+    }
+}
+
+static bool pin_level(bsk_rail_t rail)
+{
+    (void)rail;
+    pin_access();
+    return pin.low;
+}
+
+static bool pin_again(bsk_rail_t rail)
+{
+    (void)rail;
+    pin_access();
+    if (!pin.status) return false;
+    pin.status = false;
+    return true;
+}
+
+/* Un front hors de toute prise (le second, s'il y en a un, avant l'accès `at`), puis les prises qu'il fait faire : leur
+ * nombre. */
+static unsigned pin_front(fault_t *f, unsigned at)
+{
+    unsigned n = 0;
+    pin.low = !pin.low;
+    pin.status = true;
+    pin.k = 0;
+    pin.at = at;
+    while (pin.status) {
+        pin.status = false;
+        (void)fault_edge(f, fault_settle(pin_level, pin_again, BSK_RAIL_MOTOR));
+        n++;
+    }
+    return n;
+}
+
+/* Le fantôme (ticket #590) : un second front après l'effacement du statut à l'entrée de la prise, avant la relecture du
+ * niveau, est vu dans ce niveau ; son statut ne relance pas une prise de plus, où le niveau n'aurait pas changé et que
+ * fault_edge compterait encore. Attendus écrits à la main : une activation, chaque fois. */
+static void t_fault_settle(void)
+{
+    fault_t f = {0};
+    unsigned n;
+    printf("FAULT des rails : la prise de la carte relit le niveau tant qu'un front arrive pendant elle (fault_settle)\n");
+    pin.low = false;
+    n = pin_front(&f, 0);
+    CHECK(n == 1 && f.n == 1 && !f.active,
+          "activé, retombé avant la relecture du niveau : une prise, une activation (%u prises, %lu)", n, (unsigned long)f.n);
+    n = pin_front(&f, 1);
+    CHECK(n == 1 && f.n == 2 && !f.active,
+          "activé, retombé entre la relecture du niveau et celle du statut : une prise, une activation de plus, inactif "
+          "(%u prises, %lu)", n, (unsigned long)f.n);
+    n = pin_front(&f, ~0u);
+    CHECK(n == 1 && f.n == 3 && f.active, "activé seul : une prise, une activation, actif (%u prises, %lu)", n,
+          (unsigned long)f.n);
+    n = pin_front(&f, ~0u);
+    CHECK(n == 1 && f.n == 3 && !f.active, "puis retombé : une prise, rien de compté, inactif (%u prises, %lu)", n,
+          (unsigned long)f.n);
+}
+
 int main(void)
 {
     signal(SIGALRM, too_long);
-    alarm(10);
+    alarm(GARDE_S);
     l135_params_default(&P);
     t_valid();
     t_malformed();
@@ -1090,6 +1261,7 @@ int main(void)
     t_lines_rest();
     t_fault();
     t_lens_emission();
+    t_rx_window();
     t_presence();
     t_drop();
     t_debounce();
@@ -1097,6 +1269,7 @@ int main(void)
     t_presence_kept();
     t_pres_task();
     t_rail_fault();
+    t_fault_settle();
     printf("test_phy : %d vérifications, %d échec(s)\n", checks, fails);
     return fails ? 1 : 0;
 }

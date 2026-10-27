@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: captain <captain@lcars.local>
 Date: Mon, 19 Oct 2026 18:54:41 +0200
-Subject: [PATCH 4/8] Pinefeat CEF: refresh the state once a second
+Subject: [PATCH 4/9] Pinefeat CEF: refresh the state once a second
 
 TimerHit() refreshes the state only once a second has passed since
 lastUpdate, but lastUpdate was set only by the constructor and by

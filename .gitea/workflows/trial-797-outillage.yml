@@ -1,0 +1,67 @@
+# La mesure d'outillage de la campagne de fuzzing (F1, 4_Firmware/sim/fuzz/README.md) : sur le runner, dans l'image du
+# job `firmware` de ci.yml (ubuntu:24.04), ce qui s'y trouve et ce qui s'y installe pour F4 — gcc, clang, afl-fuzz,
+# l'apt de clang et d'afl++ borné dans le temps, puis, clang présent, un harnais jouet lié avec
+# -fsanitize=fuzzer,address,undefined et lancé 30 s. Il ne juge pas le projet : chaque étape relève et ne rougit pas sur
+# un outil absent ; le relevé est dans le journal du run (runs 3038, puis avec compiler-rt).
+#
+# Relancer : `ci_trial` (workflow: trial-797-outillage.yml), ou Actions > « essai-fuzz-outillage » > Run workflow.
+#
+# ⚠ `name:` ne commence pas par `CI` : ses statuts ne tombent pas sous le glob `CI / *` exigé par la protection de `main`.
+name: essai-fuzz-outillage
+
+on: workflow_dispatch
+
+jobs:
+  outillage:
+    runs-on: shell
+    container: ubuntu:24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: L'image, gcc, clang et afl-fuzz avant toute installation
+        run: |
+          echo "image : ubuntu:24.04 (container: de ce job)"
+          grep -E '^(PRETTY_NAME|VERSION_CODENAME)=' /etc/os-release
+          echo "nproc : $(nproc)"
+          grep -m1 'model name' /proc/cpuinfo || true
+          command -v gcc clang afl-fuzz || echo "command -v gcc clang afl-fuzz : rc=$?"
+      - name: apt-get install de gcc, puis de clang, d'afl++ et de compiler-rt (libFuzzer), borné à 300 s
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
+          gcc --version | head -n 1
+          debut=$(date +%s)
+          # libclang-rt-18-dev : les bibliothèques de libFuzzer et des sanitizers de clang 18 ; sans elle (run 3038), clang
+          # s'installe mais ne lie pas -fsanitize=fuzzer (libclang_rt.fuzzer-x86_64.a absente)
+          if timeout 300 apt-get install -y -qq --no-install-recommends clang afl++ libclang-rt-18-dev >/tmp/apt.log 2>&1; then
+            echo "apt-get install clang afl++ libclang-rt-18-dev : fait en $(( $(date +%s) - debut )) s"
+          else
+            echo "apt-get install clang afl++ libclang-rt-18-dev : rc=$? en $(( $(date +%s) - debut )) s"
+            tail -n 20 /tmp/apt.log
+          fi
+          command -v clang afl-fuzz afl-clang-fast || echo "command -v clang afl-fuzz afl-clang-fast : rc=$?"
+          clang --version 2>/dev/null | head -n 1 || true
+      - name: Un harnais jouet sous libFuzzer, 30 s
+        run: |
+          if ! command -v clang >/dev/null; then echo "clang absent : harnais jouet non joué"; exit 0; fi
+          cat > /tmp/jouet.c <<'EOF'
+          #include <stddef.h>
+          #include <stdint.h>
+          int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
+          {
+              uint8_t s = 0;
+              for (size_t i = 0; i < n; i++) s = (uint8_t)(s + d[i]);
+              return s == 0x55 && n == 7 ? 0 : 0;
+          }
+          EOF
+          if clang -fsanitize=fuzzer,address,undefined -O1 /tmp/jouet.c -o /tmp/jouet; then
+            echo "lié avec -fsanitize=fuzzer,address,undefined"
+            /tmp/jouet -max_total_time=30 -print_final_stats=1 2>&1 | tail -n 15
+            echo "jouet : rc=${PIPESTATUS[0]}"
+          else
+            echo "clang ne lie pas le harnais jouet : rc=$?"
+          fi

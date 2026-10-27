@@ -42,7 +42,25 @@ void cmd_button(uint64_t t);
  * n'appeler qu'en READY, où aucune autre requête n'est en vol. */
 bool cmd_custom_poll(void);
 
-/* Avec la session : CMD_LENS_CUSTOM en vol finie par ACK_FAILED, E_ABORTED. */
+/* Avec la session, après l'arrêt de la boucle (bsk_txn_loop(false)) : CMD_LENS_CUSTOM en vol finie par ACK_FAILED,
+ * E_ABORTED ; émise et sans réponse, elle désynchronise le canal (cmd.c, cu). Un geste de marque en vol ne l'est pas : son
+ * écriture est dans la file du magasin, son résultat le finit (cmd_mark_poll). */
 void cmd_forget(void);
+
+/* Au bsk_session_init, avant l'oubli de la session : aucun geste de marque ni CMD_LENS_CUSTOM en vol, CMD_LENS_CUSTOM
+ * désynchronisée levée (le reset de la carte coupe les rails, phy.c). */
+void cmd_init(void);
+
+/* Les deux rails coupés (to_off) : CMD_LENS_CUSTOM désynchronisée levée (cmd.c). Appelée là seulement : l'oubli de la
+ * session sans coupure (la reprise) ne la lève pas. */
+void cmd_rails_cut(void);
+
+/* À chaque pas, après mark_poll, dans tout état : le geste de marque en vol fini par le résultat de son écriture, ou à son
+ * échéance (BSK_STORE_WRITE_MS après son dépôt) atteinte à `now` ; ACK_COMPLETED rangé, ACK_FAILED E_STORE sinon ; pour
+ * l'appui long, sa ligne `* btn`. */
+void cmd_mark_poll(uint64_t now);
+
+/* L'échéance du geste de marque en vol, UINT64_MAX sans lui (bsk_session_next). */
+uint64_t cmd_mark_due(void);
 
 #endif

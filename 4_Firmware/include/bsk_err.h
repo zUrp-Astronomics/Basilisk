@@ -33,15 +33,23 @@
  *   E_FORBIDDEN                  BENCH_CORE    journalisé, remonté ; jamais silencieux
  *   E_BUSY                       SESSION       refus immédiat (ACK_REJECTED) d'une commande déposée pendant
  *                                              qu'une autre est en vol, CMD_FOCUS_STOP excepté
- *   E_LOST                       SESSION       FAULT au-delà du plafond de reprises, quand la carte ne peut
- *                                              pas couper ; publié dans last_error, jeton `lost`. Aussi la
- *                                              raison, non publiée, de l'ACK_FAILED d'une commande en vol
- *                                              quand la session quitte READY sur une perte
+ *   E_LOST                       SESSION       FAULT au-delà du plafond de reprises ; publié dans
+ *                                              last_error, jeton `lost`. Aussi la raison, non publiée, de
+ *                                              l'ACK_FAILED d'une commande en vol quand la session quitte
+ *                                              READY sur une perte
  *   E_ABORTED                    MOUVEMENT     fin d'un mouvement arrêté par q, pas un échec ; move_rc=aborted.
  *                                              Aussi la raison, non publiée, de l'ACK_FAILED d'une commande
  *                                              en vol quand la session quitte READY sur b ou la retombée de D2
  *   E_NOCAP                      SESSION       refus immédiat (ACK_REJECTED) d'une opération ou d'une capacité
  *                                              non servie ; HOTE répond `er nocap` ; jamais dans last_error
+ *   E_STORE                      SESSION       l'ACK_FAILED d'un geste de marque (CMD_SET_MARK, CMD_CLEAR_MARK,
+ *                                              l'appui long) que le magasin n'a pas rangé : son écriture ratée,
+ *                                              ou pas rendue à son échéance (BSK_STORE_WRITE_MS) ; HOTE répond
+ *                                              `er store` ; jamais dans last_error
+ *   E_DESYNC                     SESSION       refus immédiat (ACK_REJECTED) de CMD_LENS_CUSTOM après l'échéance
+ *                                              d'un CUSTOM, dont la réponse peut encore arriver, rien d'émis ;
+ *                                              levé par la coupure des rails (cmd.c) ; HOTE répond
+ *                                              `er link desync` ; jamais dans last_error
  *
  * Ce qui dépend de la famille d'objectif devient un drapeau de capacité (bsk_contract.h), pas du code
  * conditionnel : E_REJECTED n'existe pas chez Samyang (aucun 0x02, une trame fautive est jetée en silence),
@@ -51,8 +59,8 @@ typedef enum {                 /* -> qui lève l'erreur */
     E_TIMEOUT,      /* pas de reponse dans l'echeance      -> TRANSACTION, l'echeance de sa requete ; MOUVEMENT, la
                                                               raison journalisee de ses renvois et abandons */
     E_FRAMING,      /* reponse malformee                   -> PHY, les octets ecartes du flux, au journal seul ;
-                                                              SESSION, une reponse trop courte a l'init, ou qui n'est
-                                                              pas celle de CUSTOM */
+                                                              SESSION, une reponse trop courte a l'init, ou pour les
+                                                              donnees de CUSTOM */
     E_REJECTED,     /* l'objectif a dit non                -> levee nulle part */
     E_BUS,          /* defaut electrique detecte           -> PHY, son UART, un front perdu (au journal seul), une
                                                               emission ratee (TRANSACTION, bench_core) */
@@ -68,6 +76,8 @@ typedef enum {                 /* -> qui lève l'erreur */
     E_ABORTED,      /* mouvement arrete par q, pas un echec -> MOUVEMENT ; SESSION, la sortie de READY ;
                                                                TRANSACTION, une requete retenue, la boucle arretee */
     E_NOCAP,        /* operation ou capacite non servie    -> SESSION */
+    E_STORE,        /* geste de marque pas range           -> SESSION, le resultat du magasin ou son echeance */
+    E_DESYNC,       /* CUSTOM refuse apres une echeance    -> SESSION, jusqu'a la coupure des rails */
 } bsk_err_t;
 
 #endif

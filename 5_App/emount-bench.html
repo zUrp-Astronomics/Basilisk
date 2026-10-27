@@ -27,7 +27,7 @@ section.box h2{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spa
 .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px}
 button{background:#2b333b;color:var(--ink);border:1px solid #3b4650;border-radius:4px;padding:6px 10px;font:inherit;cursor:pointer}
 button:hover{background:#354049}
-button:disabled{opacity:.4;cursor:not-allowed}
+button:disabled,input:disabled,.slider input[type=range]:disabled{opacity:.4;cursor:not-allowed}
 button.primary{background:var(--acc);color:#0d1a15;border-color:transparent;font-weight:600}
 button.warn{border-color:var(--acc2);color:var(--acc2)}
 button.danger{border-color:var(--bad);color:var(--bad)}
@@ -248,6 +248,7 @@ const TEXTS={
  'state.faultWhy':["· FAULT : {0}","· FAULT: {0}"],
  'state.busy':["· occupé : {0}","· busy: {0}"],
  'state.ready':["· prêt","· ready"],
+ 'state.noIdentity':["· prête, identité non lue","· ready, identity not read"],
  'caps.ext':["lot étendu (ext={0})","extended set (ext={0})"],
  'caps.pinefeat':["Pinefeat seul","Pinefeat only"],
  'board.fw':["fw {0}","fw {0}"],
@@ -621,7 +622,7 @@ async function connect(){
      * (labo), lue une fois : un redemarrage de la carte fait tomber le port. */
     L.ver=v; addLine('ev','[app] '+tr('log.firmware',v));
     const dbg=parseKV(await ask('DEBUG',true)); if(gen!==connGen) return; L.reset=dbg.reset||null;
-    await refreshAll(true); if(gen!==connGen) return;
+    await refreshAll(); if(gen!==connGen) return;
     startPoll();
   }catch(e){ addLine('err','[app] '+e.message); await disconnect(); }
   finally{ connecting=false; }
@@ -650,16 +651,21 @@ $('cli').onsubmit=e=>{ e.preventDefault(); const c=$('cliIn').value.trim(); if(c
 /* moveWatch : un deplacement lance par la page (son `ok` recu), dont la fin (e -> n) fait lire `g` ; stopWatchUntil :
  * apres `aborted` ou `stall`, l'instant jusqu'ou `g` est relu, l'arret non confirme arrivant apres (PROTOCOL.md § 3 :
  * trois 0x1C, 4,5 s apres le premier). */
-const L={present:false,fault:false,ext:false,ver:null,reset:null,pos:null,min:null,max:null,mark:null,moving:null,fnum:null,fmin:null,fmax:null,busy:'-',lastOp:'',moveWatch:false,stopWatchUntil:0};
-/* Un objectif pret : present et pas en fault (PROTOCOL.md § 7 : en fault, les lettres repondent er fault). */
-const lensReady=()=>L.present&&!L.fault;
-/* La ligne d'etat : FAULT avec sa raison (le jeton de last_op=boot:er:"<jeton>", § 5), sinon occupe ou pret. */
+const L={present:false,fault:false,ready:false,ext:false,ver:null,reset:null,pos:null,min:null,max:null,mark:null,moving:null,fnum:null,fmin:null,fmax:null,lastOp:'',moveWatch:false,stopWatchUntil:0};
+/* Un objectif pret : la carte en `ready` (boot_state, PROTOCOL.md § 5), son identite lue (refreshAll). De `powering` a
+ * `restoring` et en `recovering`, les lettres qui ont besoin de l'objectif repondent `er busy boot` ; en fault,
+ * `er fault` (§ 7). L.ready ne se pose qu'une fois `i` lu en `ready` : la page n'annonce jamais « pret » sans le nom
+ * que rend la carte (la premiere trace sur la carte reelle, le 2026-10-19 : « [app] pret : - » en plein demarrage). */
+const lensReady=()=>L.present&&L.ready;
+/* La ligne d'etat : absent, FAULT avec sa raison (le jeton de last_op=boot:er:"<jeton>", § 5), pret, sinon l'etape du
+ * demarrage ou de la reprise ou en est la carte (boot_state). En `ready` sans identite lue, refreshAll y ecrit
+ * « prete, identite non lue ». */
 function stateText(t){
-  const present=L.present, fault=L.fault, busy=L.busy;
+  const present=L.present, fault=L.fault;
   return ()=>{
     if(!present) return tr('state.absent',t.boot_state||'?');
     if(fault){ const m=/:er:"([^"]*)"$/.exec(t.last_op||''); return m?tr('state.faultWhy',m[1]):tr('state.fault'); }
-    return busy!=='-'?tr('state.busy',busy):tr('state.ready');
+    return t.boot_state==='ready'?tr('state.ready'):tr('state.busy',t.boot_state||'?');
   };
 }
 /* Ce qui n'est plus su (objectif retire ou en fault, deconnexion) s'affiche « — » et ne sert plus a calculer. */
@@ -676,17 +682,22 @@ const num=x=>(x===undefined||x===null||x==='-1'||x==='-')?null:parseInt(x,10);
  * toute la valeur sont retires */
 function parseKV(line){ const o={}; if(!line) return o; for(const m of line.matchAll(/(\w+)=((?:[^\s"]|"[^"]*")*)/g)){ const v=m[2]; o[m[1]]=/^"[^"]*"$/.test(v)?v.slice(1,-1):v; } return o; }
 function isNum(s){ return typeof s==='string'&&/^-?\d+$/.test(s); }
-async function refreshAll(announce){
+/* Tout l'etat relu, a la connexion et a chaque changement de present, de fault ou de `ready` (pollSlow). Hors `ready`,
+ * rien n'est lu de l'objectif. Chaque arrivee en `ready` s'annonce une fois au journal, avec le nom que rend `i` ; sans
+ * ce nom (la carte sortie de `ready` entre `t` et `i`, ou pas de reponse), la page ne tient pas l'objectif pour pret
+ * (L.ready reste faux), la ligne d'etat le dit des ce `t`, et le `t` suivant relance la lecture. */
+async function refreshAll(){
   const gen=connGen; /* une continuation de l'ancienne connexion ne touche pas la nouvelle */
   const t=parseKV(await ask('t',true)); if(gen!==connGen) return;
   if(t.ext) setTr('s_board',boardLine(t));
   if(t.last_op) L.lastOp=t.last_op;
   setText('s_t',Object.entries(t).map(([k,v])=>k+'='+v).join(' ')||'—');
-  L.present=t.present==='1'; L.fault=t.boot_state==='fault'; L.busy=t.busy||'-'; L.ext=t.ext==='1';
+  L.present=t.present==='1'; L.fault=t.boot_state==='fault'; L.ready=false; L.ext=t.ext==='1';
   setTr('s_power',powerLine(t)); { const ext=L.ext; setTr('s_caps',()=>ext?tr('caps.ext',t.ext):tr('caps.pinefeat')); }
-  setTr('s_state',stateText(t));
-  if(!lensReady()){ forgetLens(); return; }
-  const i=await ask('i',true); if(gen!==connGen) return; setText('s_id',i&&!i.startsWith('er')?i:'—');
+  if(!L.present||t.boot_state!=='ready'){ setTr('s_state',stateText(t)); forgetLens(); return; }
+  const i=await ask('i',true); if(gen!==connGen) return;
+  if(i===null||i.startsWith('er')){ setTr('s_state',()=>tr('state.noIdentity')); forgetLens(); return; }
+  L.ready=true; setText('s_id',i);
   const mk=await ask('j',true); if(gen!==connGen) return; L.mark=isNum(mk)?+mk:null;
   const r=await ask('r',true); if(gen!==connGen) return; let m=/^(\d+)-(\d+)$/.exec(r||'');
   if(m){ L.min=+m[1]; L.max=+m[2]; } else { L.min=L.max=null; }
@@ -694,15 +705,20 @@ async function refreshAll(announce){
   if(m){ L.fmin=+m[1]; L.fmax=+m[2]; } else { L.fmin=L.fmax=null; }
   applyPanels(); applyLimits();
   await pollSlow(); if(gen!==connGen) return; await pollFast(); if(gen!==connGen) return;
-  if(announce) addLine('ev','[app] '+tr('log.ready',i&&!i.startsWith('er')?i:'-'));
+  if(!lensReady()) return; /* sortie de `ready` pendant la lecture : pollSlow l'a vu et relu */
+  setTr('s_state',stateText(t)); addLine('ev','[app] '+tr('log.ready',i));
 }
-/* Meme interface pour tout objectif : tout est actif des qu'un objectif est la. Ce que l'objectif
- * ne sert pas repond `er nocap …` dans le journal. La page ne porte que ce que la carte sert. */
+/* Meme interface pour tout objectif : les commandes de mouvement (focus, marque, ouverture) sont actives en `ready`
+ * seulement ; ce que l'objectif ne sert pas repond `er nocap …` dans le journal. Stop (`q`) est actif des qu'un objectif
+ * est la, dans tout etat : seul moyen, depuis la page, d'arreter un mouvement qu'elle n'a pas lance (le retour qui finit
+ * un demarrage, `restoring`) ; la carte decide de son effet et sa reponse s'affiche au journal (PROTOCOL.md § 2, `q`).
+ * La page ne porte que ce que la carte sert. Inactif se voit par controle (:disabled, la feuille de style), le meme dans
+ * les deux sections : aucune section n'est attenuee, Stop vit dans Focus et doit se voir actif. */
 function applyPanels(){
   const on=lensReady(), ap=on&&L.fmin!==null; /* l'ouverture se regle dans la plage lue (a) : sans elle, rien a calculer */
   document.querySelectorAll('#secFocus button, #secFocus input').forEach(e=>e.disabled=!on);
+  $('btnStop').disabled=!L.present;
   document.querySelectorAll('#secIris button, #secIris input').forEach(e=>e.disabled=!ap);
-  $('secFocus').style.opacity=on?'1':'.55'; $('secIris').style.opacity=ap?'1':'.55';
   if(on) setTr('irisBy',()=>tr('iris.by')); else setText('irisBy','');
 }
 function applyLimits(){
@@ -765,14 +781,13 @@ async function pollSlow(){
   const gen=connGen;
   const z=await ask('z',true); if(gen!==connGen) return; showClimate(z);
   const t=parseKV(await ask('t',true)); if(gen!==connGen) return;
-  const wasPresent=L.present, wasBusy=L.busy, hadLimits=L.min!==null;
-  L.busy=t.busy||'-';
+  const hadLimits=L.min!==null;
   if(t.last_op&&t.last_op!==L.lastOp){ L.lastOp=t.last_op; if(t.last_op!=='-:ok'&&!t.last_op.endsWith(':ok')) addLine('err','[app] '+tr('log.lastOp',t.last_op)); else if(t.last_op!=='-:ok') addLine('ev','[app] '+tr('log.lastOp',t.last_op)); }
-  if((t.present==='1')!==wasPresent||(t.boot_state==='fault')!==L.fault){ await refreshAll(true); return; }
+  /* objectif mis ou retire, fault, arrivee en `ready` ou sortie (un demarrage, une reprise) : tout est relu */
+  if((t.present==='1')!==L.present||(t.boot_state==='fault')!==L.fault||(t.boot_state==='ready')!==L.ready){ await refreshAll(); return; }
   setTr('s_power',powerLine(t)); setTr('s_state',stateText(t));
   if(t.ext) setTr('s_board',boardLine(t));
   if(!lensReady()) return;
-  if(wasBusy!=='-'&&L.busy==='-'){ await refreshAll(false); return; } /* fin d'un demarrage (busy=boot) : identite, bornes, plage fraiches */
   { /* bornes, marque : par leur lettre (`r`, `j`), pas dans `t` */
     const r=await ask('r',true); if(gen!==connGen) return; const rm=/^(\d+)-(\d+)$/.exec(r||''), tmin=rm?+rm[1]:null, tmax=rm?+rm[2]:null;
     const mk=await ask('j',true); if(gen!==connGen) return; const tmark=isNum(mk)?+mk:null; if(tmark!==L.mark){ L.mark=tmark; applyLimits(); }

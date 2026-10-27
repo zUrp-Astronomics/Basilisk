@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: captain <captain@lcars.local>
 Date: Mon, 19 Oct 2026 18:54:35 +0200
-Subject: [PATCH 2/8] Pinefeat CEF: format the focus moves as unsigned
+Subject: [PATCH 2/9] Pinefeat CEF: format the focus moves as unsigned
 
 moveFocusAbs() and moveFocusRel() wrote their uint32_t argument with %d.
 The format did not match the type: within the range of the properties

@@ -36,8 +36,16 @@ void lens_rx_forget(void)
 
 void lens_rx_loop(void) { looping = true; }
 
-/* Un code d'ouverture du domaine que la carte convertit (bsk_contract.h). */
+/* Un code d'ouverture du domaine que la carte convertit (bsk_contract.h). Le seul jugement du domaine : un code publié
+ * l'est dans le domaine, ou il vaut 0, inconnu ; ses lecteurs ne le refont pas. */
 static bool ap_known(uint16_t code) { return code >= BSK_AP_CODE_MIN && code <= BSK_AP_CODE_MAX; }
+
+/* Le code reçu s'il est dans le domaine, 0 (inconnu) sinon : jamais corrigé ni borné. */
+static uint16_t ap_code(uint8_t lo, uint8_t hi)
+{
+    uint16_t code = (uint16_t)(lo | hi << 8);
+    return ap_known(code) ? code : 0;
+}
 
 /* L'offset k d'un message est msg[k + 1] : msg[0] est son type. */
 uint8_t lens_rx_frame(const bsk_frame_t *f)
@@ -50,8 +58,8 @@ uint8_t lens_rx_frame(const bsk_frame_t *f)
         pub.have05 = true;
         pub.focal_nom = (uint16_t)(f->msg[27] | f->msg[28] << 8);
         pub.move = f->len > 61 ? f->msg[61] : 0;
-        pub.ap = (uint16_t)(f->msg[1] | f->msg[2] << 8);
-        pub.ap_ring = f->msg[20] & 0x01 ? (uint16_t)(f->msg[18] | f->msg[19] << 8) : 0;
+        pub.ap = ap_code(f->msg[1], f->msg[2]);
+        pub.ap_ring = f->msg[20] & 0x01 ? ap_code(f->msg[18], f->msg[19]) : 0;
         if (f->len > 63) {
             pub.have62 = true;
             pub.o62 = f->msg[63];
@@ -71,6 +79,10 @@ uint8_t lens_rx_frame(const bsk_frame_t *f)
          * 7_Docs/E-Mount/protocol.md § 7.6, samyang.md § 4.8) */
         pub.fmin = (int32_t)(f->msg[8] | f->msg[9] << 8) + LIMIT_MARGIN;
         pub.fmax = (int32_t)(f->msg[10] | f->msg[11] << 8) - LIMIT_MARGIN;
+        /* Un intervalle non vide dans 0..65535, ou inconnu (à 0). fmin <= fmax suffit : resserrées, fmin vaut au moins 5
+         * et fmax au plus 65530, une borne qui sortirait de 0..65535 laisse l'intervalle vide. */
+        pub.lim = pub.fmin <= pub.fmax;
+        if (!pub.lim) pub.fmin = pub.fmax = 0;
         pub.rx06++;
         /* les accusés suivent le 0x06 dans sa trame, deux octets chacun (automate du 135, § 1.7.4) */
         for (size_t i = LEN06; i + 1 < f->len; i += 2) {
@@ -81,9 +93,11 @@ uint8_t lens_rx_frame(const bsk_frame_t *f)
         pub.id[4] = f->msg[1];
         if (f->len >= MIN08) {
             pub.have08 = true;
-            pub.ap_min = (uint16_t)(f->msg[1] | f->msg[2] << 8);
-            pub.ap_max = (uint16_t)(f->msg[3] | f->msg[4] << 8);
-            if (!ap_known(pub.ap_min) || !ap_known(pub.ap_max)) {   /* hors du domaine : une réponse, sa plage inconnue */
+            pub.ap_min = ap_code(f->msg[1], f->msg[2]);
+            pub.ap_max = ap_code(f->msg[3], f->msg[4]);
+            /* hors du domaine ou inversée : une réponse, sa plage inconnue ; un maximum inconnu (0) laisse le minimum
+             * au-dessus de lui */
+            if (!pub.ap_min || pub.ap_min > pub.ap_max) {
                 pub.have08 = false;
                 pub.ap_min = pub.ap_max = 0;
             }
@@ -95,7 +109,7 @@ uint8_t lens_rx_frame(const bsk_frame_t *f)
 void lens_rx_stale(uint8_t type)
 {
     if (type == 0x06) {
-        pub.have06 = false;
+        pub.have06 = pub.lim = false;
         pub.pos = 0;
         pub.fmin = pub.fmax = 0;
         return;

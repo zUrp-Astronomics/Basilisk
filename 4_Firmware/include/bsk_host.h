@@ -2,7 +2,8 @@
  * AUTHOR: engineer
  * DATE: 2026-10-04
  * STATUS: actif — en-tête partagé ; host.c (C pur) traduit, host_usb.c porte l'USB de la carte ;
- *         ticket #528 : les marges de pile des tâches, pour DEBUG (bsk_host_stacks)
+ *         ticket #528 : les marges de pile des tâches, pour DEBUG (bsk_host_stacks) ; ticket #694 : l'horloge de la
+ *         carte pour `x` (bsk_host_init)
  *
  * La couche HOTE parle PROTOCOL.md sur l'USB et le contrat (bsk_contract.h) avec SESSION : une ligne reçue devient
  * une commande déposée (bsk_session_command) et son premier accusé, ou une lecture de l'instantané, puis une ligne
@@ -21,13 +22,14 @@
 #include <stdint.h>
 
 /* Une réponse tient toujours dans ce tampon (bien moins : les plus longues, `DEBUG` et `t`, font quelques centaines
- * de caractères ; `DEBUG`, tous ses nombres à 10 chiffres, en fait moins de 400). */
+ * de caractères ; `DEBUG`, tous ses nombres à 10 chiffres, en fait moins de 450). */
 #define BSK_HOST_REPLY_MAX 1536u
 
 /* `version` : la version du firmware de la carte, PROJECT_VER de 4_Firmware/CMakeLists.txt, sa seule source, rendue
- * telle quelle par `v` ; `reset` : la cause du dernier redémarrage de la carte (`DEBUG` → reset=). Les deux chaînes
- * vivent aussi longtemps que la carte. */
-void bsk_host_init(const char *version, const char *reset);
+ * telle quelle par `v` ; `reset` : la cause du dernier redémarrage de la carte (`DEBUG` → reset=, et `x`). Les deux
+ * chaînes vivent aussi longtemps que la carte. `clock_us` : le temps écoulé depuis ce redémarrage, en µs, qui repart de
+ * 0 à chaque redémarrage (la carte : esp_timer_get_time) ; `x` le rend en ms, avec `reset` (PROTOCOL.md § 2). */
+void bsk_host_init(const char *version, const char *reset, uint64_t (*clock_us)(void));
 
 /* Lit les accusés et l'instantané pour tenir last_op et move_rc : à appeler après chaque
  * bsk_session_step, sur la même tâche. Les arrivées de la session et les accusés finaux se succèdent dans
@@ -41,15 +43,18 @@ void bsk_host_observe(void);
  *   - "\n" après une réponse du protocole Basilisk/Pinefeat (PROTOCOL.md § 1, une ligne par commande) ;
  *   - "" après une réponse Moonlite, octets exacts sans fin de ligne (`4000#`, `10` : PROTOCOL.md § 4) ;
  *   - NULL : rien n'est écrit, ni `out` ni fin (une commande Moonlite sans réponse, `:SN…#`, `:FG#`, `:FQ#`…).
- *   - BSK_HOST_LATER : la réponse attend l'objectif (`CUSTOM`, PROTOCOL.md § 3.1), ci-dessous.
+ *   - BSK_HOST_LATER : la réponse attend l'objectif (`CUSTOM`, PROTOCOL.md § 3.1), le départ du 0x1C de `q`, retenu
+ *     entre le 0x03 et le 0x04 de la boucle (PROTOCOL.md § 2, ligne q ; bsk_txn.h), ou l'écriture de `js`, `jx` dans le
+ *     magasin (bsk_store.h), ci-dessous.
  * `cap` ≥ BSK_HOST_REPLY_MAX. */
 const char *bsk_host_line(const char *line, char *out, size_t cap);
 
 /* Une réponse différée. Quand bsk_host_line rend BSK_HOST_LATER (comparé par adresse), rien n'est écrit, et le
  * transport ne lui passe aucune autre ligne (une réponse par ligne, PROTOCOL.md § 1) : il appelle bsk_host_later après chaque
  * bsk_host_observe, sur la même tâche, tant qu'elle rend BSK_HOST_LATER. Elle rend ensuite la réponse dans `out` et le
- * terminateur, comme bsk_host_line. L'attente est bornée : la session finit toujours la commande (la réponse de l'objectif,
- * son échéance, ou la sortie de READY ; bsk_session.h). */
+ * terminateur, comme bsk_host_line. L'attente est bornée : la session finit toujours la commande (`CUSTOM` : la réponse de
+ * l'objectif, son échéance, ou la sortie de READY ; `q` : au 0x04 de la paire en cours, 1,5 ms au plus après le dépôt, ou à
+ * l'arrêt de la boucle avant lui ; `js`, `jx` : le résultat de l'écriture, BSK_STORE_WRITE_MS au plus ; bsk_session.h). */
 extern const char BSK_HOST_LATER[];
 const char *bsk_host_later(char *out, size_t cap);
 

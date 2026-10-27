@@ -70,6 +70,8 @@ void store_sim_poke(const char *key, uint32_t v) { (void)set(key, v); }
 
 void bsk_store_init(void) {}
 
+bsk_store_nvs_t bsk_store_nvs(void) { return g_store_sim.nvs; }
+
 /* Le dépôt le plus ancien, fait ; son résultat à la suite des autres. Faux s'il n'y en a pas, ou si la file des résultats
  * est pleine (la tâche de la carte y attendrait). */
 static bool one(void)
@@ -82,7 +84,8 @@ static bool one(void)
     r->op = req[0].op;
     memcpy(r->key, req[0].key, sizeof r->key);
     if (r->op == BSK_STORE_GET) {
-        r->ok = store_sim_peek(r->key, &r->value);
+        r->ok = !g_store_sim.fail_get && store_sim_peek(r->key, &r->value);
+        r->err = g_store_sim.fail_get;
     } else if (g_store_sim.fail) {
         r->ok = false;
     } else if (r->op == BSK_STORE_PUT) {

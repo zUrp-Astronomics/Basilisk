@@ -20,7 +20,9 @@
 # 5. une macro, hors de toute fonction, se mute sans fonction ; une fonction d'une ligne se mute ; une ancre qui déborde
 #    de l'accolade fermante de sa fonction n'y est pas trouvée, refusée ;
 # 6. une ancre qui contient un commentaire est refusée ;
-# 7. une mutation qui ne change qu'un commentaire, ou que des blancs de fin de ligne et des lignes vides, est refusée.
+# 7. une mutation qui ne change qu'un commentaire, ou que des blancs de fin de ligne et des lignes vides, est refusée ;
+# 8. un mutant tué par la garde de durée du programme (sa ligne, sortie 1) est dit tué par elle, et compté à part ; un
+#    mutant tué par une vérification ne l'est pas.
 set -euo pipefail
 ICI=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 T=$(mktemp -d)
@@ -41,13 +43,25 @@ programme_includes() { INCLUDES=(-I"$1/include"); }
 programme_args() { ARGS=(); }
 FIN
 cat > "$J/sim/test/test_jouet.c" <<'FIN'
+#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
 #include <stdio.h>
+#include <unistd.h>
 int un(void);
 int x(void);
 int deux(void);
 int trois(void);
+static void too_long(int sig)
+{
+    static const char m[] = "  ECHEC : le programme ne termine pas en 1 s (boucle sans fin)\n";
+    (void)sig;
+    (void)!write(1, m, sizeof m - 1);
+    _exit(1);
+}
 int main(void)
 {
+    signal(SIGALRM, too_long);
+    alarm(1);
     if (un() == 1 && x() == 1 && deux() == 1 && trois() == 1) return 0;
     printf("  ECHEC jouet : un=%d x=%d deux=%d trois=%d (1 attendu)\n", un(), x(), deux(), trois());
     return 1;
@@ -202,6 +216,13 @@ cat > "$J/sim/test/mutations.txt" <<'FIN'
 +
 FIN
 jouer 1 "le texte muté ne change pas le code" "7. un texte muté qui n'ajoute que des blancs de fin et une ligne vide : refusé"
+
+mute un "    return a;" "    while (a) {} return a;"
+jouer 0 "tué    #1 test_jouet par la garde de durée" "8. un mutant qui ne rend plus la main : tué par la garde de durée, dit tel"
+jouer 0 "tués : 1 (dont 1 par la garde de durée)" "8. le compte des tués par la garde"
+mute un "    return a;" "    return a + 1;"
+jouer 0 "tué    #1 test_jouet, 1 échec(s)" "8. un mutant tué par une vérification : sans la garde"
+jouer 0 "tués : 1 (dont 0 par la garde de durée)" "8. le compte, sans la garde"
 
 [ "$echecs" -eq 0 ] || { echo "test_mutants : $echecs échec(s)"; exit 1; }
 echo "test_mutants : le repérage des mutants se fait sur le code seul, dans la fonction nommée"

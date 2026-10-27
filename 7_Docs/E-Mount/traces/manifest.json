@@ -1,0 +1,68 @@
+[
+  {
+    "file": "195_samyang.txt",
+    "sha256": "985a95f467e5d964a1996ca6af367226ee7966659078fe17d6860f1f031ed3a9",
+    "lines": 1293,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "195_sony.txt",
+    "sha256": "24d0abb3b4832b254f66691b0459eb10360041701c510ffc937ba419d3799c08",
+    "lines": 458,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "195_sony_boutons.txt",
+    "sha256": "eeb4639f23039fd526199aeaf8432a77324184141f2eca891633228f85c8f876",
+    "lines": 307,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "emount-bench-2026-09-28T17-45-01-034Z.txt",
+    "sha256": "c3d2ace947693208dbf110b2462d93e67baf935d19d4a805d69d9d34fb2cb3b5",
+    "lines": 950,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "emount-bench-2026-09-29T18-12-13-937Z.txt",
+    "sha256": "1970d4c78c4f7f40b0200b263cd14286388b4baa370dd98a50447f0535d6d24e",
+    "lines": 1548,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "firmware1_ring.txt",
+    "sha256": "36b330e7f3c7f776a06e35865c5bd4e24cd59968ea68ae5e35206e28c027aa12",
+    "lines": 160,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "firmware2_ring.txt",
+    "sha256": "4a0834641dc0e8032e74f4a6e38536814ee8e0b159b0f3718ee0333f9c679d7a",
+    "lines": 87,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "samyang.txt",
+    "sha256": "997d6632dda95e62f87995455b34d748b4b1de940c3349948da8c1d3a7ea0476",
+    "lines": 89,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "sony-2.txt",
+    "sha256": "14be67436b10ef753ef293caf552864654ac4a30900861484bdbe4a32f6f3e21",
+    "lines": 253,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "sony.txt",
+    "sha256": "e5276da1c74e38d47799072f28f5bf09c78557cd14dc1d38e4ae1052bea9c586",
+    "lines": 1420,
+    "decision": "retain original bench observation, byte-identical"
+  },
+  {
+    "file": "sony_boutons.txt",
+    "sha256": "faafa37ea6d28cb64709968523e4230b20e1114759e7f4f3e29ffb87a24f49bf",
+    "lines": 832,
+    "decision": "retain original bench observation, byte-identical"
+  }
+]

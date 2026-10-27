@@ -9,11 +9,12 @@ const html = fs.readFileSync(path.join(__dirname, '..', 'emount-bench.html'), 'u
 const source = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 /* La page parle FR ou EN (la langue du navigateur, sinon le choix retenu) ; cette suite teste le transport, pas la
    traduction (test_app.js la porte) : la langue y est fixee a FR par navigator.language, sans localStorage (la page
-   marche sans), et ses attendus restent les textes francais. */
-function setup() {
+   marche sans), et ses attendus restent les textes francais. Seul le bloc de log.timeout joue aussi l'anglais
+   (setup('en-US')) : l'echeance d'une commande s'y affiche au nombre de la langue. */
+function setup(language = 'fr-FR') {
   let id = 0; const timers = new Map(), elements = new Map();
   const el = () => ({ textContent: '', value: '', checked: true, disabled: false, hidden: false, style: {}, classList: { add() {}, remove() {} }, addEventListener() {}, querySelector() { return el(); }, appendChild() {}, removeChild() {}, childElementCount: 0, click() {}, innerHTML: '' });
-  const c = vm.createContext({ console, TextEncoder, TextDecoder, Date, Blob, URL, navigator: { language: 'fr-FR' }, confirm: () => true, Map, Set, Promise,
+  const c = vm.createContext({ console, TextEncoder, TextDecoder, Date, Blob, URL, navigator: { language }, confirm: () => true, Map, Set, Promise,
     document: { documentElement: { lang: '' }, getElementById(k) { if (!elements.has(k)) elements.set(k, el()); return elements.get(k); }, createElement: el, querySelectorAll: () => [], addEventListener() {} },
     setTimeout(fn, ms) { timers.set(++id, { fn, ms }); return id; }, clearTimeout(i) { timers.delete(i); }, setInterval() { return ++id; }, clearInterval() {} });
   vm.runInContext(source, c); return { c, timers, elements, run: s => vm.runInContext(s, c) };
@@ -153,15 +154,27 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     check(s.run("lines.some(l=>l.endsWith('[app] carte : firmware 1.3'))"), 'v lu comme la version du firmware de la carte');
     check(txt('s_board') === 'fw 1.3 · reset brownout · boot off', 'la ligne de la carte : v, reset de DEBUG, boot_state de t (« ' + txt('s_board') + ' »)');
     check(txt('s_caps') === 'lot étendu (ext=1)' && txt('s_power') === 'alims coupées (p0) : p1 ou b pour rétablir', 'ext lu au lieu de caps, power_off'); }
-  { /* Audit R5 : l'ouverture du port peut redemarrer la carte ; les lignes de la ROM de l'ESP32-S3 (son demarrage
+  { /* Audit R5 : l'ouverture du port peut redemarrer la carte ; les lignes de la ROM de l'ESP32-C3 (son demarrage
        ordinaire) et des octets hors ASCII arrivent apres l'envoi du premier `v`, pendant l'attente de sa reponse. La
        page tient deja la propriete, sans code de plus : une ligne hors de la forme de `v` (expectFor, `<maj>.<min>`)
        n'est jamais prise pour sa reponse, et un `v` perdu passe par la resynchronisation. Joue par connect() et
        readLoop() de la page, octets bruts : 1) la ROM puis la reponse ; 2) la ROM, dont la derniere ligne, sans fin,
-       se colle a la reponse : `v` expire, la resynchronisation la rattrape. Dans les deux cas, la connexion aboutit. */
-    const ROM = ['ESP-ROM:esp32s3-20210327\r\n', 'Build:Mar 27 2021\r\n', 'rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)\r\n',
-                 'Saved PC:0x40378ad6\r\n', 'SPIWP:0xee\r\n', 'mode:DIO, clock div:1\r\n', 'load:0x3fce3810,len:0x178c\r\n',
-                 'entry 0x403c9900\r\n'];
+       se colle a la reponse : `v` expire, la resynchronisation la rattrape. Dans les deux cas, la connexion aboutit.
+       D'ou viennent les lignes (les memes dans ../tool_station/test_tool_station.py) :
+       - `ESP-ROM:esp32c3-api1-20210207` : capturee sur la carte, recue par la page a l'ouverture du port (atelier,
+         ready-room/samyang.txt @ e99c861, ligne 1, trace du 2026-10-19) ;
+       - `rst:0x15 (USB_UART_CHIP_RESET),boot:0xc (SPI_FAST_FLASH_BOOT)` : la forme `rst:0xNN (REASON),boot:0xNN (MODE)`
+         de la ligne qui suit l'en-tete de la ROM, et SPI_FAST_FLASH_BOOT, le demarrage normal sur la flash : esptool
+         v4.8.1, docs/en/advanced-topics/boot-mode-selection.rst, § Boot Mode Message ; 0x15 = USB_UART_CHIP_RESET, le
+         redemarrage par l'USB : ESP-IDF v5.3.2, components/esp_rom/include/esp32c3/rom/rtc.h (RESET_REASON). Non
+         sourcee : la valeur 0xc des broches de strapping (choisie ; la page ne lit pas la ligne) ;
+       - `SPIWP:0xee`, `mode:DIO, clock div:1` : esptool, meme page, § Software Bootloader Header Info ;
+       - `load:0x…,len:0x…`, `entry 0x…` : la forme de la meme page, § Software Bootloader Load Segments. Non sourcees :
+         les adresses et les longueurs (inventees ; celles du bootloader de notre build ne sont pas relevees) ;
+       - les octets hors ASCII (00 FF FE 1B) : non sources, inventes (le bruit d'une ligne qui redemarre). */
+    const ROM = ['ESP-ROM:esp32c3-api1-20210207\r\n', 'rst:0x15 (USB_UART_CHIP_RESET),boot:0xc (SPI_FAST_FLASH_BOOT)\r\n',
+                 'SPIWP:0xee\r\n', 'mode:DIO, clock div:1\r\n', 'load:0x3fcd5820,len:0x1714\r\n', 'load:0x403cc710,len:0x968\r\n',
+                 'load:0x403ce710,len:0x2f9c\r\n', 'entry 0x403cc71a\r\n'];
     const carte = (s, colle) => {
       s.c.ROM = ROM; s.c.colle = colle;
       s.run("globalThis.sent=[]; globalThis.chunks=[]; globalThis.wake=null; globalThis.nv=0;"
@@ -192,6 +205,23 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
             && s.run("lines.filter(l=>l.includes('(réponse inattendue à « v », ignorée)')).length") === 10,
             'R5 : v expire, la resynchronisation (v) puis le second v aboutissent : connectee (' + s.run("sent.join('|')").replace(/\n/g, '') + ')'); }
   }
+  { /* log.timeout : une commande expire, 3 s (une lettre) ou 0,8 s (Moonlite, son repli) ; la ligne affichee porte
+       l'echeance au nombre de la langue (toLocaleString(loc())). Texte exact attendu, ecrit a la main, FR puis EN : « 3 »
+       dans les deux, « 0,8 » en FR, « 0.8 » en EN. La ligne lue est celle que la page ajoute au journal (innerHTML de
+       son element, sans l'horodatage). */
+    const CAS = [['fr-FR', 'i', '(pas de réponse en 3 s)'], ['fr-FR', ':GP#', '(pas de réponse en 0,8 s)'],
+                 ['en-US', 'i', '(no reply in 3 s)'], ['en-US', ':GP#', '(no reply in 0.8 s)']];
+    for (const [language, cmd, want] of CAS) {
+      const s = setup(language); const shown = [];
+      s.elements.get('log').appendChild = d => shown.push(d);
+      s.run("writer={write:async()=>{}}"); const a = s.run('ask(' + JSON.stringify(cmd) + ',false)'); await flush();
+      expire(s); const r = await got(a);
+      const last = shown.length ? shown[shown.length - 1] : null;
+      const text = last ? last.innerHTML.replace(/^<span class="t">[^<]*<\/span>/, '') : '';
+      check(r === null && last && last.className === 'l err' && text === want,
+            'log.timeout, ' + language + ', ' + cmd + ' expire : « ' + want + ' » affiche (« ' + text + ' »)');
+    }
+  }
   { /* L09-13 : « Connecter » n'etait desactive qu'apres requestPort et open : deux clics ouvraient deux ports */
     const s = setup(); s.run("globalThis.asked=0; navigator.serial={requestPort:async()=>{ asked++; return {open:()=>new Promise(()=>{}),close:async()=>{}}; }}");
     s.run('connect()'); check(s.elements.get('btnConnect').disabled === true, 'Connecter desactive des le clic');
@@ -206,7 +236,7 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     check(s.run('pollTimer') === null, 'deconnecte pendant refreshAll : le poll n est pas lance'); }
   { /* L09-19 : un rappel du poll de l'ancienne connexion continuait apres la deconnexion (pollSlow, busyPoll) */
     const s = setup(); s.run("globalThis.ticks=[]; setInterval=fn=>{ ticks.push(fn); return ticks.length; }");
-    s.run("globalThis.asked=[]; globalThis.sent=[]; writer={write:async b=>sent.push(new TextDecoder().decode(b)),releaseLock(){}}; port={close:async()=>{}}; L.present=true; slowTick=4; startPoll(); const real=ask; ask=(c,q)=>{ asked.push(c); return real(c,q); }");
+    s.run("globalThis.asked=[]; globalThis.sent=[]; writer={write:async b=>sent.push(new TextDecoder().decode(b)),releaseLock(){}}; port={close:async()=>{}}; L.present=true; L.ready=true; slowTick=4; startPoll(); const real=ask; ask=(c,q)=>{ asked.push(c); return real(c,q); }");
     const tick = s.run('ticks[0]()'); await flush();
     check(s.run("sent.join('')") === 'f\n', 'le poll de la premiere connexion lit f');
     await s.run('disconnect()'); await got(tick); await flush();
@@ -218,7 +248,7 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     s.run("globalThis.sent=[]; writer={write:async b=>sent.push(b)}; port={}; ask('v',true)"); await flush();
     check(s.run('sent.length') === 1, 'apres reconnexion, la nouvelle demande part'); }
   { /* e en erreur -> mouvement inconnu (null), pas « arrete » */
-    const s = setup(); s.run("writer={write:async()=>onLine('er link lens')}; L.present=true; L.moving=true");
+    const s = setup(); s.run("writer={write:async()=>onLine('er link lens')}; L.present=true; L.ready=true; L.moving=true");
     await s.run('pollFast()'); check(s.run('L.moving') === null, 'e en erreur -> moving = null (inconnu), pas false'); }
   { const s = setup(); s.run("L.present=true;L.ext=true;L.min=100;L.max=500;globalThis.replies=['ext=1 present=0'];ask=async()=>replies.shift();");
     await s.run('refreshAll()'); check(s.run('L.present') === false && s.run('L.min') === null, 'objectif absent : bornes effacees'); }
@@ -301,6 +331,30 @@ let fails = 0; const check = (c, m) => { console.log((c ? '  ok   ' : '  FAIL ')
     check(s.run('sent.length') === 0, 'fault : le poll rapide ne lit ni f ni e');
     s.run("rep.t='ext=1 present=1 boot_state=ready busy=- power_off=0 last_op=boot:ok mf=- oss=- ring=-'; rep.f='20000'; rep.r='13878-30733'"); await s.run('pollSlow()');
     check(txt('s_state') === '· prêt' && s.run('L.min') === 13878 && s.run('L.pos') === 20000, 'sortie de fault (b) : relu, pret (« ' + txt('s_state') + ' »)'); }
+  { /* #703 : la page annoncait « pret » des l'objectif present, en plein demarrage, avec un `i` en erreur (la carte
+       reelle, le 2026-10-19 : « [app] pret : - »). Hors ready, rien n'est lu de l'objectif ; a ready, `i` en erreur (la
+       carte ressortie de ready entre `t` et `i`) : ni pret ni annonce, et le `t` suivant relit ; puis une annonce, avec
+       le nom. */
+    const { s, txt } = etat();
+    s.run("rep.t='ext=1 present=1 boot_state=restoring busy=boot power_off=0 last_op=boot:ok mf=- oss=- ring=-'; rep.i='er busy boot'; rep.r='er busy boot'");
+    await s.run('refreshAll()');
+    check(txt('s_state') === '· occupé : restoring' && s.run("sent.join(' ')") === 't' && s.run('L.min') === null,
+          'restoring : l etat de la carte, rien lu de l objectif (« ' + txt('s_state') + ' », ' + s.run("sent.join(' ')") + ')');
+    /* #732 : la ligne d'etat gardait l'etape precedente (« occupe : restoring ») tant que `i` echouait ; elle dit des ce
+       `t` ce que rend la carte et ce qui manque a la page, dans les deux langues, jamais « pret » seul */
+    s.run("rep.t='ext=1 present=1 boot_state=ready busy=- power_off=0 last_op=boot:ok mf=- oss=- ring=-'"); await s.run('pollSlow()');
+    check(txt('s_state') === '· prête, identité non lue' && !s.run("lines.some(l=>/\\[app\\] prêt/.test(l))") && !s.run('lensReady()'),
+          'ready, i en erreur : prete, identite non lue, aucune annonce, mouvement inactif (« ' + txt('s_state') + ' »)');
+    s.run("setLang('en')"); const en = txt('s_state'); s.run("setLang('fr')");
+    check(en === '· ready, identity not read', 'ready, i en erreur, en EN (« ' + en + ' »)');
+    s.run("rep.i=null"); await s.run('pollSlow()');
+    check(txt('s_state') === '· prête, identité non lue' && !s.run("lines.some(l=>/\\[app\\] prêt/.test(l))") && !s.run('lensReady()'),
+          'ready, i sans reponse au t suivant : toujours prete, identite non lue, aucune annonce (« ' + txt('s_state') + ' »)');
+    s.run("rep.i='SAMYANG AF 135mm F1.8'; rep.r='13878-30733'"); await s.run('pollSlow()');
+    check(txt('s_state') === '· prêt' && s.run("lines.filter(l=>l.endsWith('[app] prêt : SAMYANG AF 135mm F1.8')).length") === 1 && s.run('L.min') === 13878,
+          'le t suivant relit : pret, annonce une fois avec le nom, les bornes (« ' + txt('s_state') + ' »)');
+    await s.run('pollSlow()');
+    check(s.run("lines.filter(l=>l.includes('[app] prêt')).length") === 1, 'ready qui dure : aucune autre annonce'); }
   { /* L09-15 : un deplacement fini en STALLED n'etait pas signale. A la fin d'un deplacement lance par la page (e repasse
        a n), la page lit g et signale toute autre reponse qu'ok, au journal et dans le panneau Focus ; jamais DEBUG. */
     const { s, txt } = etat();

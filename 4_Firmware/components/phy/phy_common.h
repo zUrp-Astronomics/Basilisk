@@ -82,6 +82,11 @@ uint64_t rx_deadline(const rx_t *r);
  * attendaient leur jugement. Chacun n'est rapporté qu'une fois : par une E_FRAMING ou par cette E_BUS. */
 void rx_flush(rx_t *r, bsk_phy_raw_t *raw);
 
+/* La réception vidée sans rien rapporter, à la fermeture de la fenêtre d'écoute (bsk_phy.h, bsk_phy_lines) : ce qu'elle
+ * tenait (octets écartés pas encore rapportés, début de trame, suite pas encore jugée) n'est ni rendu après, ni pris dans
+ * une trame de la fenêtre suivante. */
+void rx_clear(rx_t *r);
+
 /* ─────────────────────────── la présence et le verrou ───────────────────────────
  * XDETECT (D2, broche 10 de la monture) est le dernier contact établi à l'insertion et le premier à lâcher au retrait ;
  * après lui, les autres contacts glissent sur les pastilles voisines. Les deux sens n'ont pas la même règle :
@@ -180,8 +185,9 @@ bool pres_next(pres_t *p, uint64_t before, bsk_phy_event_t *e);
 /* ─────────────────────────── les FAULT des rails ───────────────────────────
  * Le FAULT# d'un TPS2552 (bsk_phy.h, BSK_PHY_FAULT) ne mémorise rien. Chaque front est pris par une interruption sur les
  * deux fronts, qui relit le niveau ; elle ne sait pas quel front l'a déclenchée, seulement qu'il y en a eu au moins un
- * depuis sa dernière prise (le statut d'un front est retenu jusqu'à elle). Le niveau relu, comparé au dernier connu,
- * donne la parité des fronts survenus depuis :
+ * depuis le niveau relu par sa dernière prise (le statut d'un front est retenu jusqu'à elle ; sur la carte, fault_settle
+ * le tient vrai pour un front venu pendant la prise). Le niveau relu, comparé au dernier connu, donne la parité des
+ * fronts survenus depuis :
  *   - différent, un nombre impair : inactif → actif, une activation ; actif → inactif, une retombée ;
  *   - égal, un nombre pair, au moins deux : inactif → inactif, une activation finie avant d'être lue (FAULT_PULSE) ;
  *     actif → actif, une retombée puis une nouvelle activation (FAULT_REON).
@@ -189,8 +195,9 @@ bool pres_next(pres_t *p, uint64_t before, bsk_phy_event_t *e);
  * activations plus courtes que la prise de l'interruption, quelques microsecondes) en comptent une : le filtre du
  * commutateur (5 ms au moins en surintensité) et ses cycles thermiques (le temps de refroidir de 10 °C) sont bien plus
  * lents. Le compte n'est tenu qu'ici, pas par la file des événements : il est exact même quand un événement est perdu.
- * Sur la carte, fault_edge tourne dans l'interruption, en IRAM : en ligne, forcée, comme pres_edge ; sous pres_mux de
- * phy.c (l'état commandé du rail y est lu avec lui). */
+ * Sur la carte, fault_settle et fault_edge tournent dans l'interruption, en IRAM : en ligne, forcées, comme pres_edge ;
+ * fault_edge sous pres_mux de phy.c (l'état commandé du rail y est lu avec lui). fault_events n'y tourne pas : la tâche de
+ * PHY l'appelle. */
 typedef struct {
     bool     active;    /* le dernier niveau connu : true, FAULT# à 0 */
     uint32_t n;         /* les activations depuis le démarrage */
@@ -213,5 +220,31 @@ static inline __attribute__((always_inline)) fault_ev_t fault_edge(fault_t *f, b
     if (was) return FAULT_REON;
     return active ? FAULT_ON : FAULT_PULSE;
 }
+
+/* Le niveau relu d'une prise sur la carte (fault_isr de phy.c), avant fault_edge. Le service d'interruption des GPIO
+ * d'ESP-IDF efface le statut d'un front avant d'appeler l'interruption : un second front entre cet effacement et la
+ * relecture du niveau est vu dans ce niveau, mais son statut relance une prise où le niveau n'a pas changé, que
+ * fault_edge comptait FAULT_PULSE de plus (le fantôme, ticket #590). Donc : le niveau relu (`level`), puis le statut du
+ * front (`again` : reposé depuis son dernier effacement ? il l'efface alors) ; reposé, un front est venu pendant la
+ * relecture, avant ou après elle, et on relit. Le niveau rendu est lu après le dernier effacement et avant la dernière
+ * lecture du statut, restée nulle : chaque front qu'il voit a son statut effacé, chaque front qu'il ne voit pas arrive
+ * après lui et relance une prise. Toute prise jugée a donc au moins un front depuis le niveau de la précédente : un
+ * front n'est jamais compté deux fois, et la règle de parité de fault_edge vaut. Une ligne qui change à chaque relecture
+ * (moins d'une microseconde) garde la prise ici, comme elle relancerait l'interruption sans fin : le filtre du
+ * commutateur en est loin. `rail` est passé tel quel à `level` et `again`. */
+static inline __attribute__((always_inline)) bool fault_settle(bool (*level)(bsk_rail_t), bool (*again)(bsk_rail_t),
+                                                               bsk_rail_t rail)
+{
+    bool active;
+    do active = level(rail);
+    while (again(rail));
+    return active;
+}
+
+/* Les changements d'une prise, au même instant et dans l'ordre, mis en événements BSK_PHY_FAULT du rail `rail`, à l'état
+ * commandé `on`, à l'instant `t` : FAULT_ON, l'activation ; FAULT_OFF, la retombée ; FAULT_PULSE, l'activation puis la
+ * retombée ; FAULT_REON, la retombée puis l'activation. Rend leur nombre, 1 ou 2, écrits dans `e`. Écrit ici seulement :
+ * la tâche de PHY de la carte et la PHY simulée l'appellent. */
+uint8_t fault_events(fault_ev_t k, bsk_rail_t rail, bool on, uint64_t t, bsk_phy_event_t e[2]);
 
 #endif

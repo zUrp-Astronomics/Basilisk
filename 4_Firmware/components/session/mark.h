@@ -28,13 +28,18 @@ void mark_frame(uint8_t type);
 /* Les résultats du magasin, relevés à chaque pas ; une lecture que la file a refusée est redéposée. */
 void mark_poll(void);
 
-/* CMD_SET_MARK (arg : BSK_MARK_HERE ou la position) et CMD_CLEAR_MARK. E_NOCAP sans clé (pas d'identité), E_LIMIT sans
- * 0x06 ou hors des bornes, E_BUSY si la file du magasin est pleine : rien n'est changé. */
+/* CMD_SET_MARK (arg : BSK_MARK_HERE ou la position) et CMD_CLEAR_MARK : E_OK, l'écriture déposée, rien de publié avant
+ * son résultat (mark_written). E_NOCAP sans clé (pas d'identité), E_LIMIT sans 0x06 ou hors des bornes, E_BUSY si
+ * l'écriture d'un geste attend encore son résultat ou si la file du magasin est pleine : rien n'est changé. */
 bsk_err_t mark_set(int32_t arg);
 bsk_err_t mark_clear(void);
 
-/* La marque de la clé courante, relue ou posée : vrai et elle (le sens compris, que l'instantané ne publie pas, pour
- * RESTORING), faux sans elle. */
+/* Le résultat de l'écriture du dernier mark_set ou mark_clear servi, relevé du magasin : vrai une seule fois, *ok vrai si
+ * elle est rangée (la marque publiée, le geste compté) ; faux tant qu'elle attend, et ensuite. */
+bool mark_written(bool *ok);
+
+/* La marque de la clé courante, relue ou rangée par un geste : vrai et elle (le sens compris, que l'instantané ne publie
+ * pas, pour RESTORING), faux sans elle. */
 bool mark_get(bsk_mark_t *m);
 
 /* La clé courante, "" sans elle (pas d'identité, ou le 0x05 arrêté) : RESTORING la compare à celle de son départ. */
@@ -44,14 +49,19 @@ const char *mark_key(void);
  * compare au sens de l'arrivée quand la position est déjà sur la marque. */
 uint8_t mark_dir(void);
 
-/* Les marques posées et effacées par l'utilisateur depuis bsk_session_init, modulo 2^16 : chaque mark_set et mark_clear
- * qui rend E_OK, et rien d'autre (ni zoom, ni relecture, ni oubli de session). */
+/* Les marques posées et effacées par l'utilisateur depuis bsk_session_init, modulo 2^16 : chaque écriture de mark_set et
+ * de mark_clear rangée, à son résultat, et rien d'autre (ni zoom, ni relecture, ni oubli de session). */
 uint16_t mark_sets(void);
 uint16_t mark_clears(void);
 
 /* La lecture de la clé courante est déposée (ou à redéposer) et pas encore rendue. Faux sans clé : « pas encore relue »
  * n'est pas « absente », que mark_get dit une fois la lecture rendue. */
 bool mark_loading(void);
+
+/* La dernière lecture rendue de la clé courante a échoué sur une erreur du magasin (bsk_store_res_t.err) : pas de marque,
+ * comme une clé absente, mais ce n'en est pas une ; lu par le superviseur à la fin d'un démarrage (`skip=storeer`). Faux
+ * dès que la clé change. */
+bool mark_failed(void);
 
 /* Un 0x05 reçu à t : vrai au relâchement du bouton (offset 64, bit 3), avec sa durée (*press) et l'état de SESSION à
  * l'appui (*at) ; `state` : l'état de SESSION maintenant. Un appui commencé hors de READY est oublié par le superviseur,

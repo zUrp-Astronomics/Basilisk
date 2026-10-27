@@ -6,7 +6,10 @@
  * Le 0x1D, le bit AF et le 0x1C de MOUVEMENT, posés dans la boucle de TRANSACTION.
  *
  * Invariant : le bit AF est posé dans le 0x03 de TRANSACTION si et seulement si d.af_left > 0 (af_hold seul écrit
- * l'un et l'autre). */
+ * l'un et l'autre). Après un dépôt, AF_FRAMES paires parties portent le bit : seules les paires dont le 0x03 est parti
+ * après le dépôt le décomptent (bsk_txn_n03), car le 0x03 d'une paire déjà parti quand le goto est déposé, entre son
+ * 0x03 et son 0x04, ne l'a pas porté (ou l'a porté pour le goto d'avant). Ticket #680 : sans cela, le goto déposé dans
+ * l'intervalle, que son 0x1D parte dans ce 0x04 ou avec la paire suivante, n'avait que 29 paires. */
 #include "drive.h"
 
 #include <stdbool.h>
@@ -21,7 +24,8 @@
 _Static_assert(AF_OFF < BSK_TXN_LOOP03_LEN - 1, "le bit AF est dans le 0x03");
 
 static struct {
-    uint8_t af_left;                  /* paires restantes avec le bit AF */
+    uint8_t  af_left;                 /* paires restantes avec le bit AF */
+    uint32_t from;                    /* bsk_txn_n03 au dépôt du goto */
 } d;
 
 static void af_hold(uint8_t pairs)
@@ -31,10 +35,11 @@ static void af_hold(uint8_t pairs)
 }
 
 /* Après chaque paire partie (bsk_txn_loop_observer). Une paire qui ne part pas garde le 0x1D accroché pour la suivante
- * (bsk_txn_attach) : une position absolue, qu'on renvoie au lieu d'arrêter (décision de l'humain du 2026-10-07). */
+ * (bsk_txn_attach) : une position absolue, qu'on renvoie au lieu d'arrêter (décision de l'humain du 2026-10-07). Le bit
+ * AF n'est décompté que par une paire dont le 0x03 est parti après le dépôt (l'invariant). */
 static void paired(void)
 {
-    if (d.af_left) af_hold((uint8_t)(d.af_left - 1));
+    if (d.af_left && bsk_txn_n03() != d.from) af_hold((uint8_t)(d.af_left - 1));
 }
 
 void drive_goto(uint16_t target)
@@ -48,6 +53,7 @@ void drive_goto(uint16_t target)
     m[4] = 0;
     bsk_txn_loop_observer(paired);    /* le décompte du bit AF ; sans bit AF, il ne fait rien */
     bsk_txn_attach(m, sizeof m);
+    d.from = bsk_txn_n03();
     af_hold(AF_FRAMES);
 }
 
@@ -60,6 +66,14 @@ bsk_err_t drive_stop(void)
     af_hold(0);
     return bsk_txn_send(stop, sizeof stop);
 }
+
+bool drive_stop_held(uint8_t *place)
+{
+    *place = bsk_txn_held_place();
+    return *place != BSK_TXN_SENT;
+}
+
+bool drive_stop_end(uint8_t place, bsk_err_t *e) { return bsk_txn_held_end(place, e); }
 
 void drive_forget(void)
 {

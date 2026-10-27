@@ -8,7 +8,34 @@
  *         ticket #606 : les FAULT toujours lus, la carte v1.0 seule (pins.h)
  *
  * L'UART, les lignes, la VD, les rails, leurs FAULT et le verrou de XDETECT de la carte ; la réception en flux, la
- * présence et la lecture des FAULT viennent de phy_common.c.
+ * présence et la lecture des FAULT viennent de phy_common.c. La fenêtre d'écoute (bsk_phy.h, bsk_phy_lines) : RXD
+ * routée à l'UART lignes pilotées seulement, et la tâche de PHY qui ne rend rien de la réception fenêtre fermée ; ce que
+ * RXD présente à l'objectif lignes au repos est démontré en tête de rxd_rest, d'après les sources d'ESP-IDF 5.3.2.
+ *
+ * Les FAULT des rails (bsk_phy.h, BSK_PHY_FAULT), démontrés ici en lecture, d'après les sources d'ESP-IDF 5.3.2 ; non
+ * vérifié sur la carte :
+ *   - un front n'est jamais compté deux fois. Le service d'interruption des GPIO (gpio_intr_service puis gpio_isr_loop,
+ *     esp_driver_gpio/src/gpio.c) lit le statut des broches, puis, pour chacune, efface son statut avant d'appeler son
+ *     interruption quand elle est armée sur un front (isr_clr_on_entry_mask, posé par gpio_set_intr_type pour
+ *     GPIO_INTR_ANYEDGE, celui de fault_arm) ; un statut reposé ensuite relance le service, la source restant active.
+ *     fault_isr relit le niveau par fault_settle (phy_common.h), la logique que test_phy joue contre une broche qui a ce
+ *     statut ; seuls ses deux accès sont propres à la carte : fault_low, le niveau (gpio_ll_get_level, hal/esp32c3) ;
+ *     fault_again, le statut de la broche (gpio_ll_get_intr_status, pcpu_int, le statut des interruptions armées vers le
+ *     processeur), effacé s'il est posé (gpio_ll_clear_intr_status, status_w1tc), comme le service l'efface. La relecture
+ *     du niveau ne se fait qu'après un effacement, et le statut est relu après elle : la prise que le statut d'un front vu
+ *     dans le niveau relançait (le fantôme) ne l'est plus, et l'impulsion brève, deux fronts avant la prise, reste comptée ;
+ *   - une rafale de fronts de FAULT ne touche pas raw_q. fault_isr n'y écrit rien : chaque prise va, une seule fois, dans
+ *     fault_q (FAULT_LEN), et la tâche en fait les événements (fault_events). fault_q pleine, la prise n'est pas
+ *     rapportée ; elle est comptée quand même (fault_edge, avant l'envoi), et ni raw_lost ni E_BUS n'en naissent. raw_q
+ *     ne porte que LENS_CS, la VD et les rebonds de D2 : aucun de leurs fronts n'y est perdu pour un FAULT ;
+ *   - ev_q, elle, reste commune : la tâche y pousse les changements d'un FAULT comme tout événement, et push y jette le
+ *     plus ancien quand elle est pleine (evq_drop). Une rafale de FAULT plus rapide que la lecture de la SESSION peut donc
+ *     y évincer des événements de LENS_CS ou de VD, comptés dans evq_drop. Au plus deux changements par prise ; le filtre
+ *     du commutateur (5 ms au moins en surintensité) et ses cycles thermiques espacent les prises bien plus que la
+ *     SESSION, qui lit la file à chaque pas (1 ms), ne tarde à la vider, hors d'un pas retenu (une écriture en flash).
+ *
+ * L'ordre des présences et des événements de la file que rend bsk_phy_poll, file pleine et tête jetée par push pendant la
+ * lecture compris, est démontré en lecture en tête de bsk_phy_poll ; non vérifié sur la carte.
  */
 #include "bsk_phy.h"
 
@@ -19,6 +46,7 @@
 #include "driver/ledc.h"
 #include "driver/uart.h"
 #include "esp_attr.h"
+#include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
@@ -34,6 +62,9 @@
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #include "hal/gpio_ll.h"
 #pragma GCC diagnostic pop
+#include "soc/gpio_pins.h"
+#include "soc/io_mux_reg.h"
+#include "soc/gpio_sig_map.h"
 #include "soc/gpio_struct.h"
 
 #include "phy_common.h"
@@ -46,7 +77,8 @@
 #define UART_RX_BUF  4096
 #define UART_TX_BUF  1200
 #define UART_EV_LEN  32
-#define RAW_LEN      64          /* fronts de LENS_CS et de VD, des interruptions à la tâche */
+#define RAW_LEN      64          /* fronts de LENS_CS et de VD, rebonds de D2, des interruptions à la tâche (raw_q) */
+#define FAULT_LEN    16          /* prises des FAULT des rails, des interruptions à la tâche (fault_q) */
 #define EV_LEN       32          /* événements remontés, en attente de bsk_phy_poll */
 #define POLL_MS      5           /* D2 et le flux relus au moins toutes les 5 ms */
 
@@ -63,18 +95,24 @@
 
 #define MUST(x) do { if (!(x)) abort(); } while (0)
 
-/* RAW_BOUNCE : posé par drop_expire ; RAW_FAULT : par fault_isr (level : activé) */
-typedef enum { RAW_LENS_CS, RAW_VD, RAW_BOUNCE, RAW_FAULT } raw_kind_t;
+/* RAW_BOUNCE : posé par drop_expire */
+typedef enum { RAW_LENS_CS, RAW_VD, RAW_BOUNCE } raw_kind_t;
 
 typedef struct {
     raw_kind_t kind;
     bool       level;
     int64_t    t_us;
-    bsk_rail_t rail;     /* RAW_FAULT : le rail, */
-    bool       on;       /* et son état commandé à l'instant du front */
 } raw_t;
 
-static QueueHandle_t uart_q, raw_q, ev_q;
+/* Une prise d'un FAULT (fault_isr, fault_arm) : ce qu'elle a vu (fault_edge), le rail, son état commandé, son instant. */
+typedef struct {
+    fault_ev_t k;
+    bsk_rail_t rail;
+    bool       on;
+    int64_t    t_us;
+} fault_raw_t;
+
+static QueueHandle_t uart_q, raw_q, fault_q, ev_q;
 static QueueSetHandle_t set;
 /* Les fronts qu'une interruption n'a pas pu poser (file des fronts pleine), comptés par les interruptions sous raw_mux
  * (cs_isr, vd_isr et drop_expire peuvent s'interrompre l'une l'autre si leurs niveaux diffèrent) ; la tâche de PHY lit
@@ -94,8 +132,14 @@ static esp_timer_handle_t drop_timer;    /* l'échéance d'une retombée */
 static fault_t fault[2];
 static bool    rail_on[2];
 
+/* La fenêtre d'écoute (bsk_phy.h, bsk_phy_lines) : sa génération, impaire ouverte, paire fermée, avancée d'un à chaque
+ * ouverture et à chaque fermeture, sous pres_mux, par bsk_phy_lines (tâche de SESSION) et par cut (interruptions). La tâche
+ * de PHY la lit d'un seul accès (un mot aligné) au début de chaque jugement (heard). */
+static volatile uint32_t rx_gen;
+
 /* État de la tâche de PHY, qu'elle seule touche. */
 static rx_t    rx;                       /* la réception en flux (phy_common.h) */
+static uint32_t rx_seen;                 /* rx_gen au dernier jugement */
 static bool    lens_cs;
 static uint32_t raw_seen;                /* raw_lost au dernier relevé */
 
@@ -104,13 +148,16 @@ static uint32_t raw_seen;                /* raw_lost au dernier relevé */
  * qui émet (bsk_phy_send) et les lit. */
 static volatile uint32_t evq_drop;
 static uint32_t tx_wait_us, tx_timeout;
+static bool     tx_late;                 /* la dernière attente de fin d'émission a échoué (bsk_phy_send) : la tâche de
+                                            SESSION seule */
 
 /* ─────────────────────────── interruptions ─────────────────────────── */
 /* Tout ce qui touche au verrou de XDETECT le fait sous pres_mux, la section critique que prennent aussi les
  * interruptions :
  *   - bsk_phy_rail lit le verrou et allume le rail sous elle : aucune retombée entre les deux ;
  *   - bsk_phy_lines(true) et bsk_phy_vd(hz) passent par le pilote (uart_set_pin, ledc_*), qu'on n'appelle pas sous
- *     section critique : le verrou est lu avant (refus, rien n'est touché), puis relu après, sous elle (lock_held) ;
+ *     section critique : le verrou est lu avant (refus, rien n'est touché), puis relu après, sous elle (lock_held,
+ *     lines_held) ;
  *     s'il est tombé pendant l'appel, cut() est rejouée et la commande rend false. La fenêtre où une ligne peut être
  *     pilotée après la retombée est la fin de l'appel au pilote, quelques microsecondes ;
  *   - la tâche de PHY lit D2 au moins toutes les POLL_MS pour l'insertion (pres_sample), bsk_phy_poll rend la présence
@@ -148,10 +195,46 @@ static void IRAM_ATTR vd_isr(void *arg)
     raw_from_isr(RAW_VD, false);
 }
 
-/* La coupure du verrou, sans tâche ni file, en IRAM, des registres seulement (gpio_ll, en ligne). Appelée sous
- * pres_mux. Les rails ; l'interruption de la VD avant sa sortie (la retombée vers le repos n'est pas un front de VD) ;
- * la sortie de TXD, BODY_CS et VD coupée, détachée de l'UART et du LEDC. Le tirage bas y est déjà, posé par
- * bsk_phy_init et rest(), et aucune commande de ce fichier ne le retire.
+/* RXD au repos, la fenêtre d'écoute fermée (bsk_phy.h, bsk_phy_lines) : l'entrée de réception de l'UART reliée au 1
+ * constant de la matrice, son repos, qui ne fait ni octet ni erreur ; la broche tirée bas, son tirage haut retiré. Appelée
+ * sous pres_mux, par cut en interruption comme par bsk_phy_lines(false) et bsk_phy_init : en IRAM, des registres et une
+ * fonction de la ROM (esp_rom_gpio_connect_in_signal, gpio_matrix_in de la ROM du C3, esp32c3.rom.api.ld), rien en
+ * flash. Le signal est nommé par sa constante (U1RXD_IN_IDX), pas par la table uart_periph_signal, et le tirage bas est
+ * écrit dans le registre IO_MUX de la broche, comme gpio_ll_pulldown_dis le fait, pas par gpio_ll_pulldown_en, qui
+ * l'adresse par la table GPIO_PIN_MUX_REG : deux tables en flash.
+ * Lignes au repos, RXD ne présente aucun niveau haut à l'objectif. Pourquoi c'est vrai (sources d'ESP-IDF 5.3.2) :
+ *   - le tirage haut vient d'uart_set_pin (esp_driver_uart/src/uart.c) : pour une broche qui n'est pas la broche par
+ *     défaut de l'UART dans l'IO_MUX (uart_try_set_iomux_pin), et GPIO2 ne l'est pas (l'UART1 du C3 n'en a aucune,
+ *     soc/include/soc/uart_periph.h), il appelle gpio_func_sel, gpio_set_pull_mode(rx, GPIO_PULLUP_ONLY) (le tirage bas
+ *     retiré, le haut posé, esp_driver_gpio/src/gpio.c), gpio_set_direction(rx, GPIO_MODE_INPUT), puis relie l'entrée
+ *     de l'UART à la broche. RXD routée, la carte tire donc la ligne vers le 3,3 V : ce firmware la routait dès
+ *     bsk_phy_init et ne la détachait jamais, ce tirage était présenté à l'objectif rails coupés. Elle n'est
+ *     plus routée que lignes pilotées (bsk_phy_lines(true)), et la SESSION ne pilote les lignes que les deux rails
+ *     établis (bsk_phy.h) : l'objectif est alimenté ;
+ *   - ici, le tirage haut est retiré et le tirage bas posé (FUN_PU et FUN_PD du registre IO_MUX de la broche), et
+ *     l'entrée de l'UART reliée au 1 constant (GPIO_MATRIX_CONST_ONE_INPUT, soc/esp32c3/include/soc/gpio_pins.h) ; la
+ *     sortie de RXD n'est jamais ouverte : uart_set_pin la ferme (gpio_set_direction en entrée appelle
+ *     gpio_output_disable), bsk_phy_init la configure en entrée, et aucune ligne de ce fichier ne l'ouvre ;
+ *   - au reset, GPIO2 n'a ni sortie ni tirage, l'entrée seule (DS C3 p. 16, relevé dans plans/carte-v1.0.md de
+ *     l'atelier, § 2.3), et aucun tirage externe ; bsk_phy_init la tire bas (la configuration des lignes) avant
+ *     d'installer l'UART, et rien avant lui ne la touche (le bootloader ne configure de broche que pour une console UART
+ *     ou des options qui ne sont pas posées, en_init). Broche de strapping, elle n'est lue qu'au reset et ne décide pas
+ *     du mode de démarrage (pins.h) : son tirage bas est sans effet sur lui.
+ * Non vérifié sur la carte. */
+_Static_assert(LENS_UART == UART_NUM_1, "rxd_rest nomme l'entrée de réception de l'UART1 (U1RXD_IN_IDX)");
+
+static void IRAM_ATTR rxd_rest(void)
+{
+    esp_rom_gpio_connect_in_signal(GPIO_MATRIX_CONST_ONE_INPUT, U1RXD_IN_IDX, false);
+    gpio_ll_pullup_dis(&GPIO, PIN_LENS_RXD);
+    REG_SET_BIT(IO_MUX_GPIO0_REG + PIN_LENS_RXD * 4u, FUN_PD);
+}
+
+/* La coupure du verrou, sans tâche ni file, en IRAM, des registres seulement (gpio_ll, en ligne) et rxd_rest. Appelée
+ * sous pres_mux. Les rails ; l'interruption de la VD avant sa sortie (la retombée vers le repos n'est pas un front de VD) ;
+ * la sortie de TXD, BODY_CS et VD coupée, détachée de l'UART et du LEDC ; la fenêtre d'écoute fermée, RXD au repos. Le
+ * tirage bas de TXD, BODY_CS et VD y est déjà, posé par bsk_phy_init et rest(), et aucune commande de ce fichier ne le
+ * retire ; celui de RXD, qu'uart_set_pin remplace par un tirage haut, est reposé par rxd_rest.
  * Elle n'arrête pas le LEDC (ledc_stop n'est pas en IRAM) : il tourne, détaché de la broche et sans interruption,
  * jusqu'à ce que la SESSION arrête la VD en passant à OFF, au pas suivant (une milliseconde environ, plus une écriture
  * en flash en cours). De la retombée à la coupure : 2 ms, plus la prise de l'interruption de l'esp_timer et le parcours
@@ -166,6 +249,8 @@ static void IRAM_ATTR cut(void)
     gpio_ll_output_disable(&GPIO, PIN_LENS_TXD);
     gpio_ll_output_disable(&GPIO, PIN_BODY_CS);
     gpio_ll_output_disable(&GPIO, PIN_BODY_VD);
+    if (rx_gen & 1u) rx_gen = rx_gen + 1;
+    rxd_rest();
 }
 
 /* L'échéance d'une retombée, rappelée en interruption par drop_timer : D2 relu, absent (tirage haut), la coupure ;
@@ -208,26 +293,37 @@ static void IRAM_ATTR detect_isr(void *arg)
     portEXIT_CRITICAL_ISR(&pres_mux);
 }
 
-/* Un front de FAULT# (les deux sens, arg : le rail) : le niveau relu, ce qu'il dit depuis le dernier connu (fault_edge,
- * qui compte), et l'état commandé du rail, lus ensemble sous pres_mux ; puis le ou les changements vers la tâche, au
- * même instant, par la file des fronts (pleine : une E_BUS, comme un front de LENS_CS perdu ; le compte, lui, est
- * fait). Rien n'est coupé ni décidé ici. */
+#define FAULT_PIN(rail) ((uint32_t)((rail) == BSK_RAIL_LOGIC ? PIN_FAULT_LOGIC : PIN_FAULT_MOTOR))
+
+/* Les deux accès de fault_settle à la broche d'un FAULT, des registres seulement (gpio_ll, en ligne) : son niveau
+ * (true : FAULT# à 0) ; son statut d'interruption, posé par un front depuis son dernier effacement, effacé s'il l'est. */
+static bool IRAM_ATTR fault_low(bsk_rail_t rail) { return gpio_ll_get_level(&GPIO, FAULT_PIN(rail)) == 0; }
+
+static bool IRAM_ATTR fault_again(bsk_rail_t rail)
+{
+    uint32_t st;
+    gpio_ll_get_intr_status(&GPIO, 0, &st);
+    if (!(st & (1u << FAULT_PIN(rail)))) return false;
+    gpio_ll_clear_intr_status(&GPIO, 1u << FAULT_PIN(rail));
+    return true;
+}
+
+/* Un front de FAULT# (les deux sens, arg : le rail) : le niveau relu tant qu'un front arrive pendant la prise
+ * (fault_settle, en tête de ce fichier), ce qu'il dit depuis le dernier connu (fault_edge, qui compte), et l'état commandé
+ * du rail, lus ensemble sous pres_mux ; puis la prise vers la tâche, par sa propre file, jamais par celle des fronts
+ * (pleine : la prise n'est pas rapportée, le compte, lui, est fait). Rien n'est coupé ni décidé ici. */
 static void IRAM_ATTR fault_isr(void *arg)
 {
     bsk_rail_t rail = (bsk_rail_t)(uintptr_t)arg;
-    raw_t r = {.kind = RAW_FAULT, .t_us = esp_timer_get_time(), .rail = rail};
-    bool active = gpio_ll_get_level(&GPIO, rail == BSK_RAIL_LOGIC ? PIN_FAULT_LOGIC : PIN_FAULT_MOTOR) == 0;
-    fault_ev_t k;
+    fault_raw_t r = {.t_us = esp_timer_get_time(), .rail = rail};
+    bool active = fault_settle(fault_low, fault_again, rail);
+    BaseType_t hp = pdFALSE;
     portENTER_CRITICAL_ISR(&pres_mux);
-    k = fault_edge(&fault[rail], active);
+    r.k = fault_edge(&fault[rail], active);
     r.on = rail_on[rail];
     portEXIT_CRITICAL_ISR(&pres_mux);
-    r.level = k != FAULT_OFF && k != FAULT_REON;      /* le premier changement : l'activation, sauf après une retombée */
-    raw_send(&r);
-    if (k == FAULT_PULSE || k == FAULT_REON) {        /* le second, au même instant */
-        r.level = !r.level;
-        raw_send(&r);
-    }
+    (void)xQueueSendFromISR(fault_q, &r, &hp);
+    if (hp) portYIELD_FROM_ISR();
 }
 
 /* Le verrou levé ? Sans rien toucher. */
@@ -264,10 +360,28 @@ static void push(const bsk_phy_event_t *e)
     }
 }
 
-/* Ce que le flux a à rendre, jugé maintenant. */
+/* La fenêtre d'écoute, lue au début de chaque jugement : true, ouverte. Une génération changée depuis le dernier
+ * jugement vide la réception sans rien rapporter (rx_clear) : ce qu'elle tenait a été reçu dans une fenêtre fermée depuis.
+ * La règle de la PHY simulée (sim/phy_sim.c), qui juge chaque octet à son instant. Ici, un jugement n'est pas coupé en deux
+ * par une commande de la SESSION : sa tâche, celle d'app_main, a la priorité 1 (ESP_TASK_MAIN_PRIO), celle-ci 12, sur un
+ * seul cœur, et un jugement n'attend rien (uart_read_bytes et la file des événements sans attente). Seule la coupure du
+ * verrou, en interruption, peut tomber entre la lecture de la fenêtre et la file : l'événement jugé alors est poussé
+ * après elle, fait d'octets reçus lignes pilotées, comme un événement déjà dans la file. */
+static bool heard(void)
+{
+    uint32_t g = rx_gen;
+    if (g != rx_seen) {
+        rx_seen = g;
+        rx_clear(&rx);
+    }
+    return (g & 1u) != 0;
+}
+
+/* Ce que le flux a à rendre, jugé maintenant, fenêtre d'écoute ouverte. */
 static void drain(void)
 {
     bsk_phy_event_t e = {.kind = BSK_PHY_FRAME};
+    if (!heard()) return;
     while (rx_next(&rx, (uint64_t)esp_timer_get_time(), &e)) push(&e);
 }
 
@@ -285,8 +399,14 @@ static void bus_error(bool flush)
     push(&e);
 }
 
+/* Fenêtre d'écoute fermée, rien n'est lu ni rapporté : ce que le pilote tient est jeté (RXD détachée, rien n'y entre
+ * plus ; ce qui y était avant est d'une fenêtre fermée). */
 static void on_uart(const uart_event_t *u)
 {
+    if (!heard()) {
+        uart_flush_input(LENS_UART);
+        return;
+    }
     switch (u->type) {
     case UART_DATA: {                          /* lu dans la place libre, jamais nulle après drain, jugé à sa lecture */
         size_t n = u->size;
@@ -315,17 +435,17 @@ static void on_uart(const uart_event_t *u)
     }
 }
 
+/* Le ou les changements d'une prise d'un FAULT, au même instant (fault_events, phy_common.c). */
+static void on_fault(const fault_raw_t *r)
+{
+    bsk_phy_event_t e[2];
+    uint8_t n = fault_events(r->k, r->rail, r->on, (uint64_t)r->t_us, e);
+    for (uint8_t i = 0; i < n; i++) push(&e[i]);
+}
+
 static void on_raw(const raw_t *r)
 {
     bsk_phy_event_t e = {.t_us = (uint64_t)r->t_us};
-    if (r->kind == RAW_FAULT) {
-        e.kind = BSK_PHY_FAULT;
-        e.u.fault.rail = r->rail;
-        e.u.fault.active = r->level;
-        e.u.fault.on = r->on;
-        push(&e);
-        return;
-    }
     if (r->kind == RAW_VD || r->kind == RAW_BOUNCE) {
         e.kind = r->kind == RAW_VD ? BSK_PHY_VD : BSK_PHY_BOUNCE;
         push(&e);
@@ -357,6 +477,9 @@ static void phy_task(void *arg)
         } else if (q == raw_q) {
             raw_t r;
             if (xQueueReceive(raw_q, &r, 0) == pdTRUE) on_raw(&r);
+        } else if (q == fault_q) {
+            fault_raw_t r;
+            if (xQueueReceive(fault_q, &r, 0) == pdTRUE) on_fault(&r);
         }
         lost = raw_lost;
         if (lost != raw_seen) {                /* des fronts perdus depuis le relevé : LENS_CS publiée peut être fausse */
@@ -379,7 +502,32 @@ static void phy_task(void *arg)
 /* BODY_CS levée, garde, les octets, attente de fin d'émission, garde, BODY_CS rabaissée.
  * L'attente de fin d'émission (uart_wait_tx_done, 100 ms au plus) bloque l'appelant, la tâche de SESSION : sa durée la
  * plus longue et ses échéances atteintes sont relevées pour DEBUG (tx_wait_us, tx_timeout), deux lectures de
- * l'horloge, rien d'autre.
+ * l'horloge, rien d'autre. tx_wait_us est la durée de cet appel seul, du retour d'uart_write_bytes au retour
+ * d'uart_wait_tx_done (l'envoi des octets sur le fil, ce qui préempte la SESSION pendant ce temps) : ni les deux gardes
+ * de BODY_CS, ni la copie dans le tampon du pilote (uart_write_bytes), ni une trame refusée sans rien écrire n'y
+ * comptent. tx_timeout compte les attentes qui rendent ESP_ERR_TIMEOUT, et les trames refusées sans rien écrire (la
+ * relecture du repos ratée, ci-dessous) ; une attente en autre erreur rend E_BUS sans être comptée.
+ * L'échéance d'ensemble : une émission bloque la tâche de SESSION au plus 100 ms, les deux gardes et la copie dans le
+ * tampon du pilote, uart_write_bytes compris. Démontré en lecture, d'après les sources d'ESP-IDF 5.3.2
+ * (esp_driver_uart/src/uart.c) ; non vérifié sur la carte :
+ *   - uart_write_bytes (uart_tx_all) n'attend, sans échéance (portMAX_DELAY), qu'en deux points : tx_mux, puis la place
+ *     dans le tampon d'émission (xRingbufferSend, l'événement puis les données, un anneau RINGBUF_TYPE_NOSPLIT de
+ *     UART_TX_BUF octets). Le pilote n'émet pas d'autre façon : le contrôle de flux est coupé (bsk_phy_init), et les
+ *     octets ne dépendent que de l'horloge de l'UART ;
+ *   - tx_mux n'est pris que par les fonctions d'émission du pilote, uart_write_bytes et uart_wait_tx_done ici, qui le
+ *     rendent avant de rendre la main ; seule bsk_phy_send les appelle, sur la tâche de SESSION seule : il est toujours
+ *     libre quand elle le demande ;
+ *   - le tampon n'est jamais plein : aucune trame n'est écrite sans que l'émission d'avant ait été vue finie, l'UART au
+ *     repos (uart_wait_tx_done rend ESP_OK sur uart_hal_is_tx_idle, ou sur le TX_DONE de son interruption). Après une
+ *     attente échue ou en erreur (tx_late), la trame suivante relit le repos sans attendre (0 tic) ; pas au repos, elle
+ *     n'écrit rien, rend E_BUS et compte une échéance (tx_timeout) : une émission ratée, comme une attente échue. Au
+ *     moment d'écrire, le tampon ne tient donc que des octets que l'interruption du pilote (en IRAM,
+ *     CONFIG_UART_ISR_IN_IRAM) n'a pas encore passés au FIFO quand l'UART s'est vu au repos, au plus quelques trames,
+ *     qu'elle passera sans la tâche de SESSION : une trame y prend deux éléments,
+ *     l'événement et ses données (au plus BSK_FRAME_MAX octets, sous la moitié de la taille d'élément la plus grande),
+ *     chacun avec 8 octets d'en-tête, moins de 300 octets ; UART_TX_BUF en tient quatre.
+ * Rien ne change sur le fil ni dans la durée d'une émission qui aboutit : la relecture du repos ne se fait qu'après une
+ * attente ratée.
  * Pas d'attente que LENS_CS retombe avant d'émettre : quand émettre est la décision de TRANSACTION, propriétaire du bus,
  * qui voit LENS_CS en événement. Pas de mutex d'émission, ni de paire 0x03/0x04 sous un même numéro de séquence : un
  * seul émetteur, et la séquence est un champ de la trame, posé au-dessus. */
@@ -390,6 +538,11 @@ bsk_err_t bsk_phy_send(const bsk_frame_t *f)
     int w;
     esp_err_t e;
     int64_t t0, dt;
+    if (tx_late && uart_wait_tx_done(LENS_UART, 0) != ESP_OK) {   /* la trame d'avant pas encore partie : rien n'est écrit */
+        tx_timeout++;
+        return E_BUS;
+    }
+    tx_late = false;
     gpio_set_level(PIN_BODY_CS, 1);
     esp_rom_delay_us(CS_GUARD_US);
     w = uart_write_bytes(LENS_UART, b, n);
@@ -398,6 +551,7 @@ bsk_err_t bsk_phy_send(const bsk_frame_t *f)
     dt = esp_timer_get_time() - t0;
     if (dt > (int64_t)tx_wait_us) tx_wait_us = (uint32_t)dt;   /* 100 ms et une préemption : loin de 2^32 µs */
     if (e == ESP_ERR_TIMEOUT) tx_timeout++;
+    tx_late = e != ESP_OK;
     esp_rom_delay_us(CS_GUARD_US);
     gpio_set_level(PIN_BODY_CS, 0);
     return w == (int)n && e == ESP_OK ? E_OK : E_BUS;
@@ -478,16 +632,36 @@ void bsk_phy_stats(bsk_phy_stats_t *st)
     portEXIT_CRITICAL(&pres_mux);
 }
 
-/* La présence tenue d'abord, si elle précède le premier événement de la file : lu dans `ev` même, que pres_next
- * écrase quand elle rend. */
+/* L'événement retiré de la file et pas encore rendu, à la tâche de SESSION seule (bsk_phy_poll) : push ne le voit pas. */
+static bsk_phy_event_t held;
+static bool held_ok;
+
+/* La présence tenue d'abord, si elle précède l'événement retenu ; sinon l'événement, rendu tel qu'il a été comparé.
+ * Pourquoi l'événement est retiré avant d'être comparé, et non regardé en tête de file puis retiré (le défaut O14 de
+ * l'audit, ce que faisait ce code) : file pleine, push, sur la tâche de PHY (priorité 12, qui préempte la SESSION,
+ * priorité 1), jette la tête pour faire place au nouveau ; entre le regard et le retrait, l'événement retiré n'était plus
+ * celui qui avait été comparé, et un événement plus récent qu'une retombée pouvait être rendu avant elle. Ici :
+ *   - l'événement comparé est `held`, une copie hors de la file que seule cette fonction touche : celui qui est rendu
+ *     est celui qui a été comparé, quoi que push fasse de la file pendant ce temps. Comparé à une présence plus ancienne,
+ *     il est gardé pour l'appel suivant, où il est comparé de nouveau ;
+ *   - un événement rendu `e` est plus ancien que toute retombée pas encore rendue : pres_next, sous pres_mux, n'en tenait
+ *     aucune datée au plus de e.t_us ; une retombée posée ensuite l'est par une interruption (detect_isr, drop_expire)
+ *     qui lit son instant en entrant, et une interruption qui a commencé finit avant que la SESSION ne reprenne (un seul
+ *     cœur) : elle a commencé après la section critique, donc après la création de `e`, qui date son instant ;
+ *   - rien n'est perdu de plus : push compte dans evq_drop chaque événement qu'il jette de la file pleine, comme avant ;
+ *     `held` n'est plus dans la file, et ne peut pas être jeté. La présence ne passe pas par la file (pres_next) ;
+ *   - rien n'attend : la file est lue sans attente, et pres_mux n'entoure que pres_next, sans appel à FreeRTOS. */
 bool bsk_phy_poll(bsk_phy_event_t *ev)
 {
-    bool queued = xQueuePeek(ev_q, ev, 0) == pdTRUE;
     bool got;
+    if (!held_ok) held_ok = xQueueReceive(ev_q, &held, 0) == pdTRUE;
     portENTER_CRITICAL(&pres_mux);
-    got = pres_next(&pres, queued ? ev->t_us : UINT64_MAX, ev);
+    got = pres_next(&pres, held_ok ? held.t_us : UINT64_MAX, ev);
     portEXIT_CRITICAL(&pres_mux);
-    return got || (queued && xQueueReceive(ev_q, ev, 0) == pdTRUE);
+    if (got || !held_ok) return got;
+    *ev = held;
+    held_ok = false;
+    return true;
 }
 
 bool bsk_phy_rail(bsk_rail_t rail, bool on)
@@ -503,20 +677,38 @@ bool bsk_phy_rail(bsk_rail_t rail, bool on)
     return ok;
 }
 
-/* Pilotées : TXD rattachée à l'UART (uart_set_pin la pose haute avant de la router), BODY_CS basse avant que sa
- * sortie ne soit ouverte. La VD n'est pas touchée : bsk_phy_vd la démarre. */
+/* Après le routage des lignes : le verrou encore levé, la fenêtre d'écoute ouverte (déjà ouverte, la reprise, elle le
+ * reste) ; sinon, la coupure rejouée. */
+static bool lines_held(void)
+{
+    bool open;
+    portENTER_CRITICAL(&pres_mux);
+    open = pres.present;
+    if (!open) cut();
+    else if (!(rx_gen & 1u)) rx_gen = rx_gen + 1;
+    portEXIT_CRITICAL(&pres_mux);
+    return open;
+}
+
+/* Pilotées : TXD rattachée à l'UART (uart_set_pin la pose haute avant de la router), RXD aussi (tirée haut, rxd_rest),
+ * BODY_CS basse avant que sa sortie ne soit ouverte, puis la fenêtre d'écoute ouverte. Relâchées : la fenêtre fermée et
+ * RXD au repos d'abord, puis TXD et BODY_CS. La VD n'est pas touchée : bsk_phy_vd la démarre. */
 bool bsk_phy_lines(bool drive)
 {
     if (!drive) {
+        portENTER_CRITICAL(&pres_mux);
+        if (rx_gen & 1u) rx_gen = rx_gen + 1;
+        rxd_rest();
+        portEXIT_CRITICAL(&pres_mux);
         rest(PIN_LENS_TXD);
         rest(PIN_BODY_CS);
         return true;
     }
     if (!lock_open()) return false;
-    ESP_ERROR_CHECK(uart_set_pin(LENS_UART, PIN_LENS_TXD, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_set_pin(LENS_UART, PIN_LENS_TXD, PIN_LENS_RXD, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
     gpio_set_level(PIN_BODY_CS, 0);
     gpio_set_direction(PIN_BODY_CS, GPIO_MODE_OUTPUT);
-    return lock_held();
+    return lines_held();
 }
 
 /* Les EN mis en sortie sans jamais sortir ni être tirés vers « allumé » (ticket #574) : du reset jusqu'à la demande
@@ -559,9 +751,8 @@ static void en_init(void)
 static void fault_arm(bsk_rail_t rail, gpio_num_t pin)
 {
     if (gpio_get_level(pin) == 0) {
-        raw_t r = {.kind = RAW_FAULT, .level = true, .t_us = esp_timer_get_time(), .rail = rail, .on = false};
-        (void)fault_edge(&fault[rail], true);
-        on_raw(&r);
+        fault_raw_t r = {.k = fault_edge(&fault[rail], true), .rail = rail, .on = false, .t_us = esp_timer_get_time()};
+        on_fault(&r);
     }
     ESP_ERROR_CHECK(gpio_set_intr_type(pin, GPIO_INTR_ANYEDGE));
     ESP_ERROR_CHECK(gpio_isr_handler_add(pin, fault_isr, (void *)(uintptr_t)rail));
@@ -570,8 +761,8 @@ static void fault_arm(bsk_rail_t rail, gpio_num_t pin)
 
 void bsk_phy_init(void)
 {
-    const gpio_config_t lines = {   /* au repos (rest) : TXD n'est pas routée, VD arrêtée */
-        .pin_bit_mask = (1ULL << PIN_LENS_TXD) | (1ULL << PIN_BODY_CS) | (1ULL << PIN_BODY_VD),
+    const gpio_config_t lines = {   /* au repos (rest) : TXD et RXD ne sont pas routées, VD arrêtée */
+        .pin_bit_mask = (1ULL << PIN_LENS_TXD) | (1ULL << PIN_LENS_RXD) | (1ULL << PIN_BODY_CS) | (1ULL << PIN_BODY_VD),
         .mode = GPIO_MODE_INPUT,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
     };
@@ -615,17 +806,22 @@ void bsk_phy_init(void)
     ESP_ERROR_CHECK(gpio_config(&faults));
 
     MUST((raw_q = xQueueCreate(RAW_LEN, sizeof(raw_t))) != NULL);
+    MUST((fault_q = xQueueCreate(FAULT_LEN, sizeof(fault_raw_t))) != NULL);
     MUST((ev_q = xQueueCreate(EV_LEN, sizeof(bsk_phy_event_t))) != NULL);
-    MUST((set = xQueueCreateSet(RAW_LEN + UART_EV_LEN)) != NULL);
+    MUST((set = xQueueCreateSet(RAW_LEN + FAULT_LEN + UART_EV_LEN)) != NULL);
     MUST(xQueueAddToSet(raw_q, set) == pdPASS);
+    MUST(xQueueAddToSet(fault_q, set) == pdPASS);
 
     ESP_ERROR_CHECK(uart_param_config(LENS_UART, &ucfg));
     /* ESP_INTR_FLAG_IRAM, avec CONFIG_UART_ISR_IN_IRAM (sdkconfig.defaults) : l'ISR de l'UART vide le FIFO de
      * réception pendant une écriture de la marque en NVS, cache de la flash coupé (ticket #528, audit M3) */
     ESP_ERROR_CHECK(uart_driver_install(LENS_UART, UART_RX_BUF, UART_TX_BUF, UART_EV_LEN, &uart_q, ESP_INTR_FLAG_IRAM));
-    MUST(xQueueAddToSet(uart_q, set) == pdPASS);   /* vide : les broches ne sont pas encore routées */
-    /* RXD seule : TXD reste au repos jusqu'à bsk_phy_lines(true) */
-    ESP_ERROR_CHECK(uart_set_pin(LENS_UART, UART_PIN_NO_CHANGE, PIN_LENS_RXD, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    MUST(xQueueAddToSet(uart_q, set) == pdPASS);   /* vide : les broches ne sont pas routées */
+    /* TXD et RXD au repos jusqu'à bsk_phy_lines(true) : l'entrée de l'UART sur le 1 constant, la fenêtre d'écoute fermée
+     * (rx_gen à zéro) */
+    portENTER_CRITICAL(&pres_mux);
+    rxd_rest();
+    portEXIT_CRITICAL(&pres_mux);
     ESP_ERROR_CHECK(uart_set_rx_full_threshold(LENS_UART, 8));
     ESP_ERROR_CHECK(uart_set_rx_timeout(LENS_UART, 2));
 

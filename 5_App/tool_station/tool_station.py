@@ -87,8 +87,13 @@ PROCÉDURE MANUELLE (sans cet outil, à la console série de la carte)
     5. Débrancher puis rebrancher l'objectif.
     Réponses d'erreur : « er nocap custom » (pas un Samyang AF 135), « er nolens », « er busy boot »,
     « er fault » (carte pas prête), « er busy » (une commande en cours), « er link timeout » (l'objectif n'a pas
-    répondu en 1 s), « er link framing » (une autre réponse est arrivée : recommencer), « er link aborted »
-    (l'objectif a été retiré), « er range … » (ligne mal écrite).
+    répondu en 1 s : sa réponse peut encore arriver, et la carte refuse ensuite CUSTOM ; débrancher puis
+    rebrancher l'objectif avant de recommencer), « er link desync » (CUSTOM refusé, rien n'est envoyé à
+    l'objectif, depuis un « er link timeout » ou un « er link aborted » de l'objectif resté branché :
+    débrancher puis rebrancher l'objectif, puis recommencer), « er link framing » (une réponse trop courte :
+    recommencer), « er link aborted » (l'objectif a été retiré, ou la carte a perdu sa télémétrie : sa réponse
+    peut encore arriver, et la carte refuse ensuite CUSTOM ; s'il n'a pas été retiré, débrancher puis
+    rebrancher l'objectif avant de recommencer), « er range … » (ligne mal écrite).
 
 EFFETS
     L'écriture change la configuration en flash : elle survit à la mise hors tension. La lecture laisse des
@@ -120,7 +125,7 @@ class Erreur(Exception):
 
 # La forme d'une réponse à `CUSTOM` (PROTOCOL.md § 3.1 ; une majuscule rend `ok …` ou `er …`, § 3), la seule commande
 # de l'outil. Une autre ligne n'est jamais prise pour la réponse : une ligne du journal (`* …`, sous `LOG ON`), ou une ligne
-# de la ROM de l'ESP32-S3 que l'ouverture du port, qui peut redémarrer la carte, fait arriver après l'envoi (audit R5).
+# de la ROM de l'ESP32-C3 que l'ouverture du port, qui peut redémarrer la carte, fait arriver après l'envoi (audit R5).
 REPONSE = re.compile(r"(ok|er)( |$)")
 
 # Le temps qu'une demande attend sa réponse, lignes sautées comprises (audit R10 : une carte qui émet des lignes `*` sans

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: captain <captain@lcars.local>
 Date: Mon, 19 Oct 2026 18:54:49 +0200
-Subject: [PATCH 5/8] Pinefeat CEF: end a Busy move or calibration when the
+Subject: [PATCH 5/9] Pinefeat CEF: end a Busy move or calibration when the
  state can't be read
 
 A move sets the absolute (and relative) position Busy, and an accepted

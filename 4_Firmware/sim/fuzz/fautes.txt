@@ -1,0 +1,408 @@
+# Les fautes que `fuzz.sh mord` injecte, une à la fois, dans une copie temporaire de 4_Firmware/ (jamais livrée) : pour
+# chaque propriété jouée, au moins un essai où son oracle détecte une faute (le critère 3 du ticket #797). Ce ne sont pas
+# les mutants de la suite (sim/test/mutations*.txt) : aucun script de la suite ne lit ce fichier.
+#
+# Un bloc :
+#   @ <harnais> <fichier relatif à 4_Firmware/> <commande du harnais> | <texte que sa sortie doit contenir>
+#   = <autre fichier relatif à 4_Firmware/>    \
+#   -- <texte original, une ligne>             | facultatif, répétable : une autre substitution de la même faute,
+#   ++ <son remplacement>                      /  quand l'oracle ne peut voir qu'une faute en deux lieux (fuzz_session)
+#   - <texte original, une ligne, exactement une fois dans le fichier>
+#   + <son remplacement>
+# Une commande `campagne <graine> <n>` reçoit en plus un répertoire de cas temporaire ; `premier <graine> <n>` s'arrête
+# au premier cas qui échoue (fuzz.c). Le harnais fautif est compilé avec une garde de durée de 2 s de processeur
+# (-DFZ_GARDE_S=2), 20 s pour fuzz_session, dont un cas joue des dizaines de secondes de temps virtuel.
+
+# ── cible 1, la réception en flux ──
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P9 trame
+- if (len != n || b[3] < 1 || b[3] > 3 || b[n - 1] != 0x55) return E_FRAMING;
++ if (len != n || b[3] < 1 || b[3] > 4 || b[n - 1] != 0x55) return E_FRAMING;
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P9 decoupe
+- if (st == FR_SHORT && !stale) break;
++ if (st == FR_SHORT && !stale && r->n - pos < 3) break;
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P9 bus
+-     raw_add(raw, r->b, r->n);
++     (void)0;
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P2 garde
+-         pos++;                                          /* écarté, ou périmé */
++         if (st != FR_SHORT) pos++;
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | runtime error
+-     l = (size_t)b[1] | (size_t)b[2] << 8;
++     l = (size_t)b[1] | (size_t)(b[2] << 24) >> 16;
+
+# ── cible 2, lens_rx ──
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P4 ouverture
+-     return ap_known(code) ? code : 0;
++     return ap_known(code) || code ? code : 0;
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P4 bornes
+-         pub.lim = pub.fmin <= pub.fmax;
++         pub.lim = pub.fmin <= pub.fmax + 1;
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P4 identite
+-     } else if (type == 0x08 && f->len >= 3) {
++     } else if (type == 0x07 && f->len >= 4) { lens_rx_id(f); } else if (type == 0x08 && f->len >= 3) {
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P4 nom
+-  || msg[i] == '"') return false;
++ ) return false;
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P1 au_dela
+-         if (f->len > 63) {
++         if (f->len > 62) {
+
+# ── bench_core, P5 (a) ──
+@ fuzz_bench components/bench_core/bench_core.c campagne 1 20000 | ECHEC P5 refusee
+-     case 'V': return sub == 0x00;
++     case 'V': return sub == 0x00 || sub == 0x01;
+@ fuzz_bench components/bench_core/bench_core.c campagne 1 20000 | ECHEC P5 refusee
+-     return sub == 0x38 && (v >> 4) < 3 && (v & 0x0F) < 3;
++     return sub == 0x38 && (v >> 4) < 4 && (v & 0x0F) < 3;
+@ fuzz_bench components/bench_core/bench_core.c campagne 1 20000 | ECHEC P5 admise
+- case 0x1D: return 5;
++ case 0x1D: return 6;
+@ fuzz_bench components/bench_core/bench_core.c campagne 1 20000 | ECHEC P5 compte
+-         refused++;
++         refused += 2;
+@ fuzz_bench components/bench_core/bench_core.c campagne 1 20000 | runtime error
+-     uint8_t v = (uint8_t)(data - 0x30);
++     uint8_t v = (uint8_t)(((data << 24) >> 24) - 0x30);
+
+# ── cible 7, sht40.c contre le faux capteur ──
+@ fuzz_sht40 components/sensor/sht40.c campagne 1 5000 | ECHEC P11 commandes
+- #define CMD_RESET   0x94u
++ #define CMD_RESET   0x39u
+@ fuzz_sht40 components/sensor/sht40.c mots | ECHEC P11 valeur
+-     *rh_c = rh < 0 ? 0 : rh > 10000 ? 10000 : rh;
++     *rh_c = rh < 0 ? 0 : rh > 10000 ? 10001 : rh;
+@ fuzz_sht40 components/sensor/sht40.c campagne 1 5000 | ECHEC P11 issue
+-     if (r != BSK_SENSOR_OK) {
++     if (r != BSK_SENSOR_OK && r != BSK_SENSOR_BUS) {
+@ fuzz_sht40 components/sensor/sht40.c campagne 1 5000 | ECHEC P11 jugement
+-     if (now_us > s->at_us && now_us - s->at_us > BSK_SENSOR_STALE_US) {
++     if (now_us > s->at_us && now_us - s->at_us > BSK_SENSOR_STALE_US + 1000000u) {
+@ fuzz_sht40 components/sensor/sht40.c campagne 1 5000 | ECHEC P2 starts
+-         if (r != BSK_SENSOR_OK) sht_recover();
++         if (r != BSK_SENSOR_OK) { sht_recover(); sht_recover(); }
+@ fuzz_sht40 components/sensor/sht40.c campagne 1 5000 | ECHEC P2 duree
+- #define MEASURE_MS  9u
++ #define MEASURE_MS  19u
+@ fuzz_sht40 components/sensor/sht40.c campagne 1 5000 | runtime error
+-             c = (uint8_t)(c << 1);
++             c = (uint8_t)((c << 24) >> 23);
+
+# ── cible 7, z et :GT# ──
+@ fuzz_climat components/host/host.c campagne 1 3000 | ECHEC P10 z_forme
+-         put(out, cap, "-");
++         put(out, cap, "0.00 0.00 -");
+@ fuzz_climat components/host/host.c couples -4500 -4300 | ECHEC P11 z_seuil
+-     if (x < -65.0) return false;
++     if (x < -66.0) return false;
+@ fuzz_climat components/host/host.c campagne 1 3000 | ECHEC P11 gt
+-     return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 25) / 50;
++     return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 26) / 50;
+@ fuzz_climat components/host/host.c campagne 1 3000 | ECHEC P11 z_mesure
+-     snprintf(out, cap, "%s%ld.%02ld %ld.%02ld", v.t_c < 0 ? "-" : "", t / 100, t % 100, (long)v.rh_c / 100,
++     snprintf(out, cap, "%s%ld.%02ld %ld.%02ld", v.t_c <= 0 ? "-" : "", t / 100, t % 100, (long)v.rh_c / 100,
+@ fuzz_climat components/host/host.c campagne 1 3000 | ECHEC P10 fin
+-     return "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
++     return "\r\n";
+@ fuzz_climat components/host/host.c campagne 1 3000 | runtime error
+-     return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 25) / 50;
++     return v.t_c < 0 ? -((-v.t_c + 25) / 50) : ((v.t_c + 25) << 19) / (50 << 19);
+
+# ── les formats du journal ──
+@ fuzz_journal components/journal/journal.c enum | AddressSanitizer
+-     char b[LINE_MAX];
++     char b[64];
+@ fuzz_journal components/journal/journal.c enum | AddressSanitizer
+-     char b[112];
++     char b[96];
+@ fuzz_journal components/journal/journal.c enum | ECHEC P6 transport
+-     return n > cap ? cap : n;
++     return (n > cap ? cap : n) * 3;
+
+# ── cible 6, la mémoire RTC ──
+@ fuzz_rtc components/session/restore.c campagne 1 300 | ECHEC P4 memoire
+- if (warm && s.keep->sum == sum_of(s.keep) && s.keep->dir <= BSK_APPROACH_DECREASING) return;
++ if (warm && s.keep->sum == sum_of(s.keep) && s.keep->dir <= BSK_APPROACH_DECREASING + 1) return;
+@ fuzz_rtc components/session/restore.c campagne 1 300 | ECHEC P3 cible
+-     if (!k[0] || strcmp(k, s.keep->key)) return false;
++     if (!k[0] || strncmp(k, s.keep->key, 12)) return false;
+@ fuzz_rtc components/session/session.c campagne 1 300 | ECHEC P3 transition
+-     enter(SESSION_IDENTIFYING);
++     enter(SESSION_HOMING);
+@ fuzz_rtc components/session/session.c campagne 1 300 | ECHEC P3 duree
+-     enter(SESSION_READY);
++     enter(SESSION_RECOVERING);
+@ fuzz_rtc components/session/session.c campagne 1 300 | ECHEC P4 instantane
+-     st->position_valid = s.state == SESSION_READY && l->have06;
++     st->position_valid = l->have06;
+@ fuzz_rtc components/session/session.c campagne 1 300 | ECHEC P8 nvs
+-     enter(SESSION_READY);
++     enter(SESSION_READY); (void)mark_set(BSK_MARK_HERE);
+@ fuzz_rtc components/session/session.c campagne 1 300 | ECHEC P2 temps
+-     return d < s.now ? s.now : d;
++     return 0;
+@ fuzz_rtc components/session/restore.c campagne 1 300 | runtime error
+-     b[sizeof k->key] = (uint8_t)k->pos;
++     b[sizeof k->key] = (uint8_t)(k->pos << 16 >> 16);
+
+# ── vérifications ajoutées après la première passe ──
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P9 nature
+-         e->u.err = E_FRAMING;
++         e->u.err = E_BUS;
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P9 ecart
+-     r->n = (uint16_t)(r->n + k);
++     r->n = (uint16_t)(r->n + k + (k > 3));
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P9 releve
+-     size_t c = BSK_PHY_RAW_MAX - r->len;
++     size_t c = BSK_PHY_RAW_MAX - 1 - r->len;
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P2 boucle
+-     if (r->junk.n && (frame || stale || r->junk.n == RX_CAP)) {
++     if (r->junk.n && (frame || r->junk.n == RX_CAP)) {
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P4 plage
+-             if (!pub.ap_min || pub.ap_min > pub.ap_max) {
++             if (!pub.ap_min || pub.ap_min > pub.ap_max + 1) {
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P4 position
+-         pub.pos = 0;
++         (void)0;
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P4 drapeaux05
+-     pub.have05 = pub.have62 = pub.have64 = false;
++     pub.have05 = pub.have62 = false;
+@ fuzz_lens_rx components/session/lens_rx.c campagne 1 3000 | ECHEC P4 rendu
+-     return type;
++     return type == 0x08 ? 0 : type;
+@ fuzz_bench components/bench_core/bench_core.c campagne 1 20000 | ECHEC P5 emise
+-     return bsk_phy_send(f);
++     (void)bsk_phy_send(f); return bsk_phy_send(f);
+@ fuzz_bench components/bench_core/bench_core.c campagne 1 20000 | ECHEC P5 issue
+-     return bsk_phy_send(f);
++     return bsk_phy_send(f) == E_BUS ? E_OK : E_OK;
+@ fuzz_rtc components/session/session.c campagne 1 300 | ECHEC P3 fault
+-     enter(SESSION_READY);
++     enter(SESSION_FAULT);
+@ fuzz_rtc components/journal/journal.c campagne 1 300 | ECHEC P6 ligne
+-     return n > cap ? cap : n;
++     return (n > cap ? cap : n) * 3;
+@ fuzz_rx components/phy/phy_common.c campagne 1 3000 | ECHEC P9 fin
+- uint64_t rx_deadline(const rx_t *r) { return r->n || r->junk.n ? r->last + RX_STALE_US + 1 : UINT64_MAX; }
++ uint64_t rx_deadline(const rx_t *r) { return r->junk.n ? r->last + RX_STALE_US + 1 : UINT64_MAX; }
+
+# ── F2, la SESSION face à l'objectif fou (fuzz_session) ──
+@ fuzz_session components/session/session.c premier 1 400 P2 poll | ECHEC P2 poll
+- #define STEP_EVENTS    64u
++ #define STEP_EVENTS    200u
+@ fuzz_session components/session/session.c premier 1 400 P2 garde | ECHEC P2 garde
+-     if (motion_expire(s.now)) return true;
++     if (motion_expire(s.now) || s.state == SESSION_RESTORING) return true;
+@ fuzz_session components/session/session.c premier 1 400 P3 etat | ECHEC P3 etat
+-     enter(SESSION_FAULT);
++     enter((bsk_session_state_t)9);
+@ fuzz_session components/session/session.c premier 1 400 P3 transition | ECHEC P3 transition
+-     enter(SESSION_RECOVERING);
++     enter(SESSION_HOMING);
+@ fuzz_session components/session/session.c premier 1 400 P3 fault | ECHEC P3 fault
+-     s.last_error = why;
++     s.last_error = why == E_HOME_FAILED ? E_TIMEOUT : why;
+@ fuzz_session components/session/session.c premier 1 400 P3 duree | ECHEC P3 duree
+-     p->retry_wait_ms = 3000;
++     p->retry_wait_ms = 3500;
+@ fuzz_session components/session/session.c premier 1 400 P3 fin | ECHEC P3 fin
+-     enter(SESSION_READY);
++     enter(SESSION_READY); s.step = S_REC_WAIT; s.due = 0; enter(SESSION_RECOVERING); return;
+@ fuzz_session components/session/session.c premier 1 400 P3 off | ECHEC P3 off
+-         if (!s.present && s.state != SESSION_OFF) to_off();
++         if (0) to_off();
+@ fuzz_session components/session/motion.c premier 1 400 P3 cible | ECHEC P3 cible
+-     if (m.stop_sends) m.wait = true;
++     if (0) m.wait = true;
+@ fuzz_session components/session/session.c premier 1 400 P4 instantane | ECHEC P4 instantane
+-     st->position_valid = s.state == SESSION_READY && l->have06;
++     st->position_valid = l->have06;
+@ fuzz_session components/session/session.c premier 1 400 P4 identite | ECHEC P4 identite
+-     mark_frame(type);                               /* le sens, la clé */
++     mark_frame(type); if (type == 0x06) init_forget();
+@ fuzz_session components/session/cmd.c premier 1 400 P5 liste | ECHEC P5 liste
+= components/bench_core/bench_core.c
+-- return sub == 0x38 && (v >> 4) < 3 && (v & 0x0F) < 3;
+++ return (sub == 0x38 || sub == 0x39) && (v >> 4) < 3 && (v & 0x0F) < 3;
+-         m[2] = 0x38;
++         m[2] = 0x39;
+@ fuzz_session components/session/cmd.c premier 1 400 P5 signature | ECHEC P5 signature
+= components/bench_core/bench_core.c
+-- if (lens != BSK_BENCH_SAMYANG && lens != BSK_BENCH_SAMYANG135) return false;
+++ (void)lens;
+= components/bench_core/bench_core.c
+-- return lens == BSK_BENCH_SAMYANG135 && svc135_allowed((char)m[1], m[2], m[3]);
+++ return svc135_allowed((char)m[1], m[2], m[3]);
+-     if (init_lens() != BSK_BENCH_SAMYANG135) {     /* le 135 seul : bench_core ne laisse qu'à lui cette exception */
++     if (0) {
+@ fuzz_session components/session/cmd.c premier 1 400 P5 ecriture | ECHEC P5 ecriture
+-     uint8_t m[19] = {0x40, 'P', 0xFA};
++     uint8_t m[19] = {0x40, 'P', 0x38, 0x30};
+@ fuzz_session components/session/cmd.c premier 1 400 P5 refus | ECHEC P5 refus
+-     uint8_t m[19] = {0x40, 'P', 0xFA};
++     uint8_t m[19] = {0x40, 'P', 0xFA, 0x53};
+@ fuzz_session components/journal/journal.c premier 1 400 P6 ligne | ECHEC P6 ligne
+-     return n > cap ? cap : n;
++     return (n > cap ? cap : n) * 3;
+@ fuzz_session components/journal/journal.c premier 1 400 P6 muet | ECHEC P6 muet
+-     j.on = on;
++     j.on = true;
+@ fuzz_session components/journal/journal.c premier 1 400 P6 debit | ECHEC P6 debit
+= components/journal/journal.c
+--     if (j.on && (j.all || !periodic_rx(f))) frame("rx", true, f, t_us);
+++     if (j.on && (j.all || !periodic_rx(f) || true)) frame("rx", true, f, t_us);
+- #define PER_S    30u
++ #define PER_S    3000u
+@ fuzz_session components/session/session.c premier 1 400 P7 rail | ECHEC P7 rail
+-     wait_for(S_REC_WAIT, s.p.retry_wait_ms);
++     wait_for(S_REC_WAIT, s.p.retry_wait_ms); bsk_phy_rail(BSK_RAIL_MOTOR, false);
+@ fuzz_session components/session/session.c premier 1 400 PRESENCE rail | ECHEC PRESENCE rail
+= sim/phy_sim.c
+-- if (on && !g.pres.present) return false;       /* le verrou */
+++ (void)0;
+-     bsk_phy_rail(BSK_RAIL_LOGIC, false);
++     bsk_phy_rail(BSK_RAIL_LOGIC, true);
+@ fuzz_session components/session/session.c premier 1 400 DELAI rail_moteur | ECHEC DELAI rail_moteur
+- #define RAIL_MS        50u
++ #define RAIL_MS        49u
+@ fuzz_session components/session/session.c premier 1 400 DELAI lignes | ECHEC DELAI lignes
+-         settle(S_RAIL_MOTOR, RAIL_MS);
++         settle(S_RAIL_MOTOR, 49);
+@ fuzz_session components/session/session.c premier 1 400 DELAI cs_basse | ECHEC DELAI cs_basse
+- #define HS_LOW_MS      15u
++ #define HS_LOW_MS      14u
+@ fuzz_session components/session/session.c premier 1 400 DELAI cs_haute | ECHEC DELAI cs_haute
+- #define HS_HOLD_MS     3u
++ #define HS_HOLD_MS     2u
+@ fuzz_session components/session/session.c premier 1 400 DELAI homing | ECHEC DELAI homing
+- #define AF_STOP_MS     100u
++ #define AF_STOP_MS     99u
+@ fuzz_session components/session/cmd.c premier 1 400 ACCUSE final | ECHEC ACCUSE final
+-     session_aperture(c->arg);
++     session_aperture(c->arg); session_ack(c->seq, ACK_COMPLETED, E_OK);
+@ fuzz_session components/session/cmd.c premier 1 400 ACCUSE fin | ECHEC ACCUSE fin
+-         session_ack(cu.seq, ACK_COMPLETED, E_OK);
++         (void)0;
+@ fuzz_session components/session/drive.c premier 1 400 CONTRAT held_end | ECHEC CONTRAT held_end
+- bool drive_stop_end(uint8_t place, bsk_err_t *e) { return bsk_txn_held_end(place, e); }
++ bool drive_stop_end(uint8_t place, bsk_err_t *e) { return bsk_txn_held_end(place + BSK_TXN_HELD_MAX, e); }
+@ fuzz_session components/session/cmd.c premier 1 400 CONTRAT ack_last | ECHEC CONTRAT ack_last
+-     bsk_session_command(&c);
++     (void)session_ack_last(); bsk_session_command(&c);
+@ fuzz_session components/session/session.c premier 1 400 P8 nvs | ECHEC P8 nvs
+-         restore_skip(nomark);                       /* après la transition (enter) */
++         restore_skip(nomark); (void)mark_set(BSK_MARK_HERE);
+@ fuzz_session components/session/mark.c premier 1 400 P8 doigt | ECHEC P8 doigt
+- #define BTN_LONG_US 1000000u
++ #define BTN_LONG_US 500000u
+@ fuzz_session components/txn/txn.c premier 1 400 ORDRE reponse | ECHEC ORDRE reponse
+-     if (r[0] != x.q[0]) return false;
++     if (r[0] != x.q[0] && r[0] != 0x05) return false;
+@ fuzz_session components/session/cmd.c premier 1 400 ORDRE custom | ECHEC ORDRE custom
+-         if (bsk_txn_error() == E_TIMEOUT) cu.desync = true;
++         (void)0;
+@ fuzz_session components/session/mark.c premier 1 400 P4 marque | ECHEC P4 marque
+-     if (v >> 24) return false;
++     if (v >> 25) return false;
+
+# ── F3, l'hôte fou (fuzz_hote) et le harnais secondaire (fuzz_commande) ──
+@ fuzz_hote components/host/host.c premier 1 400 P10 fin | ECHEC P10 fin
+-     return "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
++     return *line == 'f' ? "" : "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
+@ fuzz_hote components/host/host.c premier 1 400 P10 tampon | ECHEC P10 tampon
+- static void put(char *out, size_t cap, const char *s) { snprintf(out, cap, "%s", s); }
++ static void put(char *out, size_t cap, const char *s) { memset(out, 'x', cap - 1); out[cap - 1] = 0; (void)s; }
+@ fuzz_hote components/host/host.c premier 1 400 P10 une_ligne | ECHEC P10 une_ligne
+-     put(out, cap, "er nocap");                            /* une ligne que PROTOCOL.md ne connaît pas (§ 4.5.1) */
++     put(out, cap, "er\tnocap");                            /* une ligne que PROTOCOL.md ne connaît pas (§ 4.5.1) */
+@ fuzz_hote components/host/host.c premier 1 400 P10 longueur | ECHEC P10 longueur
+-     case E_LIMIT: put(out, cap, "er range limits"); break;
++     case E_LIMIT: put(out, cap, "er range limits x"); break;
+@ fuzz_hote components/host/host.c premier 1 400 P10 ok | ECHEC P10 ok
+-     case E_BUSY: put(out, cap, "er busy"); break;
++     case E_BUSY: put(out, cap, "er busy ok"); break;
+@ fuzz_hote components/host/host.c premier 1 400 P10 forme | ECHEC P10 forme
+-             put(out, cap, ready ? (st->moving ? "y" : "n") : in_sequence(st) ? "y" : "n");
++             put(out, cap, ready ? (st->moving ? "y" : "n") : in_sequence(st) ? "n" : "y");
+@ fuzz_hote components/host/host.c premier 1 400 P4 hote | ECHEC P4 hote
+-         else if (!st->limits_valid) put(out, cap, "er link limits");   /* bornes inconnues (PROTOCOL.md § 2) */
++         else if (0) put(out, cap, "er link limits");   /* bornes inconnues (PROTOCOL.md § 2) */
+@ fuzz_hote components/host/host.c premier 1 400 P4 hote | ECHEC P4 hote
+-     if (!st->aperture_current) return false;
++     if (0) return false;
+@ fuzz_hote components/host/host.c premier 1 400 B4 admission | ECHEC B4 admission
+- static bool is_ready(const bsk_status_t *st) { return st->session_state == SESSION_READY; }
++ static bool is_ready(const bsk_status_t *st) { return st->session_state == SESSION_READY || st->session_state == SESSION_OFF; }
+@ fuzz_hote components/host/host.c premier 1 400 DIFFEREE borne | ECHEC DIFFEREE borne
+-         h.lt_done = true;
++         h.lt_done = h.lt_op != CMD_FOCUS_STOP;
+@ fuzz_hote components/host/host.c premier 1 400 P6 muet | ECHEC P6 muet
+= components/host/host.c
+--     snprintf(out, cap, "ok log=%d all=%d", bsk_journal_on(), bsk_journal_all());
+++     snprintf(out, cap, "ok log=%d all=%d", bsk_journal_on() && !word(a, n, "OFF"), bsk_journal_all());
+-     else if (word(a, n, "OFF")) bsk_journal_set(false, false);
++     else if (word(a, n, "OFF")) bsk_journal_set(true, false);
+@ fuzz_hote components/host/host.c premier 1 400 P5 ecriture | ECHEC P5 ecriture
+-         arg = (t[1][0] - '0') << 4 | (t[1][1] - '0');
++         arg = (t[1][1] - '0') << 4 | (t[1][0] - '0');
+@ fuzz_hote components/host/host.c premier 1 400 P8 nvs | ECHEC P8 nvs
+-         command(CMD_FOCUS_GOTO, st->mark_position, out, cap);
++         command(CMD_SET_MARK, BSK_MARK_HERE, out, cap);
+@ fuzz_hote components/session/cmd.c premier 1 400 ACCUSE premier | ECHEC ACCUSE premier
+-         aperture_cmd(c);
++         if (session_state() != SESSION_READY) aperture_cmd(c);
+@ fuzz_hote components/host/host.c premier 1 400 P1 sanitizer | runtime error
+-     for (size_t i = 0; i < sizeof d; i++) snprintf(out + 2 + 3 * i, cap - 2 - 3 * i, " %02X", (unsigned)d[i]);
++     for (size_t i = 0; i <= sizeof d; i++) snprintf(out + 2 + 3 * i, cap - 2 - 3 * i, " %02X", (unsigned)d[i]);
+@ fuzz_commande components/session/cmd.c premier 1 400 ACCUSE premier | ECHEC ACCUSE premier
+-         aperture_cmd(c);
++         if (session_state() != SESSION_READY) aperture_cmd(c);
+@ fuzz_commande components/session/motion.c premier 1 400 P1 sanitizer | runtime error
+-     int64_t target = c->op == CMD_FOCUS_MOVE ? (int64_t)lens_rx()->pos + c->arg : (int64_t)c->arg;
++     int64_t target = c->op == CMD_FOCUS_MOVE ? (int64_t)(lens_rx()->pos + c->arg) : (int64_t)c->arg;
+@ fuzz_commande components/session/session.c premier 1 400 P2 poll | ECHEC P2 poll
+- #define STEP_EVENTS    64u
++ #define STEP_EVENTS    200u
+@ fuzz_commande components/session/session.c premier 1 400 P3 transition | ECHEC P3 transition
+-     enter(SESSION_RECOVERING);
++     enter(SESSION_HOMING);
+@ fuzz_commande components/session/cmd.c premier 1 400 P5 liste | ECHEC P5 liste
+= components/bench_core/bench_core.c
+-- return sub == 0x38 && (v >> 4) < 3 && (v & 0x0F) < 3;
+++ return (sub == 0x38 || sub == 0x39) && (v >> 4) < 3 && (v & 0x0F) < 3;
+-         m[2] = 0x38;
++         m[2] = 0x39;
+@ fuzz_commande components/session/cmd.c premier 1 400 ACCUSE final | ECHEC ACCUSE final
+-     session_aperture(c->arg);
++     session_aperture(c->arg); session_ack(c->seq, ACK_COMPLETED, E_OK);
+
+# ── F4 : la ligne de l'hôte, en harnais d'octets (fuzz_ligne), au-dessus d'une session scriptée ──
+@ fuzz_ligne components/host/host.c premier 1 2000 P10 fin | ECHEC P10 fin
+-     return "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
++     return *line == 'f' ? "" : "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
+@ fuzz_ligne components/host/host.c premier 1 2000 P10 fin | ECHEC P10 fin
+-     if (!strcmp(cmd, "GV")) { put(out, cap, "10"); return ""; }      /* 2 chiffres, sans '#' : c'est ainsi que le driver le lit */
++     if (!strcmp(cmd, "GV")) { put(out, cap, "10"); return NULL; }      /* 2 chiffres, sans '#' : c'est ainsi que le driver le lit */
+@ fuzz_ligne components/host/host.c premier 1 2000 P10 tampon | ECHEC P10 tampon
+- static void put(char *out, size_t cap, const char *s) { snprintf(out, cap, "%s", s); }
++ static void put(char *out, size_t cap, const char *s) { memset(out, 'x', cap - 1); out[cap - 1] = 0; (void)s; }
+@ fuzz_ligne components/host/host.c premier 1 2000 P10 une_ligne | ECHEC P10 une_ligne
+-     put(out, cap, "er nocap");                            /* une ligne que PROTOCOL.md ne connaît pas (§ 4.5.1) */
++     put(out, cap, "er\tnocap");                            /* une ligne que PROTOCOL.md ne connaît pas (§ 4.5.1) */
+@ fuzz_ligne components/host/host.c premier 1 2000 P10 longueur | ECHEC P10 longueur
+-     case E_LIMIT: put(out, cap, "er range limits"); break;
++     case E_LIMIT: put(out, cap, "er range limits x"); break;
+@ fuzz_ligne components/host/host.c premier 1 2000 P10 ok | ECHEC P10 ok
+-     case E_BUSY: put(out, cap, "er busy"); break;
++     case E_BUSY: put(out, cap, "er busy ok"); break;
+@ fuzz_ligne components/host/host.c premier 1 2000 P6 muet | ECHEC P6 muet
+-     else if (word(a, n, "OFF")) bsk_journal_set(false, false);
++     else if (word(a, n, "OFF")) bsk_journal_set(true, false);
+@ fuzz_ligne components/host/host.c premier 1 2000 DIFFEREE borne | ECHEC DIFFEREE borne
+-         h.lt_done = true;
++         h.lt_done = h.lt_op != CMD_FOCUS_STOP;
+@ fuzz_ligne components/host/host.c premier 1 2000 P1 sanitizer | runtime error
+-     for (size_t i = 0; i < sizeof d; i++) snprintf(out + 2 + 3 * i, cap - 2 - 3 * i, " %02X", (unsigned)d[i]);
++     for (size_t i = 0; i <= sizeof d; i++) snprintf(out + 2 + 3 * i, cap - 2 - 3 * i, " %02X", (unsigned)d[i]);
+@ fuzz_ligne components/host/host.c premier 1 2000 P2 garde | ECHEC P2 garde
+-         while (*p == ' ') p++;
++         while (*p == ' ') (void)0;

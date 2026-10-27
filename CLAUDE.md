@@ -56,8 +56,9 @@ en-têtes de code.
 - Pas de dépendance pour économiser vingt lignes. **Le firmware n'en a aucune hors ESP-IDF** —
   c'est une propriété, pas un hasard. L'outillage de développement en a, et elles ne tournent
   jamais sur la carte : Playwright épinglé dans `package.json` (`5_App/test/test_app.js`), Python 3
-  (`tool_station` et son test, le générateur de la table des noms, le `manifest.json` des releases, la démonstration
-  du driver INDI), Node (tests de l'app), libindi 2 et astyle (la démonstration du driver INDI).
+  (`tool_station` et son test, le générateur de la table des noms, le `manifest.json` des releases, la garde de la
+  NVS et leur test, la démonstration du driver INDI), Node (tests de l'app), libindi 2 et astyle (la démonstration du
+  driver INDI).
 - Dire quand on ne sait pas. Sans matériel, on n'affirme aucun comportement de l'objectif : on dit
   ce que prouvent les tests hôte, et face à quel faux objectif.
 - `PROJECT_VER` (`4_Firmware/CMakeLists.txt`) se bumpe **avant** de construire un binaire qu'on livre,
@@ -109,7 +110,8 @@ en-têtes de code.
 
 Firmware ESP-IDF 5.3.2, une cible : `esp32c3` (la carte v1.0). `4_Firmware/` se construit par
 `bash 4_Firmware/build.sh`, sans argument (environnement ESP-IDF chargé : `. "$IDF_PATH/export.sh"` ; dans
-`4_Firmware/build/esp32c3`, sdkconfig compris ; échoue si la console n'est pas muette), job CI `firmware-build`,
+`4_Firmware/build/esp32c3`, sdkconfig compris ; échoue si la console n'est pas muette, ou si une entrée de
+`flash_args` écrit sur la partition `nvs` de la table du build : `4_Firmware/garde_nvs.py`), job CI `firmware-build`,
 qui publie à chaque run, PR comprises, l'artefact `firmware-esp32c3` : le dossier
 `4_Firmware/build/esp32c3/artefact/` que `build.sh` remplit, à plat — `basilisk_FW-v<PROJECT_VER>-esp32c3.bin`,
 `-bootloader.bin`, `-partition-table.bin`, `flash_args` sur ces noms, l'image unique `-full.bin` (en 0x0 ; elle
@@ -132,7 +134,8 @@ Une flèche dit « appelle » ; aucune ne remonte. Les tâches, et qui peut appe
 l'en-tête de chaque composant (`bsk_session.h`, `bsk_host.h`, `bsk_journal.h`, `bsk_store.h`, `bsk_sensor.h`).
 
 - `main/main.c` (`app_main`, la tâche de SESSION) : la boucle des pas — `bsk_session_step`,
-  `bsk_host_observe`, `bsk_host_usb_service`, `bsk_led_board_service`.
+  `bsk_host_observe`, `bsk_session_real` (l'instant réel des commandes que l'USB dépose ensuite),
+  `bsk_host_usb_service`, `bsk_led_board_service`.
 - `host` (HOTE : `host.c`, `lens_names.c` en C pur ; `host_usb.c`, l'USB de la carte) -> `session`,
   `journal`, `led`, `sensor` : la ligne USB de `PROTOCOL.md`.
 - `sensor` (`sht40.c` en C pur, le SHT40 sur un bus I2C mené à la main ; `sensor_board.c`, ses lignes et sa tâche de
@@ -143,7 +146,7 @@ l'en-tête de chaque composant (`bsk_session.h`, `bsk_host.h`, `bsk_journal.h`, 
 - `session` -> `txn`, `phy`, `journal`, `store`. Le superviseur `session.c` -> `lens_rx`, `motion`, `ring`,
   `mark`, `drive`, `still`, `cmd`, `init`, `restore` ; `cmd.c` (la boîte de commandes et le bouton du fût)
   -> `motion`, `mark`, `ring`, `lens_rx` ; `init.c` (la séquence d'init) -> `txn`, `lens_rx`, `journal` ;
-  `restore.c` (le retour à la marque) -> `motion`, `mark`, `lens_rx`, `journal` ; `motion.c` (MOUVEMENT)
+  `restore.c` (le retour à la marque) -> `motion`, `mark`, `lens_rx`, `journal`, `init` ; `motion.c` (MOUVEMENT)
   -> `drive`, `lens_rx`, `still` ; `ring.c` (la bague) -> `txn`, `lens_rx` ; `mark.c` (la marque) ->
   `store`, `lens_rx` ; `drive.c` (la consigne de mise au point) -> `txn` ; `still.c`, l'immobilité.
   `lens_rx.c` est le seul décodeur des trames reçues : un champ publié de plus s'y ajoute, sans toucher
@@ -165,7 +168,8 @@ l'en-tête de chaque composant (`bsk_session.h`, `bsk_host.h`, `bsk_journal.h`, 
 Lectures, dans l'ordre : `7_Docs/DOCTRINE.md` (pourquoi le code est écrit comme il l'est),
 `7_Docs/PROTOCOL.md` (le contrat), `7_Docs/SUITES.md` (ce que joue chaque suite de § Test et ce que la
 suite de `4_Firmware/` impose à qui y écrit). Ailleurs : `7_Docs/E-Mount/` (l'interopérabilité E-mount,
-index et ordre de lecture dans son `README.md`), `7_Docs/MANUEL.md`, `6_Driver/indi/README.md`. La file de
+index et ordre de lecture dans son `README.md`), `7_Docs/MANUEL.md`, `6_Driver/indi/README.md`,
+`7_Docs/CONFIANCE.md` (le rapport de confiance du firmware ; en anglais, `7_Docs/TRUST.md`). La file de
 travail est `/home/projects.workshop/basilisk/backlog.md` (face atelier, hors du produit).
 
 ## Harness
@@ -188,18 +192,20 @@ travail est `/home/projects.workshop/basilisk/backlog.md` (face atelier, hors du
   `firmware-esp32c3`) : on change l'un, on change l'autre. Le workflow GitHub ne joue aucun test et ne tourne que
   sur GitHub. La publication suit la norme de l'org : sur la poussée d'un tag `v*.*.*` (posé par Starfleet, sous le
   compte de l'humain ; jamais par Basilisk), son job `release` crée la release du tag avec quatre fichiers,
-  `basilisk_<tag>_esp32c3.bin` (l'image `-full.bin` de l'artefact, renommée), `manifest.json` (ESP Web Tools,
-  écrit par `4_Firmware/manifest.py`, qu'aucune suite ne joue), `basilisk_<tag>_esp32c3_flash.zip` (les fichiers
-  de l'artefact qui flashent sans effacer la marque : `flash_args`, ses trois `.bin`, `flash.sh`, `flash.cmd`) et
-  `basilisk_<tag>_bench.html` (la copie exacte de `5_App/emount-bench.html` au tag), puis réveille le site de l'org
+  `basilisk_<version>_esp32c3.bin` (l'image `-full.bin` de l'artefact, renommée), `manifest.json` (ESP Web Tools,
+  écrit par `4_Firmware/manifest.py`, joué par `bash 4_Firmware/run.sh` : `sim/test/test_release.py`),
+  `basilisk_<version>_esp32c3_flash.zip` (les fichiers de l'artefact qui flashent sans effacer la marque :
+  `flash_args`, ses trois `.bin`, `flash.sh`, `flash.cmd`) et
+  `basilisk_<version>_bench.html` (la copie exacte de `5_App/emount-bench.html` au tag), puis réveille le site de l'org
   (secret `ZURP_SITE_DISPATCH`). Le site copie le `manifest.json` et l'image de la dernière release et affiche le
   bouton d'installation (ESP Web Tools) sur la page produit, https://zurp-astronomics.github.io/basilisk/ ; ce
   bouton écrit l'image en 0x0 et remet donc la marque à zéro (accepté par l'humain). Le banc de la même release, le
   site le publiera tel quel sur la page produit (ticket site #105 ; d'ici là il ignore le fichier) : il le reconnaît
   au suffixe exact `_bench.html`, et n'en publie aucun si la release en porte deux. La procédure de flash, page
   produit d'abord, voies manuelles ensuite, est dans `README.md` § Flash ; on y renvoie à la page produit, jamais à
-  l'URL d'un manifeste, qui change à chaque release. La version publiée est le tag (`v0.9.0`), `PROJECT_VER` reste
-  `<maj>.<min>`.
+  l'URL d'un manifeste, qui change à chaque release. La version publiée est le tag sans son « v » : le tag
+  `v1.0.1` nomme la release et publie `1.0.1`, dans les noms des fichiers et le `"version"` de `manifest.json`, qui
+  garde ce nom (norme de l'org, `<produit>_<version>_<cible>`) ; `PROJECT_VER` reste `<maj>.<min>`.
 - **`6_Driver/indi/` est l'amont d'INDI plus deux séries de patchs, et la CI le démontre hors de § Test** : le
   driver est `pinefeat_cef` d'indilib, puis `patches/fixes/`, puis `patches/basilisk/` ; ses deux fichiers et les
   patchs changent dans le même commit (son README, § « Refaire une série »). Le job `indi` (image `ubuntu:26.04`)

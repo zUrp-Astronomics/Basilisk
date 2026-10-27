@@ -1,12 +1,16 @@
 /* SOURCE: spec de l'atelier § 9 — la marque, et le bouton du fût (voir mark.h)
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte (le magasin y est sim/store_sim.c)
+ * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte (le magasin y est sim/store_sim.c) ; ticket #676 :
+ *         une lecture en erreur journalisée, distinguée d'une marque absente (mark_failed)
  *
  * Le magasin est asynchrone (bsk_store.h) : la marque de la clé courante est tenue ici, relue quand la clé change
- * (objectif, ou focale nominale : un zoom), posée ou effacée tout de suite, rangée ensuite. Tant que la lecture n'est pas
- * rendue, il n'y a pas de marque. Une écriture qui échoue est journalisée et la clé relue : ce qui est publié est ce qui
- * est rangé. */
+ * (objectif, ou focale nominale : un zoom). Tant que la lecture n'est pas rendue, il n'y a pas de marque. Un geste (pose,
+ * effacement) dépose son écriture et ne change rien de ce qui est publié : la marque posée ou effacée ne l'est, le geste
+ * compté et journalisé, qu'une fois l'écriture rendue réussie ; cmd.c en lit le résultat (mark_written), qui finit la
+ * commande. Une écriture qui échoue est journalisée, rien n'en est publié : ce qui est publié est ce qui est rangé.
+ * Une lecture qui échoue sur une erreur est journalisée et laisse la clé sans marque, sans nouvel essai ; une clé absente
+ * n'est pas une erreur. */
 #include "mark.h"
 
 #include <stdio.h>
@@ -27,6 +31,7 @@ static struct {
     bool       ask;                      /* ... ni déposée : la file était pleine */
     uint32_t   want;                     /* le numéro de son dépôt */
     bool       valid;
+    bool       failed;                   /* la dernière lecture rendue de la clé courante a échoué sur une erreur */
     bsk_mark_t m;
 
     bool       have_pos;                 /* le sens : la position du dernier 0x06, et son dernier changement */
@@ -42,8 +47,19 @@ static struct {
  * compteurs suivent la file, pas la session : mark_forget ne les touche pas. */
 static uint32_t sent, got;
 
-/* Les gestes de l'utilisateur, pose et effacement servis ; comme sent et got, ils ne suivent pas la session. */
+/* Les gestes de l'utilisateur, pose et effacement rangés ; comme sent et got, ils ne suivent pas la session. */
 static uint16_t sets, clears;
+
+/* L'écriture du dernier geste : déposée, son résultat pas encore relevé (wait) ; relevé (done, ok), lu une fois par
+ * cmd.c (mark_written). Un geste à la fois : chaque résultat d'écriture est donc le sien. Comme sent et got, elle ne suit
+ * pas la session : son résultat arrive même la session oubliée, et c'est lui que l'accusé dit. */
+static struct {
+    bool           wait;
+    bool           done;
+    bool           ok;
+    bsk_store_op_t op;
+    bsk_mark_t     m;                        /* PUT : la marque qu'elle range */
+} w;
 
 static bool deposit(bsk_store_op_t op, uint32_t v)
 {
@@ -88,9 +104,27 @@ static void ask(void)
 
 static void reload(void)
 {
-    k.valid = false;
+    k.valid = k.failed = false;
     k.loading = k.ask = k.key[0] != '\0';
     ask();
+}
+
+/* L'écriture du geste rangée : comptée, journalisée, publiée si sa clé est la courante (la clé quittée entre-temps, elle
+ * sera relue à son retour). Ce qui est rangé est connu : une lecture de la clé encore à déposer, ou déposée après
+ * l'écriture, n'a plus à être prise ; une déposée avant elle a déjà été rendue (bsk_store.h, l'ordre de la file). */
+static void stored(const char *key)
+{
+    if (w.op == BSK_STORE_PUT) {
+        sets++;
+        bsk_journal_mark(BSK_MARK_SET, key, &w.m);
+    } else {
+        clears++;
+        bsk_journal_mark(BSK_MARK_CLEAR, key, NULL);
+    }
+    if (strcmp(key, k.key)) return;
+    k.m = w.m;
+    k.valid = w.op == BSK_STORE_PUT;
+    k.loading = k.ask = k.failed = false;
 }
 
 static void on_result(const bsk_store_res_t *r)
@@ -100,10 +134,28 @@ static void on_result(const bsk_store_res_t *r)
         if (!k.loading || k.ask || got != k.want) return;   /* une lecture périmée : la clé a changé, ou la marque */
         k.loading = false;
         k.valid = r->ok && decode(r->value, &k.m);
-    } else if (!r->ok) {
-        bsk_journal_mark(BSK_MARK_STORE_ER, r->key, NULL);
-        if (!strcmp(r->key, k.key)) reload();
+        k.failed = r->err;
+        if (k.failed) bsk_journal_mark(BSK_MARK_LOAD_ER, r->key, NULL);
+        return;
     }
+    w.wait = false;
+    w.done = true;
+    w.ok = r->ok;
+    if (r->ok) stored(r->key);
+    else bsk_journal_mark(BSK_MARK_STORE_ER, r->key, NULL);   /* rien n'en a été publié : ce qui l'est reste rangé */
+}
+
+/* Dépose l'écriture d'un geste ; faux si la file la refuse (rien n'est changé). Son résultat peut être rendu tout de
+ * suite (le magasin des tests) : relevé ici. */
+static bool write(bsk_store_op_t op, const bsk_mark_t *m)
+{
+    if (!deposit(op, encode(m))) return false;
+    w.wait = true;
+    w.done = false;
+    w.op = op;
+    w.m = *m;
+    mark_poll();
+    return true;
 }
 
 void mark_poll(void)
@@ -119,6 +171,7 @@ void mark_init(void)
     while (bsk_store_result(&r)) {}
     sent = got = 0;
     sets = clears = 0;
+    memset(&w, 0, sizeof w);
     memset(&k, 0, sizeof k);
 }
 
@@ -149,31 +202,30 @@ bsk_err_t mark_set(int32_t arg)
     const lens_rx_t *l = lens_rx();
     bsk_mark_t m = {.position = arg, .approach_dir = BSK_APPROACH_UNKNOWN};
     if (!k.key[0]) return E_NOCAP;
-    if (!l->have06) return E_LIMIT;                 /* ni position ni bornes */
+    if (!l->lim) return E_LIMIT;                    /* pas de bornes connues (lim implique la position) */
     if (arg == BSK_MARK_HERE) {
         m.position = l->pos;
         m.approach_dir = k.dir;
     }
     if (m.position < l->fmin || m.position > l->fmax) return E_LIMIT;
-    if (!deposit(BSK_STORE_PUT, encode(&m))) return E_BUSY;
-    k.m = m;
-    k.valid = true;
-    k.loading = k.ask = false;
-    sets++;
-    bsk_journal_mark(BSK_MARK_SET, k.key, &m);
-    mark_poll();
+    if (w.wait || !write(BSK_STORE_PUT, &m)) return E_BUSY;
     return E_OK;
 }
 
 bsk_err_t mark_clear(void)
 {
+    const bsk_mark_t none = {0};
     if (!k.key[0]) return E_NOCAP;
-    if (!deposit(BSK_STORE_DEL, 0)) return E_BUSY;
-    clears++;
-    k.valid = k.loading = k.ask = false;
-    bsk_journal_mark(BSK_MARK_CLEAR, k.key, NULL);
-    mark_poll();
+    if (w.wait || !write(BSK_STORE_DEL, &none)) return E_BUSY;
     return E_OK;
+}
+
+bool mark_written(bool *ok)
+{
+    if (!w.done) return false;
+    w.done = false;
+    *ok = w.ok;
+    return true;
 }
 
 uint16_t mark_sets(void) { return sets; }
@@ -186,6 +238,8 @@ bool mark_get(bsk_mark_t *m)
 }
 
 bool mark_loading(void) { return k.loading; }
+
+bool mark_failed(void) { return k.failed; }
 
 const char *mark_key(void) { return k.key; }
 

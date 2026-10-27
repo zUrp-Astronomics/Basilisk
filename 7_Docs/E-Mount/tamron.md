@@ -1,61 +1,13 @@
 # Tamron E-mount lenses — what the body sees
 
-**Date** : 2026-10-07
-**Dernière révision** : 2026-10-10
-**Statut** : actif — second interoperability document of `7_Docs/E-Mount/` (ticket #512); every Tamron fact here is static analysis or the code of this repository: no Tamron lens has been connected
-**Référencé par** : `7_Docs/E-Mount/protocol.md` (§ 0, § 6.1, § 7.4.2, § 7.8, § 7.10, § 7.15, § 9, § 10, § 13), `7_Docs/E-Mount/README.md`, `traces.md`, `provenance.md`, the comments of `4_Firmware/components/session/` (ticket #558)
-**Dérivé de** : `7_Docs/E-Mount/protocol.md`; the code of this repository (`4_Firmware/sim/lens_std.c`, `4_Firmware/sim/lens_std.h`, `4_Firmware/sim/test/test_lens_std.c`, `4_Firmware/sim/test/constats_std.txt`, `4_Firmware/components/session/`, `4_Firmware/components/host/lens_names.c`); the project's own static analyses of seven Tamron lens firmwares, which are not published
 
 ## 0. What this document is
 
-**Scope.** What a Sony E-mount body sees of a Tamron lens, beyond what `protocol.md` says for every
-maker: the seven models the project has read (§ 1), the session automaton of the F051 as the body
-sees it (§ 2), homing and focus moves (§ 3, § 4), the messages and table entries that only Tamron
-has (§ 5), the writes to the lens's non-volatile memory (§ 6), how each model departs from the F051
-and from `protocol.md` (§ 7), and what our board does with a Tamron (§ 8). With this file and
-`protocol.md`, one should be able to write the Tamron part of a body-side driver, and a fake Tamron
-lens that answers with the decoded fields given here.
+This is the Tamron supplement to [the common protocol](protocol.md): identity, init/stream admission, replies, focus behavior and known limitations for the seven images listed below. It uses the common offset and length conventions.
 
-**`protocol.md` first.** The frame, the classes, the message sizes, the stream layouts, the
-encodings and the common meaning of each message are in `protocol.md` and are not repeated. This
-document uses its conventions: offsets counted after the type byte, sizes with the type byte, B→L
-and L→B, little-endian 16-bit fields (`protocol.md` § 0).
+**All Tamron lens behavior here comes from static analysis, not a project hardware capture.** The F051 simulator is a model built from that analysis. It supplies no independent evidence about the physical lens. Detailed F051 findings are not automatically findings for the other six models.
 
-**No Tamron lens has been connected.** There is no capture of a Tamron lens in this repository or in
-the public sources `protocol.md` cites. Everything here is either our static analysis of the lens
-firmwares or the code of this repository, which was written from those analyses.
-
-**Order of authority** (decision of the project owner, 2026-10-07):
-
-1. **what a trace shows**: for Tamron there is none;
-2. **what the code of this repository does**: the fake F051 of the simulation
-   (`4_Firmware/sim/lens_std.c`, played by `4_Firmware/sim/test/test_lens_std.c` and, through the
-   board, by `4_Firmware/sim/test/test_std.c`) and the path our board takes for a lens that is not a
-   recognised Samyang (`4_Firmware/components/session/`). This code was written from our analyses
-   and knows no more than they do; where it contradicts an analysis, this document says so (§ 9);
-3. **our static analyses**, marked **static analysis, not observed**.
-
-**Proof.** Every statement carries one of: a file of this repository with its function or constant;
-a public URL; or the words *static analysis, not observed*. Where a paragraph or a table is entirely
-static, its heading says so once.
-
-**What is not published.** The firmwares and their decompilations stay private. The lens answers
-some requests with constant blocks copied from its flash (`0x01`, `0x07`, `0x08`, `0x09`, `0x3D`, the
-`0x3F` name, the `0x0A` capability mask, the stream block sizes). **Their raw bytes are not
-published.** What is published: the decoded fields (meaning, offset, and the value where it has a
-meaning of its own: an identifier, a flag, a size, a version, the name in clear), the sizes of the
-replies and of the blocks, and the masks described field by field. Bytes we have not decoded are
-declared **not published (extracted from firmware, meaning unknown)** with their range of offsets.
-The repository's fake F051 builds its constant replies from the decoded fields given here and in
-`protocol.md`, and answers zero for every byte declared not published (`lens_std.c`, "Les réponses
-constantes"); it carries no block of the firmware.
-
-**One doubt on the material.** The F051 analyses rest on one decompilation of the F051 image. A
-second decompilation held by the project under the F051's name is, line for line, almost the F050's,
-although the two images differ in about a third of their bytes; which image that second file
-decompiles is not established. The analyses cited here do not use it.
-
----
+Decoded interface fields, sizes, masks and model/version attribution are retained. Firmware images, opaque binary blocks, calibration data, internal continuation tables and factory adjustment procedures are not published. See [provenance](provenance.md). Unknown cells and untraced paths remain unknown, including EEPROM effects (§ 6).
 
 ## 1. The seven models
 
@@ -189,7 +141,7 @@ read.
 | `0x26` | 5 bytes | only the type byte is written; the four others are whatever the previous transmission left in the send buffer |
 | `0x28` | 36 bytes | content not read |
 | `0x35` | 40 bytes | content not read; side effect in § 5.5 |
-| `0x3A` | 24 bytes, class 3 | the size of a zone of the lens's flash, 1 764 bytes, and its number of 488-byte blocks; resets a block counter |
+| `0x3A` | 24 bytes, class 3 | Descriptor of an opaque block transfer; internal data and storage size are not published. |
 | `0x3B` | 492 bytes, class 3 | the next 488-byte block of that zone; content not interpreted (not published) |
 | `0x3E` | 12 bytes | content not read |
 
@@ -203,14 +155,9 @@ identical on all seven (static analysis, not observed). The fake F051 implements
 
 ### 2.1 Two state variables
 
-- **The phase**: *init* or *stream*. **Only the `0x0A` writes it** (§ 2.4).
-- **The reply state**: *free*; *waiting* (only the `0x1B` uses it, § 5.4); *deferred reply ready*,
-  with the type of the pending reply (§ 2.6).
-- **At power-up: phase init, reply state free**, no pending type, on all seven models (static
-  analysis, not observed; `lens_std.c`, `reset_ram()`). The lens therefore accepts a body's `0x01`
-  as its first message.
-- **No timeout.** Nothing in the code read brings the lens back to init if the body goes quiet, and
-  no state remembers a refusal (static analysis, not observed). `protocol.md` § 6.2.
+**Static analysis, not observed.**
+
+The body must distinguish init from stream phase and must wait for pending replies. Power-up starts in init with no pending reply on all seven studied models. `0x0A` changes phase (§ 2.4). Silence alone does not return the lens to init; no such timeout was identified. The admission conditions below describe the interface, without reproducing the lens's internal state storage.
 
 ### 2.2 The guards
 
@@ -257,7 +204,7 @@ Identical, type by type, on all seven models (static analysis, not observed; F05
 - **What a refusal tells the body**: to an init message, the lens is not in init or a reply is
   pending; to a stream message, the lens is not in stream (static analysis, not observed).
 
-`protocol.md` § 4 line 316 and § 6.1 line 447 point here.
+`protocol.md` § 4 and § 6.1 point here.
 
 ### 2.4 The `0x0A`: the phase switch
 
@@ -279,53 +226,29 @@ Identical, type by type, on all seven models (static analysis, not observed; F05
   `idempotent()`). Our board sends it once per session, and once more only as the "soft reset" of a
   lens that does not answer its `0x01` (§ 8).
 
-`protocol.md` § 7.10 lines 1025-1027 point here.
+`protocol.md` § 7.10 point here.
 
 ### 2.5 The stream
 
-- **In stream only.** In init the lens sends no `0x05` or `0x06`: the `0x0A` that returns it to init
-  turns off the two timer interrupts that queue them (static analysis, not observed).
-- **What paces it.** A *frame routine* runs in interrupt, on a falling edge of a lens input that the
-  fake takes for VD, and possibly also on an internal clock of 16 666 µs; which of the two runs in a
-  session is not established (static analysis, not observed). In stream, each run re-arms the two
-  timer interrupts that, a little later, queue the `0x05` then the `0x06`, and arms the motor tick
-  that picks up focus orders (§ 4.1). The interrupt that queues the `0x06` also turns off the one of
-  the `0x05`. The fake runs the routine on VD only by default and plays the internal clock as a
-  parameter (`lens_std.h`, `frame_period_us`; `lens_std.c`, `frame_tick()`, `isr05()`, `isr06()`).
-  **A body that gives no VD may get no stream and no focus movement**, if VD is the edge.
-- **The `0x03` and `0x04` are not required** for the stream to go on: nothing checks that they
-  arrive. Without `0x03`, the iris target stays the last one received (static analysis, not
-  observed). `protocol.md` § 6.2 line 502.
-- **Class 1, and the sequence.** The `0x05` and `0x06` leave in class 1. Each class 1 frame received
-  sets the lens's stream counter to its sequence number, each run of the frame routine in stream
-  adds one, and the `0x05` and `0x06` carry its low byte (`lens_std.c`, `dispatch()`,
-  `frame_tick()`, `queue()`; the fake's header marks this reading of the image established). Its
-  value at power-up is `0xFFFF`.
-- **Lengths**: the blocks granted by the first `0x0A` (§ 2.4), with the sizes of `protocol.md`
-  § 7.5 and § 7.6: 97 and 40 bytes for `FF 7F … 3F`.
-- **Acknowledgements** follow the `0x06`, in the same frame: each is written at the end of the
-  granted blocks, and the write pointer returns there after each `0x06` sent (`lens_std.c`,
-  `ack()`, `isr06()`; static analysis, not observed). One acknowledgement per source and per
-  frame at most: several ends of the same kind before one `0x06` give one (§ 4.4).
-- **What the F051 fills** (static analysis, not observed), beyond `protocol.md` § 7.5 and § 7.6:
+**Static analysis, not observed.**
 
-  | Message, offset | Content |
-  |---|---|
-  | `0x05` 17-19 | never written: the F051 publishes no aperture there (`4_Firmware/components/session/ring.c`, comment of `aperture()`) |
-  | `0x05` 20-21 | focus position converted to the Sony distance unit (`protocol.md` § 8.3) |
-  | `0x05` 22 | bit 6 = focus moving, bit 7 = focus module in service; bits 0-1 = 0 (`lens_std.c`, `build_content()`) |
-  | `0x05` 24-25, 26-27 | two values the lens computes from a table indexed by an encoder: the focal length on a zoom; their value on the F051, a prime, is not established |
-  | `0x05` 60 | `protocol.md` § 7.5 |
-  | `0x06` 0 | bits 0-2: 0 = focus module not in service, 1 = in service, 2 = in service and referenced by a homing (`build_content()`); bit 3 = at or beyond the upper soft limit, bit 4 = at or below the lower one, bit 5 = upper hard stop, bit 6 = lower hard stop; bit 7 = 0 |
-  | `0x06` 1 | bit 1 = moving towards higher positions (close focus), bit 2 = towards lower positions (infinity); other bits 0 |
-  | `0x06` 2-3 | the commanded position of two motor ticks before (the fake publishes the mechanical position, § 9) |
-  | `0x06` 4-5 | 0 |
-  | `0x06` 6 | bit 4 set, bits 0-3 clear, bits 5-7 not written (`build_content()`) |
-  | `0x06` 7-8, 9-10 | the lower and upper soft limits |
-  | `0x06` 20-21 | one of two quantities of the focus module, chosen by the `0x08` request (§ 2.7); the analyses read it as the encoder position sampled at the frame |
-  | `0x06` 32-38 | one of two sets of seven values, chosen the same way (§ 2.7) |
+The F051 emits `0x05` and `0x06` only in stream phase. Unlike the AF 135, continued streaming does not require a fresh `0x03`/`0x04` pair. The physical timing source has not been established on hardware: the simulation uses VD by default and exposes an optional internal period. Supply the normal body timing; do not infer that a clock-free session is supported.
 
-  Positions grow towards close focus (`protocol.md` § 7.6).
+The first `0x0A` selects the stream layout. Masks `FF 7F … 3F` yield 97 and 40 bytes, type included. Acknowledgements follow `0x06`; several completions of one kind before a transmitted frame may be coalesced. A body must parse the complete payload rather than assuming one fixed-size message.
+
+| Message and offsets | Body-visible interpretation from analysis |
+|---|---|
+| `0x05`, 17–19 | No published aperture-ring value on F051 |
+| `0x05`, 20–21 | Focus position in Sony distance units |
+| `0x05`, 22 | Bit 6: focus moving; bit 7: focus module active |
+| `0x05`, 24–27 | Focal-length-related values; the F051 prime's exact values are not established |
+| `0x06`, 0 | Bits 0–2: inactive / active / referenced; bits 3–6: upper soft, lower soft, upper hard, lower hard limit |
+| `0x06`, 1 | Bit 1: motion toward higher positions; bit 2: toward lower positions |
+| `0x06`, 2–3 | Delayed commanded position, not a direct mechanical measurement |
+| `0x06`, 7–10 | Published lower and upper soft limits |
+| `0x06`, 20–21 and 32–38 | Selected by the `0x08` request; exact selector semantics remain unresolved (§ 2.7) |
+
+Positions increase toward close focus. The model's own assumptions and differences are in § 9; its output does not turn these static findings into captures.
 
 ### 2.6 Deferred replies
 
@@ -353,7 +276,7 @@ analysis, not observed; `lens_std.c`, `continuation()`, `homing_task()`):
   pending `0x1B` or `0x19` reply (static analysis, not observed).
 - The table entries that run these replies are the "`0x40` + n" entries of § 5.1.
 
-`protocol.md` § 13 line 1364 points here.
+`protocol.md` § 13 points here.
 
 ### 2.7 Bit 7 of the `0x08` request
 
@@ -368,61 +291,25 @@ Static analysis, not observed. The F051 keeps the `0x08` request; bit 7 of its o
 - The NEX-7 sends bit 7 set (`C0`), our board clear (`protocol.md` § 7.8). The fake does not publish
   offsets 20-38 of the `0x06` (§ 9).
 
-`protocol.md` § 7.8 lines 961-963 point here.
+`protocol.md` § 7.8 point here.
 
 ### 2.8 Physical layer, as the fake models it
 
-The analyses did not read the F051's handshake. The fake F051 models it from its own reading of the
-image, marked established in its header (`4_Firmware/sim/lens_std.c`, header, "Couche physique";
-`sequencer()`, `lstd_body_cs()`, `t_tx_start()`, `tx_task()`):
+**Static analysis, not observed.** The fake lens is not a physical-layer measurement.
 
-- **Handshake, two steps.** The lens waits for BODY_CS high, raises LENS_CS, configures its serial
-  port, and waits for its receive line to be high; later, at a step of its start-up sequence, it
-  waits for BODY_CS low, with no deadline, arms its reception and lowers LENS_CS: the link is open.
-  In outline, these are the steps of the Samyang AF 135 in `protocol.md` § 2.
-- **Reception.** Every byte received is stored, BODY_CS high or low, in a receive ring of 3 072
-  bytes. A **rising edge of BODY_CS opens a frame**, its falling edge closes it; the frame starts
-  where it was opened and its length is its own length field, not the count of bytes received; the
-  next frame is stored after that length, or at the start of the ring when fewer than 501 bytes
-  remain. Closed frames wait for the background loop in eight slots (the fake: a ninth is out of
-  model). There is no reception deadline. **A body must wrap each frame in its own BODY_CS high
-  period**, as our board does (`protocol.md` § 1.4).
-- **Transmission.** A frame leaves only when LENS_CS has been low for more than 500 µs and BODY_CS
-  for more than 50 µs; LENS_CS rises, empty loops of a fixed count run (some tens of µs, the fake's
-  `lens_cs_lead_us`), then the first byte leaves. **There is one transmit slot**: a frame queued
-  before the previous one has left replaces it (the fake counts these, `replaced`).
-- LENS_CS falls when the background task sees the end of the last byte, or 200 µs after it first
-  finds it not yet sent.
+The model receives while BODY_CS is high and transmits with the lens/body CS handshake. It uses minimum idle intervals before sending: 500 µs on LENS_CS and 50 µs on BODY_CS, plus a configurable turn-around delay. The relationship of the real lens's frame timing to VD is unresolved (§ 2.5).
 
----
+These timings are analysis-derived simulation inputs. The real pin mappings, line transitions and timing tolerances still require a capture before they can be stated as measured values. Buffer layouts, interrupt implementation and busy-wait instruction counts are not part of this body-side reference.
 
 ## 3. Homing: `0x10`
 
-Static analysis, not observed, except where the code is cited.
+**Static analysis of F051, not observed.**
 
-- **Guard**: init (§ 2.2). Request offset 0: bit 3 = focus, bit 2 = iris, bit 0 = a third module
-  started at once, whose role is not established (`protocol.md` § 7.14; `lens_std.c`, `handle()`,
-  case `0x10`).
-- **No immediate reply.** A task starts, in six steps: wait until the lens's modules are in
-  service; start the referencing of the modules of the mask (retried while a module answers
-  "busy"); a step the analyses do not name; a busy-wait of a fixed number of empty loops, **during
-  which the lens processes no frame and sends no deferred reply**; wait until the focus servo is
-  settled; set the `10 xx` reply ready (§ 2.6).
-- **Reply** `10 00`; `10 01` when either of two error indicators of the focus and iris modules is
-  set.
-- **A `0x10` during a homing restarts it** from its first step, with no guard (`protocol.md`
-  § 7.14).
-- **During a homing the reply state stays free**: every init message is accepted, **the `0x0A`
-  included**; the stream can then start before the homing ends. The NEX-7 sends its `0x0A` only
-  after `10 00` (`protocol.md` § 6.1), and so does our board for a lens that is not a recognised
-  Samyang (`init.c`, `init_reply()`, `loop_start()`).
-- A `0x1D` received in stream while a homing still runs is accepted; how it interacts with the
-  referencing is not established. The fake refuses to model it (`lens_std.c`, `start_job()`).
-- **Duration**: not readable; no Tamron delay is known. The fake makes the referencing and the
-  busy-wait parameters (`lens_std.h`, `homing_ref_us`, `homing_busy_us`).
-- What a homing that ends in `10 01` leaves behind is not established.
+`0x10` is accepted only in init with no pending reply. Its completion is deferred. `10 00` indicates the successful path, `10 01` a failure path; no observed duration is available. The simulated homing delay is a model parameter, not a measurement.
 
----
+A `0x0A` can start streaming before homing finishes. Another request requiring a free reply state can cause a refusal and loss of the pending homing reply (§ 2.3, § 2.6). Wait for completion before advancing normal init. Do not infer the detailed F051 behavior for the six other models simply because they expose a `0x10` handler.
+
+The lens's internal referencing algorithm, calibration constants and motor sequencing are outside the body-side contract.
 
 ## 4. Focus moves
 
@@ -432,17 +319,11 @@ S6; `pickup()`, `finish_check()`, `post_acks()`).
 
 ### 4.1 One focus job
 
-- The lens holds **one focus job**. Each order (`0x1C`, `0x1D`, `0x1F`, `0x34`, `0x3C`) **overwrites
-  it without reading it**; `0x22` and `0x2E` do not (§ 4.8). The exception is the `0x3C`, which
-  saves the job it interrupts (§ 4.4).
-- A new job is picked up at the next **motor tick**, armed by the frame routine (§ 2.5).
-- A job ends when the servo is settled at the target; or, moving towards a soft limit, when that
-  limit flag is set; or, whatever the direction, when a hard-stop flag is set. A stop (`0x1C`) ends
-  at the first check.
-- **The speed** is not carried by the `0x1D`: the handler sets it to zero and the lens uses a default
-  from its flash, 350 steps per motor tick. The duration of a motor tick is not established.
-- **After its acknowledgement** a job is put at rest with a commanded speed of zero: the motor stops
-  where it is (inferred; `lens_std.c`, `job_rest()`, simplification S3).
+**Static analysis of F051, not observed.**
+
+A new focus order generally replaces the previous one; completion of the replaced order may never be reported (§ 4.4). `0x3C` is exceptional and has its own acknowledgement behavior. Motion can end at a target or limit, and `0x1C` requests a stop.
+
+A `0x1D` request does not supply a motor speed. No physical motor-tick duration is established by a capture, so an extracted internal speed constant would not give a controller a reliable movement deadline. Use the external acknowledgement and state observations, with a controller-owned timeout.
 
 ### 4.2 `0x1D`: units refused, and the constants of bits 6-7
 
@@ -460,11 +341,8 @@ The flags of offset 3 have the layout of `protocol.md` § 7.4.2. On the F051:
 - **Relative**: offsets 0-1 are a signed 16-bit move from the current position; the result is
   bounded to 0-65535 before the target bounds apply. A relative move of 0 is the current position,
   whatever the unit (`pickup()`).
-- **Bits 6-7, side of arrival**, on an absolute target: **2** = go to 66 steps below the target,
-  then finish towards higher positions; **1** = the reverse, 66 steps above, finishing towards lower
-  positions; **0 or 3** = straight to the target. The 66 steps are a constant of the lens's flash
-  (static analysis, not observed). The Samyang lenses use constants of a few steps to a few tens
-  (static analysis, not observed).
+- **Bits 6–7, side of arrival**: on an absolute target, 2 selects approach from below and 1 from above; 0 or 3 selects a direct approach. The internal overshoot distance is model-specific and is not a body-side calibration constant.
+
 - **Bit 3, wait for the cycle**: the job starts only at the motor tick after one where offset 11 of
   the `0x03` equalled offset 10 minus one (an offset 10 of 0 counts as 1), and its end is tested only
   at such ticks (`protocol.md` § 7.4.2). With the `0x03` of our board (offset 10 = 6, offset 11
@@ -474,27 +352,15 @@ The flags of offset 3 have the layout of `protocol.md` § 7.4.2. On the F051:
 - Drivers' flag bytes: `0x00` absolute steps; `0x03` absolute Sony distance; `0x04` relative steps;
   `0x06` relative in the lens unit; plus `0x40` or `0x80` for a side of arrival.
 
-`protocol.md` § 7.4.2 lines 661-662 and § 13 line 1365 point here.
+`protocol.md` § 7.4.2 and § 13 point here.
 
 ### 4.3 Bounds and stops
 
-- **Target bounds.** A new target is clamped, without error, into two bounds of the focus module;
-  values read in the F051's flash, never measured: 16 384 on the infinity side, 22 743 on the
-  close side.
-- **Soft limits** are published at `0x06` offsets 7-10 (§ 2.5); our board reads them there
-  (`lens_rx.c`). Their values are computed by the lens and not established; the fake takes them equal
-  to the target bounds (`lens_std.h`, `soft_low`, `soft_high`).
-- **Hard stops**: read in the flash, 15 027 and 24 216, never measured.
-- **Already at a soft limit, target beyond it**: the job ends at the first check, without movement,
-  `1D 00` (`lens_std.c`, `pickup()`).
-- **In a hard-stop zone**: every job ends at the first check, **whatever its direction**. A lens in
-  that zone does not leave it by a `0x1D`; the code read shows no way out (static analysis, not
-  observed; `pickup()` returns without moving).
-- **`1D 00` does not prove the target was reached**: compare the published position with the target,
-  and read the limit flags of `0x06` offset 0.
-- No `0x1C` is needed after a stop at a limit: the next `0x1D` overwrites the job.
+**Static analysis, not observed.**
 
-The fake's default bounds are these flash values (`lens_std.c`, `lstd_params_default()`).
+A target can be clamped without an error reply. The lower and upper soft limits are published at `0x06` offsets 7–10; read those values rather than copying calibration constants from a firmware image. The simulator's numerical defaults are model inputs, not measured limits for a physical lens.
+
+An order can finish immediately at a soft limit; a hard-stop condition can prevent movement in either direction. Consequently `1D 00` alone does not prove arrival at the requested target. Compare the published position and limit flags. A subsequent `0x1D` replaces the previous job; a separate stop is not required merely to clear a completed limit stop.
 
 ### 4.4 Acknowledgements and eviction
 
@@ -583,47 +449,20 @@ simplification S5).
 
 ### 5.1 The "`0x40` + n" entries: continuation slots, not messages
 
-Static analysis, not observed.
+**Static analysis, not observed.**
 
-- Each firmware has a table of 128 handler entries. The dispatcher indexes it only for types below
-  its bound, `0x40` (F051, F050, A056, A071, A057) or `0x3F` (A036, A046); every type at or above the
-  bound gets a `0x02` code 4 without the table being read (§ 2.2).
-- The entries above the bound are reached only by the task that sends deferred replies, at **bound +
-  pending type**. They are the second halves of handlers whose reply is deferred:
+Values found in a firmware dispatch table are not automatically valid wire message IDs. In the studied Tamron applications, entries labelled above the wire dispatch bound are internal continuations of deferred operations; sending those indices as messages is refused. In particular, the table entries `0x4C` and `0x5A` do not establish mount commands on these Tamron models.
 
-  | Continuation of | v3.00 (A036, A046) | v3.01, v4.01 |
-  |---|---|---|
-  | `0x02`, the refusal sender | `0x41` | `0x42` |
-  | `0x0C`, speed change | `0x4B` (A046 only) | `0x4C` |
-  | `0x10`, homing | `0x4F` | `0x50` |
-  | `0x17`, spontaneous | `0x56` | `0x57` |
-  | `0x19` | `0x58` | `0x59` |
-  | `0x1B`, iris | `0x5A` | `0x5B` |
-  | `0x34` | `0x73` | `0x74` |
+The public reports of `0x4C` on a TECHART adapter and Yongnuo lens, and `0x5A` on TECHART, concern different devices:
 
-- **A body cannot send them**: a `0x42` or a `0x57` gets a `0x02`. On a v3.00 lens, `0x3F` is the
-  bound itself: it is refused, and these firmwares have no name handler (§ 7.1).
-- Between the generations, what moved is the bound, by one entry; the message types `0x00`-`0x3E`
-  did not move. The entries above bound + `0x34` (`0x73` or `0x74`) are never read.
+- [weiziqian, 0x4C](https://github.com/weiziqian/E-mount-protocol-RE/blob/main/docs/msg_0x4C.md)
+- [weiziqian, 0x5A](https://github.com/weiziqian/E-mount-protocol-RE/blob/main/docs/msg_0x5A.md)
 
-**`0x4C` and `0x5A`.** On the Tamron lenses they are table artefacts: `0x4C` is the continuation of
-the `0x0C` on the v3.01 and v4.01 models, `0x5A` that of the `0x1B` on the v3.00 models. weiziqian
-reads them as real message IDs beyond the `0x01` bitmap: `0x4C` with responses from a TECHART
-adapter and a Yongnuo lens
-(`https://github.com/weiziqian/E-mount-protocol-RE/blob/main/docs/msg_0x4C.md`), `0x5A` with a
-response from the TECHART adapter only
-(`https://github.com/weiziqian/E-mount-protocol-RE/blob/main/docs/msg_0x5A.md`). That they are
-artefacts in those firmwares too is probable and not proven: we have not read them.
-
-`protocol.md` § 9 line 1292 and § 13 line 1365 point here.
+This Tamron analysis neither verifies nor disproves those observations. It gives no basis for probing their devices with internal indices. A036/A046 also lack the `0x3F` name request; the other five studied models expose it.
 
 ### 5.2 No service channel on the mount
 
-- No Tamron has the Samyang `0x40` channel: `0x40` is outside the dispatch bound on all seven
-  (§ 2.2; `4_Firmware/sim/lens_sim_std.c`, `start_powered()`, refuses the service mode).
-- Each firmware carries a text command interface for factory adjustment, with commands that read and
-  write calibration and flash (§ 6). It is reached only through a test link (§ 6.2), never by a
-  mount message (static analysis, not observed).
+**Static analysis, not observed.** None of the seven studied applications exposes the Samyang `0x40` service envelope as a mount command. Private factory adjustment facilities are not part of the supported body interface and are not documented here. Do not infer a service channel from the presence of factory strings in an image.
 
 ### 5.3 `0x0C`
 
@@ -661,24 +500,11 @@ content not read (static analysis, not observed). The fake does not model it (`l
 
 ### 5.6 `0x16`
 
-Static analysis, not observed.
+**Static analysis, not observed.** `0x16` is admitted in init, refused in stream, and replies `16 00` immediately. That reply does not prove that power-down, motor parking or an end-of-session transition has completed.
 
-- Init guard: **refused in stream**. A body must therefore send a `0x0A` before it (the NEX-7 does,
-  with all masks at zero: `protocol.md` § 6.3) — which returns the lens to init.
-- **Reply `16 00`, at once.**
-- Besides: it keeps the request's offset 0 through the lens's parameter accessor (§ 6.1), calls the
-  iris module and sends a command to the focus module (effects not read), clears the flag the `0x07`
-  sets, and starts an end-of-session task. Under conditions not readable, that task removes the
-  session's tasks and hands over to the start-up sequencer, which can reinitialise the session; the
-  reinitialisation lays out the stream blocks again at the next `0x0A`, and does not change the
-  phase.
-- Whether the lens then sleeps, waits for a handshake, or stays reachable is not established. Nothing
-  in it drives a line for the body (`protocol.md` § 7.15).
-- The six other models have a `0x16` handler with the same guard; its body has not been read.
-- Our board never sends it (`protocol.md` § 6.3). The fake does not model it (`lens_std.c`,
-  `handle()`).
+Some session reinitialisation paths can permit a new stream layout at the next `0x0A`; the conditions are not fully established. Whether the lens then sleeps, repeats a handshake or remains reachable is unresolved. The six other models have the same admission rule, but their detailed shutdown paths were not read.
 
-`protocol.md` § 7.15 lines 1084-1086 point here.
+Basilisk does not send this command; the fake F051 does not implement it. Persistent effects are discussed in § 6.
 
 ### 5.7 `0x17`, `0x2F`, `0x14`, `0x15`
 
@@ -695,49 +521,23 @@ Static analysis, not observed.
 
 ### 6.1 F051
 
-Static analysis, not observed.
+**Static analysis, not observed.**
 
-- **Two non-volatile memories**: an external EEPROM of 4 KiB, read into RAM at start-up, and the last
-  2 KiB page of the internal flash, which holds the calibration.
-- **Flash.** The write and erase routines are called only by the firmware update tool of the
-  adjustment interface and by the calibration save. **No mount message reaches them.**
-- **EEPROM.** Several standard messages (`0x01`, `0x07`, `0x08`, `0x0C`, `0x16`) keep a value through a
-  parameter accessor whose method table is set at start-up and has not been read; the save path to
-  the EEPROM is reached only from the adjustment interface. That no standard message writes the EEPROM
-  is a strong inference, not established.
-- **`0x14`**: init guard. It copies the 16 bytes received, stops the modules and jumps to a second
-  entry point of the image; it never returns and sends nothing. It writes nothing itself; that it
-  leads to the update mode is inferred. For the body, **the lens stops answering** until its power is
-  cut. The fake blocks on it (`lens_std.c`, `handle()`, `lstd_blocked()`).
-- **`0x15`**: init guard; it consumes 1 032 bytes, answers `15 00` and writes nothing in the
-  application; it is the data half of an update.
-- **The adjustment interface** (§ 6.2) erases and reprograms the first 16 KiB of the flash (vector
-  table and start-up code: an interrupted transfer leaves the lens inert), saves calibration to the
-  EEPROM and to the flash page, and writes any parameter by key.
+No mount-message path to flash programming was identified in the reviewed F051 application paths. The EEPROM access indirection was not fully traced: absence of a persistent write from every standard message is an inference, not established fact.
+
+The update-related `0x14` and `0x15` requests are outside Basilisk's allowed interface. `0x14` can leave the application and stop normal replies until power is removed. The behavior beyond that transition is not established here. The factory adjustment interface and its memory map are intentionally outside this reference.
 
 ### 6.2 All seven
 
-Static analysis, not observed.
+**Static analysis, not observed.**
 
-- **The gate to the adjustment interface is the same on all seven**: its command reader acts only
-  when a mode byte equals 2; that byte is set to 2 only from the adjustment mode; that mode is entered
-  only by a text command, searched only in the lens's *test link* mode; and the link mode is chosen
-  at start-up from the level of one input pin, not by a message. **No message a body sends on the
-  mount reaches the adjustment interface** (chain of guards established on all seven; that a body
-  always talks to the lens in the serial link mode is a strong inference, questioned in § 10).
-- **`0x14` and `0x15`** have real handlers, with the init guard, on all seven.
-- **Per model**:
+| Scope | Public conclusion |
+|---|---|
+| F051 | Reviewed flash paths do not establish a mount write; EEPROM coverage is incomplete (§ 6.1). |
+| F050, A036, A046, A056, A071, A057 | Persistent-write paths were not exhaustively followed; unknown is not “none”. |
+| All seven | Update-related handlers exist; the application contains adjustment facilities outside the ordinary mount interface. Their reachability from a real physical setup has not been measured. |
 
-  | Model | Writes reachable by a mount message | `0x14` | Behind the test link |
-  |---|---|---|---|
-  | F051 | none found (§ 6.1) | leaves the application | flash update, calibration, parameters |
-  | F050, A036, A046, A056, A071, A057 | unknown: the write routines have not been traced; the gate above is verified | handler present, body not read | the same command families (adjustment tables of the same form, 101 to 105 commands) |
-
-- Our board never sends `0x14`, `0x15` or `0x16`, nor anything above `0x3F` to a lens that is not a
-  recognised Samyang (`4_Firmware/components/bench_core/bench_core.c`, `listed_size()`;
-  `protocol.md` § 7.20).
-
----
+Basilisk never sends `0x14`, `0x15` or `0x16`, or any message above `0x3F` to an unrecognised lens (`bench_core.c`, `listed_size()`). This is the board's policy, not a claim that the lens can never write its own memory.
 
 ## 7. How each model departs
 
@@ -750,12 +550,12 @@ block sizes.
 
 | Model | Departs from the F051 |
 |---|---|
-| F050 | none seen by the body: the protocol layer of the image is almost byte for byte the F051's; the two differ in lens control and calibration |
+| F050 | no additional body-visible difference established beyond identity |
 | A036 | **its `0x02` leaves in class 2, with a sequence number, and does not set the reply state back to free**: a refusal neither loses a pending reply nor unblocks a stuck one (its full state machine has not been traced); no `0x3F` (dispatch bound `0x3F`); no `0x0C` continuation; `0x07` offset 1 bit 1 clear; `0x01` without `3C` and `3F`; one adjustment command fewer in two families |
 | A046 | no `0x3F` (dispatch bound `0x3F`); `0x07` offset 1 bit 1 clear; `0x01` without `3C` and `3F` |
-| A056 | none seen by the body, beyond identity; its stream runs on another timer of the lens |
-| A071 | none seen by the body, beyond identity; another stream timer |
-| A057 | `0x07` offset 2 differs (§ 1.2); an eighth internal module, very probably the stabiliser, with **no message of its own**: whether a field of an existing message drives it is not established; another stream timer |
+| A056 | none seen by the body, beyond identity |
+| A071 | none seen by the body, beyond identity |
+| A057 | `0x07` offset 2 differs (§ 1.2); no dedicated stabilisation command has been established |
 | the five zooms | the code that fills the stream differs from the primes'; the field where a zoom publishes its current focal length has not been isolated |
 
 ### 7.2 What has been read on the F051 only
@@ -825,7 +625,7 @@ What the code of this repository does; none of it has met a real Tamron.
 | the `0x3C` target | the soft limit on the side of the sign | the parameter comments call the same quantities the hard stops less an offset (`lens_std.h`, `hard_low`, `hard_high`); `0x3C` not modelled |
 | the frame routine's trigger | VD or an internal 16 666 µs clock, not established | VD, with the internal clock as a parameter (`frame_period_us`) |
 | homing | referencing moves the modules | no movement; after a delay the position jumps to `home_pos` (S8) |
-| focus motion | a servo; 350 steps per motor tick | constant speed `steps_per_s`, no ramp (S3) |
+| focus motion | servo behavior; no measured speed or tick duration | constant speed `steps_per_s`, no ramp (S3) |
 | `0x1D` | units 3 (absolute) and 2 (relative), bit 3, bits 4-5, bits 6-7 served | counted "not modelled", the job set then dropped without movement or acknowledgement (S6) |
 | iris, `0x1B` | a condition on the iris module | a delay, `iris_1b_us`, and a parameter reply `r1b` (S5) |
 | link mode at start-up | chosen from the level of an input pin; the level a body imposes is not readable | the lens is in the serial link mode (S2), and the same pin is the lens's serial receive line (header, "Couche physique") |

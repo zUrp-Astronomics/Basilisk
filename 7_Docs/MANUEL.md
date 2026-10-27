@@ -1,319 +1,233 @@
-# emount-bench — une carte pour piloter un objectif Sony E depuis un PC
+# Basilisk — réalisation et utilisation
 
-**Date** : 2026-10-06
-**Dernière révision** : 2026-10-20 (ticket #653 : le README et le manuel de `9_Assets/manual/` sont au projet,
-l'affiche et les images de `9_Assets/` à l'org) ; 2026-10-20 (ticket #648 : le firmware en 1.3, le driver INDI en
-1.2) ; 2026-10-20 (ticket #651 : le matériel v1.0, `2_Hardware/` et `3_3D-Models/`) ; 2026-10-19 (ticket #645 : le
-driver INDI du dépôt est celui d'INDI, `pinefeat_cef`, avec ses
-correctifs et notre extension en deux séries de patchs ; démontré en CI) ; 2026-10-19 (ticket #641 : le point de rosée ou de givre, calculé par la carte dans `z`, affiché
-par la page de banc et publié par le driver INDI) ; 2026-10-16 (ticket #635 : la page de banc en français ou en anglais, et les navigateurs qui
-l'ouvrent) ; 2026-10-16 (ticket #633 : la release porte aussi la page de banc) ; 2026-10-16 (ticket
-#630 : le flash en un clic depuis la page produit d'abord, les voies manuelles en secours) ; 2026-10-16 (ticket
-#626 : la procédure de flash sur les trois fichiers de la release, dont deux voies qui gardent la marque ; le site
-n'installe rien) ; 2026-10-12 (ticket #617 : une version publiée sur sa release GitHub) ;
-2026-10-11 (ticket #606 : la carte v1.0 seule, la XIAO de banc retirée ; la version 0.9) ;
-2026-10-11 (ticket #602 : le firmware livré sous le nom `basilisk_FW`, l'image unique, les
-scripts de flash) ; 2026-10-11 (ticket #594 : le capteur SHT40 lu et rapporté, `z`, `:GT#`, le driver INDI ; la table du
-§ Matériel dit ce que le firmware lit) ; 2026-10-11 (ticket #590 : les FAULT des rails dans `DEBUG`) ; 2026-10-10
-**Statut** : actif — le manuel de la carte, en français : l'ancien `README.md` du dépôt, déplacé tel quel par le ticket #495 quand le README est devenu la vitrine du projet
-**Référencé par** : `README.md` (§ Documentation)
-**Dérivé de** : `README.md` avant le ticket #495 (révision du 2026-10-06, commit `6fd8349`)
+[English](MANUAL.md)
 
-Une petite carte (la carte v1.0, à ESP32-C3) se branche entre un PC, en USB, et un objectif à monture Sony E, sur ses
-contacts. Elle joue le rôle du boîtier : elle met l'objectif sous tension, fait son initialisation, puis le pilote à la demande — mise au point, ouverture, une position mémorisée
-(« la marque »). Son usage premier est l'astrophotographie : l'objectif devient un focuser pour INDI/Ekos (Linux) ou pour ASCOM (Windows). Cible première :
-**Samyang AF 135 mm F1.8 FE**.
+## Projet
 
-Le PC lui parle par une ligne série : une commande par ligne, une réponse par ligne. Ce protocole est le contrat de la
-carte, il est dans **`7_Docs/PROTOCOL.md`**.
+### Dix-huit millimètres. Démerde-toi avec ça.
 
-## Matériel
+La monture Sony E laisse 18 mm entre la baïonnette et le capteur. Basilisk y case le fût, les contacts, le contrôleur et le port USB, en gardant de la place pour la caméra astro. Une idée discutable. Un objet très satisfaisant.
 
-Le firmware se construit pour la carte v1.0, seule. Son brochage est dans `4_Firmware/components/phy/pins.h`.
+Il joue le boîtier photo pour un objectif E-mount : alimentation, mise au point et diaphragme avec un seul câble USB-C. Le pilotage passe par Ekos/INDI, ASCOM ou le banc web de la page produit. L'objectif fournit ses limites de mise au point ; la carte mémorise une position de référence. Aucun moteur à sangler au fût, aucune courroie à tendre.
 
-**La carte v1.0** : un ESP32-C3FH4 nu (4 Mo de flash intégrée) ; les dossiers de fabrication sont dans
-`1_Board/`. Aucun GPIO n'y reste libre :
+### Ce que vous construisez
 
-| GPIO | Signal | Rôle |
-|---|---|---|
-| 0 | XDETECT | contact de présence de l'objectif, tiré haut par la carte : 0 = présent |
-| 1 | TXD → objectif | UART1, 750 000 bauds |
-| 2 | RXD ← objectif | UART1 |
-| 3 | LENS_CS | entrée, tirée bas par la carte : l'objectif la lève quand il émet |
-| 4 | VD | impulsion basse d'environ 60 µs, 60 Hz |
-| 5 | BODY_CS | sortie, tirée bas par la carte : la carte la lève quand elle émet |
-| 6 | FAULT_MOTOR | défaut du rail moteur, actif à 0 : lu par le firmware, compté et journalisé (`DEBUG`, `* rail`) |
-| 7 | EN_MOTOR | commande du rail moteur 5 V de l'objectif, active à 0 |
-| 8 | EN_LOGIC | commande du rail logique 3,3 V de l'objectif, active à 0 |
-| 9 | FAULT_LOGIC | défaut du rail logique, actif à 0 : lu par le firmware, compté et journalisé (`DEBUG`, `* rail`) |
-| 10 | LED | LED de statut, allumée à l'état haut |
-| 18, 19 | USB | la ligne série (USB Serial/JTAG du C3) |
-| 20, 21 | SCL, SDA | capteur de température et d'humidité SHT40 : lu par le firmware une fois par seconde (`z`, `:GT#`) |
+Un adaptateur matériel ouvert autour d'un ESP32-C3, d'une carte en anneau, d'un boîtier imprimé et du fût métallique d'une bague Meike. Le projet part de Pinefeat ; la carte, le firmware et les fichiers de fabrication sont dans ce dépôt.
 
-- Les deux rails de l'objectif sont commutés et limités en courant sur la carte (deux TPS2552), alimentés par l'USB-C :
-  rien d'autre à câbler. Au démarrage, des tirages de la carte les tiennent coupés, et le firmware ne les allume qu'à
-  la demande de la séquence de démarrage de l'objectif.
-- Les contacts de la monture sont dix pointes, P1 à P10.
+Le boîtier est conçu pour les caméras planétaires Player One hexagonales non refroidies : Mars-C, Mars-C II, Mars-M II, Mars 662M ; Neptune-C, Neptune-M, Neptune-C II, Neptune 664C ; Uranus-C et Uranus-M ; Saturn-C SQR et Saturn-M SQR. Les modèles refroidis sortent de cette conception. L'adaptation aux ZWO et ToupTek n'est pas établie.
 
-Et encore :
+Le travail au banc documenté ici porte sur un Samyang AF 135 F1.8 FE et un Sony FE 24–105 mm F4 G OSS. La [référence E-mount](../7_Docs/E-Mount/README.md) distingue les observations et les déductions concernant les autres objectifs. Décrire un protocole ne certifie pas une compatibilité.
 
-- Les niveaux de l'objectif sont en 3,3 V : pas d'adaptation.
-- **XDETECT doit être câblé** : la carte ne démarre l'objectif que quand ce contact dit « présent » (tenu 300 ms), et
-  elle coupe ses rails et met ses lignes au repos 2 ms après sa retombée, s'il est toujours absent. Tant qu'il ne dit pas « présent », rien n'est émis :
-  TXD, BODY_CS et VD sont au repos (entrées, tirage bas), les rails coupés.
+### Des pièces aux étoiles
 
-## Le firmware
+[Assemblage](#assemblage) couvre la carte, les pièces imprimées et l'interface caméra. [Installation](#installation) relie le firmware à vos logiciels. [Utilisation](#utilisation) couvre le focus, le diaphragme, la marque et le diagnostic.
 
-Le firmware est dans `4_Firmware/` (ESP-IDF 5.3.2, C, aucune dépendance hors ESP-IDF). `v` rend sa version,
-`<majeur>.<mineur>` : celle de `PROJECT_VER`, dans `4_Firmware/CMakeLists.txt`, `1.3` (son mineur fait lire les
-bornes aux drivers INDI, § S'en servir avec INDI / Ekos). Elle est indépendante du numéro de la
-release, son tag.
+Les sections suivantes détaillent aussi la conception et le travail hors ligne. Les fichiers sont là pour construire, examiner et adapter. Le résultat compte ; l'atelier est le prix d'entrée.
 
-### Le récupérer
+## Assemblage
 
-**Une version publiée** est sur la dernière release GitHub du dépôt,
-`https://github.com/zUrp-Astronomics/Basilisk/releases/latest`. Elle porte quatre fichiers :
+### Les pièces sur l'établi
 
-- `basilisk_<tag>_esp32c3_flash.zip` : à plat, le bootloader (`…-bootloader.bin`), la table de partitions
-  (`…-partition-table.bin`), l'application (`….bin`), `flash_args` qui les place, et les scripts `flash.sh` et
-  `flash.cmd` ;
-- `basilisk_<tag>_esp32c3.bin` : l'image unique, à écrire en `0x0` ;
-- `manifest.json` (format ESP Web Tools) : le site de l'org le copie, avec l'image unique, pour le bouton
-  d'installation de la page produit ;
-- `basilisk_<tag>_bench.html` : la page de banc de cette version (`5_App/emount-bench.html` au tag, § La page de
-  banc), à ouvrir dans le navigateur ; la page produit l'ouvrira en ligne, quand le site le publie.
+| Pièce | Source |
+|---|---|
+| Carte Basilisk v1.0 et composants | [Dossier de fabrication](../1_Board/README.md) |
+| Boîtier, parties haute et basse | [3MF du boîtier](../3_3D-Models/Basilisk_v1.0_enclosure.3mf) |
+| Entourage USB | [3MF USB](../3_3D-Models/Basilisk_v1.0_USB.3mf) |
+| Fût métallique mâle, vis et loquet | Un demi-kit de bagues Meike MK-S-AF3A 10/16 mm |
+| Fixation de la caméra | Trois vis M2.5×12 |
+| Caméra | Un modèle indiqué dans [La bête](#projet) |
 
-**Pour qui développe**, la CI de la forge construit le firmware à chaque run (job `firmware-build`) et publie
-l'artefact **`firmware-esp32c3`** : les mêmes fichiers séparés, `flash_args` et les scripts, plus l'image unique
-`…-full.bin`. Les noms portent la version et la cible, par exemple en 1.3 `basilisk_FW-v1.3-esp32c3.bin`. On le
-télécharge depuis la page du run, ou par l'API de la forge (`GET /api/v1/repos/fleet/basilisk/actions/artifacts`, puis
-`…/artifacts/<id>/zip`).
+La [nomenclature mécanique](../2_Hardware/Basilisk_v1.0_BoM.csv) est distincte de celle de la carte. L'[assemblage STEP](../2_Hardware/Basilisk_v1.0_enclosure.step) contient les pièces du boîtier à adapter.
 
-### Le flasher
+### Commander la carte
 
-**Depuis la page produit, en un clic.** La page produit, `https://zurp-astronomics.github.io/basilisk/`, installe
-depuis le navigateur (Firefox, Chrome ou Edge, sur ordinateur) la dernière version publiée, la carte branchée en
-USB-C : bouton d'installation, choisir le port de la carte. Elle écrit l'image unique en `0x0` : **la marque est
-remise à zéro**.
+Utiliser les Gerber, BoM et fichiers de placement du dossier de fabrication. Les paramètres sont **2 couches, épaisseur 1,0 mm, cuivre 1 oz, masque noir, sérigraphie blanche, HASL RoHS**. L'assemblage se fait sur la face supérieure uniquement. P1–P10 sont dix pogo pins individuels ; CN2 n'est pas monté comme connecteur séparé.
 
-**Les autres voies**, avec les fichiers de la release. On branche la carte à l'ordinateur en USB-C, avec un câble de
-données ; rien d'autre : l'outil de flash fait passer la carte en téléchargement par l'USB. Trois voies, dont deux
-gardent la marque :
+L'assemblage JLCPCB est la voie documentée. À la main, il faut souder un microcontrôleur QFN, des passifs 0402 et de petits composants de puissance à pad exposé.
 
-- **Dans le navigateur, sans rien installer — la marque est gardée.** Firefox 151 ou plus, Chrome ou Edge, sur
-  ordinateur ; pas Safari, pas de mobile. Décompresser le zip, ouvrir le flasheur web d'Espressif, esptool-js
-  (`https://espressif.github.io/esptool-js/`), **Connect**, choisir le port de la carte, puis ajouter les trois `.bin`
-  aux adresses que donne `flash_args` : `0x0` le bootloader, `0x8000` la table de partitions, `0x10000` l'application.
-  **Program**. Ne pas cliquer **Erase Flash**.
-- **En ligne de commande — la marque est gardée.** Avec esptool (`pip install esptool`, ou l'exécutable autonome
-  d'Espressif), depuis le dossier décompressé, celui du zip ou de l'artefact : `sh flash.sh [PORT]` (Linux, macOS),
-  `flash.cmd [PORT]` (Windows). Le script écrit les fichiers séparés de `flash_args`, rien d'autre ; sans `PORT`,
-  esptool cherche la carte. À la main, c'est :
+### Imprimer et ajuster
 
-  ```sh
-  python -m esptool --chip esp32c3 -p PORT -b 460800 write_flash "@flash_args"
-  ```
+Pour les parties structurelles haute et basse, **le PC-CF est le matériau utilisé et validé sur les pièces du projet**. Le PETG est une alternative envisagée ; ABS et ASA n'ont pas été essayés. Ne pas utiliser de PLA pour ces pièces structurelles. L'entourage USB est en PETG transparent pour laisser voir la LED.
 
-- **Installation propre — la marque est effacée.** L'image unique (`basilisk_<tag>_esp32c3.bin` de la release,
-  `…-full.bin` de l'artefact), écrite en `0x0` avec esptool-js ou esptool : pour une puce neuve ou qui a porté autre
-  chose. Elle remplit la NVS de `0xFF` : la marque est remise à zéro.
+Vérifier l'ajustement du loquet avec votre matériau et votre imprimante : une reprise de quelques dixièmes de millimètre peut être nécessaire. Les trois vis M2.5×12 remplacent les M2.5×8 de la plaque avant de la caméra ; elles compensent la hauteur ajoutée et maintiennent des filets en prise.
 
-`PORT` : `/dev/ttyACM0` sous Linux, `/dev/cu.usbmodem…` sous macOS, `COMx` sous Windows (la carte y apparaît comme
-« Périphérique série USB »), sans pilote.
+### État de l'assemblage
 
-### Le construire soi-même
+L'assemblage final v1.0 avec les 3MF fournis n'a pas encore été vérifié et aucune séquence de montage pas à pas n'est validée. Les fichiers et indications de matériaux sont disponibles ; il manque encore ce dernier contrôle d'ajustement et ses photographies pour constituer un guide de reproduction complet. Aucun couple, épaisseur de cale ou ordre de serrage n'est inventé pour combler ce manque.
 
-ESP-IDF 5.3.2 chargé :
+![Boîtier Basilisk, rendu CAO de la précédente révision v1.0b](../9_Assets/basilisk-enclosure.webp)
+
+L'illustration montre la **v1.0b**, révision précédente ; utiliser les fichiers v1.0 liés ci-dessus.
+
+Après vérification du montage, passer à l'[Installation](#installation).
+
+## Installation
+
+### Firmware et première connexion
+
+La [page produit](https://zurp-astronomics.github.io/basilisk/) propose le programmateur web avec l'image complète de la release : **cette installation efface la marque de mise au point enregistrée dans la carte**. Pour une mise à jour qui la conserve, utiliser le paquet `_flash.zip` de la release et son script `flash.sh` ou `flash.cmd` ; voir [Le nécessaire hors ligne](#le-nécessaire-hors-ligne).
+
+Ouvrir le **banc** de la page produit, sélectionner le port USB de la carte et se connecter. Banc et firmware proviennent de la même release. Monter un objectif et attendre l'état prêt. Son identité, ses bornes de focus et sa plage d'ouverture doivent apparaître avant de commander un mouvement. Une seule application peut utiliser le port série : déconnecter le banc avant d'ouvrir le logiciel astro.
+
+Pour une nuit sans réseau, télécharger auparavant le fichier `_bench.html` de la release : c'est le banc autonome. Si l'accès depuis un fichier local est refusé, servir son dossier avec `python3 -m http.server` et l'ouvrir depuis `http://localhost:8000/`. Le navigateur doit fournir Web Serial.
+
+### Ekos / INDI
+
+Sélectionner **Pinefeat CEF** comme focuser et choisir le port série de la carte. Le pilote INDI standard gère le focus et le diaphragme. Celui du dépôt ajoute la marque, la relecture de l'ouverture, l'identité et le redémarrage de l'objectif, la luminosité de la LED, les bornes de focus rapportées et les propriétés du capteur.
+
+Le pilote fourni nécessite **libindi 2**. Depuis la racine du dépôt :
+
+```sh
+cmake -S 6_Driver/indi -B build/indi
+cmake --build build/indi
+sudo cmake --install build/indi
+```
+
+Installer auparavant les outils de compilation C/C++, CMake, pkg-config et le paquet de développement libindi. L'installation va par défaut dans `/usr/local` ; conserver ce préfixe pour laisser intact le pilote de la distribution. `command -v indi_pinefeat_cef_focus` indique le binaire trouvé. Le périphérique INDI conserve le nom amont **Pinefeat EF Lens Controller**. Le réglage du débit série n'a pas d'effet sur l'USB natif.
+
+La [référence du pilote](../6_Driver/indi/README.md) détaille ses propriétés, sa provenance et ses séries de correctifs.
+
+### ASCOM et autres clients
+
+Utiliser le [pilote ASCOM Pinefeat](https://github.com/pinefeat/cef135) et choisir le port COM de la carte. Basilisk implémente son contrat de commandes USB.
+
+Les clients Moonlite peuvent piloter le focus et lire la température. Ce protocole rend **0 °C quand la température est inconnue** ; le banc et l'extension INDI Basilisk peuvent représenter explicitement cette absence. Pour un autre client, suivre le [contrat USB](../7_Docs/PROTOCOL.md).
+
+### Commutateur Custom du Samyang AF 135
+
+Pour ce modèle reconnu, la [tool station](../5_App/tool_station/) permet de lire et régler les affectations M1/M2 : AF, MF ou commande du diaphragme par la bague (AP). Ce réglage réside **dans la flash de l'objectif**, contrairement à la marque de Basilisk.
+
+La section [Configuration M1/M2 facultative](#configuration-m1m2-facultative) donne les commandes et le périmètre. L'outil demande confirmation avant d'écrire et relit le réglage. **Couper puis remettre l'alimentation de l'objectif après une lecture comme après une écriture.** Cette configuration est facultative ; le pilotage normal du focus et du diaphragme n'en a pas besoin.
+
+## Utilisation
+
+### Brancher, laisser démarrer
+
+Monter l'objectif et brancher l'USB-C. Basilisk l'alimente, l'identifie, lui laisse faire son référencement puis revient à la marque enregistrée, s'il y en a une. Les commandes qui nécessitent l'objectif répondent occupé pendant le démarrage. Retirer l'objectif coupe son alimentation.
+
+Piloter le focus depuis le banc ou le logiciel astro. La plage autorisée vient de l'objectif, avec une marge de cinq pas à chaque extrémité. Il n'y a pas de calibration manuelle. Une consigne hors plage est refusée. Régler le diaphragme dans la plage annoncée ; la valeur affichée est relue sur l'objectif.
+
+### Garder une marque de focus
+
+La marque appartient à **la carte**, associée à l'identité de l'objectif et à sa focale nominale arrondie au millimètre. Elle conserve une position et son sens d'approche. La poser à la position à retrouver ; y revenir depuis le banc ou le pilote INDI fourni. Un démarrage normal la rappelle automatiquement, avec le sens d'approche mémorisé pour reprendre le jeu mécanique.
+
+Sur un objectif dont le bouton de fût est pris en charge, l'action est décidée au relâchement :
+
+| Durée de l'appui | Action |
+|---|---|
+| Moins d'une seconde | Aller à la marque |
+| Au moins 1, moins de 4 secondes | Poser la marque ici |
+| 4 secondes ou plus | Aucune action |
+
+Le bouton est utilisé uniquement à l'état prêt, sans mouvement en cours. La marque de la carte est distincte d'une éventuelle fonction de preset native de l'objectif.
+
+Lors d'une récupération après perte de l'objectif ou redémarrage à chaud de la carte, Basilisk tente de retrouver la cible du mouvement interrompu, sinon la dernière position connue, pour le même objectif à la même focale. Cette information reste en mémoire, sans écriture flash ; couper l'alimentation de la carte l'efface. La récupération peut déplacer et référencer à nouveau l'objectif. Elle ne garantit pas une continuité physique du focus.
+
+### Bague et diaphragme
+
+Quand l'objectif annonce que sa bague commande le diaphragme, Basilisk traduit sa rotation en tiers de diaphragme, au maximum trois par seconde. Sur le Samyang AF 135, ce rôle dépend de l'affectation M1/M2 ; voir [Installation](#installation).
+
+### Lire la LED
+
+| Motif | Signification |
+|---|---|
+| Fixe pendant 1 s à la mise sous tension | Carte alimentée |
+| Gonflement doux toutes les 10 s | Pas d'objectif |
+| Un éclair long, puis clignotement lent et faible | Objectif détecté, démarrage |
+| Montée rapide, puis respiration lente | Prêt |
+| Scintillement rapide, puis fixe pendant 1 s | Retour à la marque, puis arrivée |
+| Impulsions courtes et rapides / longues et lentes | Position de focus croissante / décroissante |
+| Un éclair bref | Diaphragme modifié |
+| Trois éclairs / extinction progressive | Marque posée / effacée |
+| Double éclair toutes les 2 s | Nouvelle tentative après échec du démarrage ou perte de l'objectif |
+| Groupes répétés de 1 / 3 éclairs, séparés par une pause | Arrêt après perte de l'objectif / échec du référencement |
+
+La luminosité se règle de 0 à 100 % ; zéro éteint la LED. La carte repart à 100 % après mise sous tension. Le pilote INDI fourni peut conserver le réglage dans sa configuration et le renvoyer à la connexion.
+
+### Température et humidité
+
+Le SHT40 rapporte la température locale et l'humidité relative une fois par seconde. La carte calcule aussi un point de rosée ou de givre. **Le couplage thermique du capteur à l'air, à l'objectif et à l'électronique n'est pas caractérisé** : ces valeurs ne mesurent pas la condensation sur les optiques.
+
+Une mesure absente, invalide ou vieille de plus de trois secondes est indisponible dans le banc et l'extension INDI Basilisk. Le seuil calculé est aussi indisponible à humidité nulle, au-dessus de 60 °C ou sous un point de givre de −65 °C. Moonlite a le repli distinct décrit dans [Installation](#installation).
+
+Le firmware rapporte ces valeurs ; il ne compense pas le focus et ne commande pas de chauffage. Ekos peut exploiter la propriété de température selon sa propre politique de refocalisation.
+
+### Quand la session déraille
+
+Si aucun des deux flux d'état n'arrive pendant deux secondes, la carte tente de redémarrer l'objectif. Elle s'arrête après quatre tentatives consécutives en échec. Relancer l'objectif depuis le banc ou le pilote INDI fourni, ou le retirer puis le remonter.
+
+Pour un signalement exploitable, ouvrir le journal du banc, activer `LOG ON` (`LOG ALL` pour toutes les trames), reproduire l'événement et exporter le texte. Joindre `DEBUG`, la version du firmware de la carte et l'identité de l'objectif. Un défaut d'alimentation est compté dans le diagnostic ; le seul silence de la carte n'en donne pas la cause. Elle n'émet les événements du journal qu'après activation.
+
+Le [contrat USB](../7_Docs/PROTOCOL.md) définit chaque commande, réponse et erreur. Les sections suivantes ajoutent le fonctionnement hors ligne et les choix de conception.
+
+## Le nécessaire hors ligne
+
+Télécharger les fichiers depuis les [releases du dépôt](https://github.com/zUrp-Astronomics/basilisk/releases). Le `_bench.html` ouvre les commandes autonomes ; aucune copie du projet Astro n’est nécessaire.
+
+Avant de partir, conserver le `_flash.zip` et le `_bench.html` de la release, ce dépôt et le pilote choisi sur l'ordinateur. Le site est un point d'entrée pratique ; le fonctionnement de l'appareil n'en dépend pas.
+
+Extraire le paquet de flash dans un dossier et lancer `bash flash.sh /dev/ttyACM0` sous Linux, ou `flash.cmd COM3` sous Windows, avec le port réel de la carte. Ces scripts écrivent les images séparées du bootloader, de la table de partitions et de l'application décrites par `flash_args`, en conservant la NVS. L'image fusionnée `_esp32c3.bin` du programmateur web écrit depuis l'adresse zéro et remet la NVS à zéro. Garder ensemble les fichiers d'une même release. Les scripts nécessitent Python et esptool ; suivre leur contrôle de dépendances.
+
+Le tag de release et la réponse `v` sont deux identifiants distincts : la release nomme le paquet livré, `v` rend la version majeure/mineure du firmware de la carte. Relever les deux pour signaler un problème. Télécharger le banc courant ne met pas à jour la carte.
+
+## Configuration M1/M2 facultative
+
+Depuis la racine du dépôt :
+
+```sh
+pip install -r 5_App/tool_station/requirements.txt
+python 5_App/tool_station/tool_station.py --read --port /dev/ttyACM0
+python 5_App/tool_station/tool_station.py --M1 AF --M2 AP --port /dev/ttyACM0
+python 5_App/tool_station/tool_station.py --man
+```
+
+Utiliser le port série réel. `AF`, `MF` et `AP` affectent les rôles autofocus, focus manuel et diaphragme par la bague. L'outil lit la valeur actuelle, demande confirmation avant d'écrire et relit le résultat. Il s'agit de l'écriture explicitement admise dans la mémoire non volatile du Samyang AF 135 reconnu. Le format est établi sur le firmware objectif 1.06 ; la carte ne vérifie pas cette version. L'association de M1 à la position haute du commutateur vient de l'analyse, pas d'une vérification au banc. Contrôler le résultat physique après remise sous tension ; l'affectation d'usine est M1 = AF, M2 = AP. Couper et remettre l'alimentation de l'objectif après une lecture également.
+
+## Conception
+
+### Encombrement et mécanique
+
+Le tirage de la monture E est de 18 mm. La carte en anneau mesure 50,87 × 36,3 mm, avec les composants sur une seule face. Les pièces imprimées positionnent électronique et caméra autour de la monture métallique et du loquet récupérés sur la bague Meike. L'[assemblage STEP](../2_Hardware/Basilisk_v1.0_enclosure.step) est la référence dimensionnelle ; l'illustration v1.0b ne dessine pas les pièces finales v1.0. Une plaque avant ressemblante ne démontre pas l'adaptation à une autre caméra.
+
+### Alimentation et signaux
+
+L'USB-C apporte l'alimentation et les données USB natives. L'objectif reçoit deux rails commutés séparément, moteur 5 V et logique 3,3 V, avec limitation de courant et signalement des défauts. Dix pogo pins assurent les contacts de monture. La détection de présence commande la session ; le retrait coupe les rails. Le [schéma](../1_Board/Basilisk-v1.0_1-Schematics.pdf) définit l'électronique ; la [référence E-mount](E-Mount/protocol.md) donne les contacts, temporisations et trames.
+
+### Repérage de la carte v1.0
+
+| GPIO | Signal |
+|---|---|
+| 0 | XDETECT |
+| 1 / 2 | TXD / RXD |
+| 3 / 5 | LENS_CS / BODY_CS |
+| 4 | VD |
+| 6 / 9 | FAULT_MOTOR / FAULT_LOGIC |
+| 7 / 8 | EN_MOTOR / EN_LOGIC |
+| 10 | LED |
+| 18 / 19 | USB |
+| 20 / 21 | SCL / SDA |
+
+La [table de broches](../4_Firmware/components/phy/pins.h) et le schéma définissent le câblage : détection, commandes de rails et défauts actifs à zéro ; LED active à un. Aucun GPIO libre. VD cadence à 60 Hz avec une impulsion basse d’environ 60 µs. Présence confirmée pendant 300 ms avant démarrage ; retrait confirmé pendant 2 ms avant coupure et mise au repos des lignes.
+
+### Deux protocoles, un appareil
+
+Le PC parle le [contrat USB](PROTOCOL.md), en lignes de texte. L'objectif parle le [protocole de monture](E-Mount/protocol.md), binaire. Un acquittement USB peut annoncer l'admission d'une commande ; il ne prouve pas à lui seul l'arrivée du focus. Résultat du mouvement et relecture sont des observations distinctes. La liste blanche d'émission limite les messages qui peuvent atteindre l'objectif ; la mise au point normale n'a pas besoin de commandes de calibration usine ou de mise à jour du firmware objectif.
+
+La marque de la carte réside en NVS. L'état de récupération à chaud est distinct et ne survit pas à la coupure d'alimentation de la carte. L'affectation Custom facultative appartient à l'objectif. Ces trois durées de vie comptent pour choisir une méthode de mise à jour ou interpréter un redémarrage.
+
+### Où vit la connaissance du code
+
+La [doctrine](DOCTRINE.md) expose les principes de conception. Les contrats, propriétaires des données et contraintes matérielles appartiennent aux en-têtes et commentaires proches du [firmware](../4_Firmware/). Le manuel décrit les interfaces et la réalisation ; ce n'est pas une deuxième spécification d'implémentation. Mesures, simulations et analyses statiques ont des portées distinctes, précisées dans le [rapport de confiance](CONFIANCE.md) et la [provenance E-mount](E-Mount/provenance.md).
+
+## Construire le firmware
+
+Utiliser ESP-IDF **5.3.2** pour l'unique cible prise en charge, **ESP32-C3**. Depuis la racine du dépôt, avec `IDF_PATH` pointant vers le SDK installé :
 
 ```sh
 . "$IDF_PATH/export.sh"
 bash 4_Firmware/build.sh
 ```
 
-Le firmware se construit dans `4_Firmware/build/esp32c3` (le `sdkconfig` y est généré, rien de versionné n'est
-réécrit) ; l'artefact est dans `4_Firmware/build/esp32c3/artefact/`, et la commande de flash, ci-dessus, marche depuis
-ce dossier. La console ESP-IDF est muette : la carte n'écrit rien sur l'USB qui ne soit
-pas une réponse.
+Les résultats sont dans `4_Firmware/build/esp32c3/artefact/` : application, bootloader, table de partitions, image fusionnée, `flash_args`, `flash.sh` et `flash.cmd`. Le build vérifie que ses arguments de flash ordinaires ne recouvrent pas la NVS. Compiler n'est pas nécessaire pour utiliser les binaires d'une release.
 
-## Ce que fait la carte
-
-- **Elle ne parle jamais la première.** Aucune bannière, aucune ligne spontanée, sauf après `LOG ON`.
-- **Elle démarre l'objectif seule** dès que XDETECT le dit présent : rails, VD, poignée de main, initialisation d'un
-  boîtier, identification, homing de l'objectif. `t` suit cette séquence (`boot_state=powering`, `identifying`, …) ;
-  pendant elle, `e` répond `y` et les commandes qui ont besoin de l'objectif `er busy boot`.
-- **La marque** : une position de mise au point mémorisée **dans la carte** (NVS), par objectif et par focale — rien
-  n'est écrit dans l'objectif. `j` la lit, `js` la pose à la position courante, `jg` y va, `jx` l'efface. Le bouton du
-  fût fait de même au relâchement : appui de moins d'1 s, aller à la marque ; de 1 à 4 s, la poser ; plus long, rien. À
-  la fin de chaque démarrage, la carte revient seule à la marque (`boot_state=restoring`), puis passe en `ready`.
-- **Les bornes** de la mise au point (`r`) sont celles que l'objectif publie lui-même, resserrées de 5 pas ; elles ne
-  sont ni mesurées ni codées. Une cible hors de ces bornes est refusée (`er range limits`).
-- **L'ouverture** : `a` rend la plage, `a<f>` règle l'ouverture, `o` relit celle que l'objectif rapporte. Quand le
-  commutateur de l'objectif met sa bague sur l'ouverture, tourner la bague règle l'ouverture, par tiers de diaphragme
-  (trois par seconde au plus).
-- **L'objectif perdu** (plus de trame pendant 2 s) : la carte refait son démarrage. Après quatre échecs consécutifs, elle
-  s'arrête en `boot_state=fault` ; `b` relance, ou débrancher puis rebrancher l'objectif.
-- **La LED de statut** dit l'état : un souffle lent sans objectif, un clignotement faible pendant l'initialisation, une
-  respiration en `ready`, un motif de mouvement pendant un déplacement, des séries d'éclats en `fault`, dont le nombre
-  dit la cause. Les motifs et leurs valeurs sont en tête de `4_Firmware/components/led/led.c`. `k` lit son
-  intensité maximale, `k<n>` la règle (0 à 100 %, `k0` l'éteint) ; elle revient à 100 % à chaque démarrage de la carte.
-- **La température et l'humidité** : la carte v1.0 lit son capteur SHT40 une fois par seconde ; `z` rend la température
-  en °C, l'humidité relative en %RH et le seuil de condensation sur l'optique que la carte en calcule, en °C : le point
-  de rosée quand il est positif ou nul, le point de givre quand il est négatif (`21.37 48.02 9.91`, `-3.05 87.50 -4.27`) ;
-  le seuil est `-` quand il n'est pas défini (l'humidité à 0, l'air au-dessus de 60 °C, un point de givre sous -65 °C),
-  et `z` rend `-` seul quand la mesure est inconnue (pas encore lue, capteur muet, lecture fausse, bus bloqué, dernière
-  lecture de plus de 3 s) : jamais un nombre. La carte n'en fait rien d'autre : elle ne compense pas la mise au point,
-  c'est Ekos qui décide, et elle n'agit pas sur le seuil, elle le donne. Le capteur est sur la carte, contre
-  l'arrière de l'objectif : ce qu'il mesure de l'air dépend du boîtier.
-- **`DEBUG`** donne une ligne de diagnostic : la cause du dernier redémarrage de la carte, les lignes du journal perdues,
-  le résultat du dernier déplacement ; combien de fois la protection de chaque rail de l'objectif
-  s'est déclenchée (`fault_motor`, `fault_logic`, une ligne `* rail` au journal à chaque fois) — la carte le dit et ne
-  coupe rien. **`LOG ON`**, **`LOG ALL`**, **`LOG OFF`** ouvrent et ferment le journal (lignes
-  `* …`) ; `LOG ALL` y ajoute chaque trame échangée avec l'objectif.
-
-Les lettres servies, leurs réponses et leurs erreurs exactes sont dans `7_Docs/PROTOCOL.md`. Une lettre ou une commande en
-majuscules que la carte ne sert pas répond `er nocap`.
-
-## S'en servir avec INDI / Ekos
-
-**Le driver du dépôt, `6_Driver/indi/`** : le driver Pinefeat d'INDI, sous son nom (`indi_pinefeat_cef_focus`, « Pinefeat
-CEF » dans un profil Ekos, le périphérique « Pinefeat EF Lens Controller »), avec deux séries de patchs proposables à INDI : des correctifs, puis notre extension. Il se déclare en version 1.2, celle que lui donnent les
-correctifs ; l'extension ne la change pas.
-Contre la carte, qui annonce l'extension, il ajoute l'ouverture relue, l'arrêt, la marque, la LED de statut, le
-redémarrage de l'objectif et son nom, les bornes de l'objectif comme plage de la position, et, sur la carte v1.0, la
-température (`FOCUS_TEMPERATURE`, celle qu'Ekos lit pour refocaliser sur un écart de température), l'humidité et le point
-de rosée ou de givre que la carte calcule, publiés seulement quand la carte les connaît. Il s'installe à côté du driver
-du paquet d'INDI, sans l'écraser. Sa compilation, son installation et ses propriétés : `6_Driver/indi/README.md`.
-
-**Le driver Pinefeat d'origine** (`indi_pinefeat_cef_focus`, livré avec INDI) : la carte le sert aussi, sur la position,
-le mouvement et l'ouverture, sans rien configurer sur la carte ; la distance y reste inconnue (`d` rend `-`).
-
-Les deux ne lisent les bornes (`r`) que si le mineur de `v` est au moins 3, la règle d'INDI, que notre driver garde : avec
-la version de la carte (`1.3`, choisie pour cela : décision de l'humain), ils les lisent ; sous un mineur 3, ils ne les liraient plus, notre driver
-extension comprise.
-
-Dans les deux cas : le port série de la carte (la vitesse est sans effet, c'est un port USB).
-
-Un logiciel qui ne connaît que le protocole Moonlite peut aussi piloter la mise au point (`:GP#`, `:FG#`…,
-`PROTOCOL.md` § 4) et lire la température (`:GT#`), qui y vaut 0 °C tant que la carte ne la connaît pas : Moonlite n'a
-pas de forme pour « inconnue ».
-
-## S'en servir avec ASCOM (Windows)
-
-Le **driver ASCOM de Pinefeat** (https://github.com/pinefeat/cef135) s'emploie tel quel : la carte sert tout ce qu'il
-envoie, `v e r f m c a`, avec les réponses qu'il attend (`PROTOCOL.md` § 2.1). Choisir le port COM de la carte.
-
-## La page de banc (`5_App/`)
-
-`5_App/emount-bench.html` : une page seule, sans installation, qui parle à la carte par Web Serial. L'ouvrir dans **Firefox
-151 ou plus, Chrome ou Edge**, sur ordinateur. Elle est en français ou en anglais : la langue du navigateur au départ, puis
-la bascule **FR | EN** en haut de la page, retenue d'une visite à l'autre ; la bascule ne coupe pas la connexion, et le
-journal garde la langue où chaque ligne a été écrite.
-Si le navigateur refuse Web Serial sur `file://` : `python3 -m http.server` dans `5_App/`, puis
-`http://localhost:8000/emount-bench.html`.
-
-- **Connecter** : la page envoie `v` jusqu'à une réponse (l'ouverture du port peut redémarrer la carte), puis lit l'état ;
-  elle relit ensuite la position et le mouvement 5 fois par seconde, le reste une fois par seconde.
-- **Objectif** : identité (`i`), état de la carte (`t`) ; Redémarrer l'objectif (`b`), Alim OFF / ON (`p0` / `p1`).
-- **Capteur de la carte** (`z`, une fois par seconde, objectif monté ou non) : la température, l'humidité, et le point de
-  rosée, ou de givre quand il est négatif, tels que la carte les calcule ; « — » pour ce qu'elle ne connaît pas.
-- **Focus** : ±10 / ±100 pas, curseur entre les bornes avec la marque, « Aller à », Stop (`q`), Marquer (`js`), Aller à
-  la marque (`jg`).
-- **Ouverture** : curseur au tiers de diaphragme entre les bornes lues (`a`), ±⅓, pleine ouverture ; la valeur affichée
-  est celle que l'objectif rapporte (`o`).
-- **Journal** : `LOG ON`, `LOG ALL`, `LOG OFF` ; les trames sont décodées ; une ligne de commande libre ; le journal
-  s'exporte en fichier texte.
-
-La page ne porte que ce que la carte sert : ni homing (`h`), ni calibration (`c`), ni module, firmware de l'objectif,
-focale ou distance (`n`, `w`, `l`, `d`), ni `DUMP`, `SNIFF`, `SDRIVE`.
-
-Toute autre application série convient aussi : une ligne par commande, `PROTOCOL.md`.
-
-## Le commutateur Custom du Samyang AF 135 (`5_App/tool_station/`)
-
-Le Samyang AF 135 F1.8 FE a un commutateur à deux positions, M1 et M2 ; ce que fait chaque position (AF, MF, ou la bague
-sur l'ouverture) est une configuration rangée dans **sa flash**. `5_App/tool_station/tool_station.py` la lit et l'écrit
-par la carte, sans l'outil de Samyang :
-
-```sh
-pip install -r 5_App/tool_station/requirements.txt     # pyserial
-python 5_App/tool_station/tool_station.py --read --port /dev/ttyACM0
-python 5_App/tool_station/tool_station.py --M1 AF --M2 AP --port /dev/ttyACM0    # le réglage d'usine
-python 5_App/tool_station/tool_station.py --man        # le mode d'emploi complet
-```
-
-Avant d'écrire, l'outil montre la configuration lue et celle qu'il va écrire, et demande une confirmation ; après, il
-relit. **Après une lecture ou une écriture, débrancher puis rebrancher l'objectif.** La carte refuse tout autre objectif
-que le 135 (`er nocap custom`). Le format est établi sur le firmware 1.06 de l'objectif ; sur une autre version il n'est
-pas vérifié : **l'écriture se fait aux risques de l'utilisateur.** À la console de la carte, les mêmes opérations sont
-`CUSTOM READ` et `CUSTOM WRITE <M1><M2>` (`PROTOCOL.md` § 3.1).
-
-## Sécurité : rien n'écrit dans un objectif
-
-Un objectif dont la mémoire est abîmée ne se répare pas. Tout ce que la carte émet vers l'objectif passe par un seul
-filtre, `4_Firmware/components/bench_core/bench_core.c`, compilé derrière chaque émission, sans option pour le lever. C'est
-une **liste blanche** : ce qu'elle ne liste pas est refusé, dont la mise à jour du firmware de l'objectif (`0x14`, `0x15`)
-et toute commande de service qui écrit sa mémoire. Aucune commande ne permet de construire une trame arbitraire.
-
-**Une exception, une seule, décidée par l'humain** : l'écriture de la configuration du commutateur Custom du **Samyang AF
-135** (`CUSTOM WRITE`, que sert `tool_station`). Le filtre ne la laisse passer qu'au 135 reconnu, et seulement pour les
-neuf valeurs valides ; la même commande vers un autre objectif, un autre Samyang compris, est refusée.
-
-Le canal de service des Samyang (`0x40`) n'est ouvert qu'à un Samyang reconnu, par le nom ou par le code que l'objectif
-donne de lui-même.
-
-## Tests (sans carte)
-
-```sh
-bash 4_Firmware/run.sh               # le firmware : gcc seul
-bash 5_App/run.sh                    # la page de banc : node ; Playwright et Chromium pour test_app.js
-bash 5_App/tool_station/run.sh       # tool_station : python3
-```
-
-Chaque script se lance depuis n'importe quel répertoire. La suite du firmware joue le vrai code de la carte (tout sauf
-ce qui touche au matériel) contre deux faux objectifs, un Samyang AF 135 et un Tamron F051, et contre les traces réelles
-du 135 (`4_Firmware/traces`), puis des mutants qui doivent tous la faire échouer. Pour `5_App/test/test_app.js` :
-`npm install` à la racine (Playwright épinglé dans `package.json`) et un Chromium sous
-`/opt/pw-browsers/chromium-*/chrome-linux/chrome` ou désigné par `CHROMIUM_PATH`. Le driver INDI est compilé et lié par
-`bash 6_Driver/indi/build.sh`, et démontré par `bash 6_Driver/indi/test.sh` (libindi 2, astyle, python3 : son README,
-§ « Ce que la CI démontre »).
-
-La CI (`.gitea/workflows/ci.yml`) joue ces trois commandes, construit le firmware, et compile, lie et démontre le driver
-INDI.
-
-## Arborescence
-
-```
-README.md          la vitrine du projet, tenue par le projet (l'org y fait une passe de style)
-CLAUDE.md          l'environnement de travail du dépôt : conventions, commandes, pièges (pour qui le modifie)
-0_Datasheets/      les datasheets des composants de la carte
-1_Board/           la carte v1.0 : schéma, vues, modèle 3D (le STEP, zippé), Gerbers, BoM, placement (son README)
-2_Hardware/        la mécanique hors carte : le boîtier v1.0 (un STEP, toutes ses pièces), la nomenclature hors carte (CSV),
-                   une capture du boîtier v1.0b ; les caméras compatibles, le remplacement des vis (son README)
-3_3D-Models/       le boîtier v1.0 à imprimer (3MF) ; matières, tolérances, état de validation (son README)
-4_Firmware/        le firmware (ESP-IDF) ; sim/, les faux objectifs et les tests ; traces/, les traces du 135 ; run.sh,
-                   build.sh ; gen_lens_names.py, le générateur de la table des noms d'objectifs
-5_App/             la page de banc (emount-bench.html) et ses tests (run.sh)
-  tool_station/    le commutateur Custom du Samyang AF 135
-6_Driver/indi/     le driver INDI : `pinefeat_cef` d'INDI, ses correctifs et notre extension (LGPL 2.1, son README)
-7_Docs/
-  PROTOCOL.md      le contrat série de la carte : lettres, réponses, erreurs, journal
-  DOCTRINE.md      pourquoi le code est écrit comme il l'est
-  MANUEL.md        ce fichier
-8_References/      ce que le projet consulte, pas ce qu'il produit (la documentation d'interopérabilité des
-                   objectifs ira dans 7_Docs/)
-9_Assets/          la fiche (au format du site) et l'affiche lues par le site zUrp, les images du README ; l'affiche
-                   et les images sont tenues par l'org
-```
-
-## Licence
-
-- **Hardware et conception : OCL v1.1** (Open Community Licence, sans module complémentaire, `LICENSE-HARDWARE`,
-  https://github.com/OpenCommunityLicence/OpenCommunityLicence) : `1_Board/`, `2_Hardware/`, `3_3D-Models/`.
-- **Tout le reste : GPL-3.0** (`LICENSE`) : `4_Firmware/`, `5_App/`, `7_Docs/`, `9_Assets/`, `.gitea/`, `.github/` et
-  les fichiers de la racine.
-
-Exceptions, qui gardent leur licence : `6_Driver/indi/` est sous LGPL 2.1 (`6_Driver/indi/LICENSE`, il dérive du
-driver Pinefeat) ; les datasheets de `0_Datasheets/` et les documents de tiers de `8_References/` restent à leurs
-auteurs ; les deux tables de noms d'objectifs générées par `4_Firmware/gen_lens_names.py` depuis ExifTool (`Sony.pm`, licence Perl),
-`4_Firmware/components/host/lens_names.c` et la table `LENS_NAMES` de `5_App/emount-bench.html` (la table seule, pas
-le reste de la page), gardent la licence de leur source.
+Pour le développement, [SUITES.md](SUITES.md) est la référence maintenue des vérifications et prérequis. Les tests firmware utilisent le compilateur hôte et Python ; ceux du banc utilisent Node et l'installation Playwright épinglée du dépôt ; la tool station a son propre point d'entrée. La construction et la vérification des correctifs INDI nécessitent libindi 2 et les outils de [son README](../6_Driver/indi/README.md). Un essai contre un objectif simulé établit un comportement face à ce modèle, pas une nouvelle compatibilité matérielle.

@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "bsk_journal.h"
+#include "bsk_txn.h"
 #include "drive.h"
 #include "lens_rx.h"
 #include "still.h"
@@ -27,7 +28,8 @@ static struct {
     uint16_t prev06;                  /* position du 0x06 précédent */
     bool     move_nz;                 /* l'octet de mouvement du 0x05 a été non nul depuis le dépôt */
     uint8_t  sends;                   /* les envois du 0x1D de ce goto */
-    uint64_t due;                     /* démarrage (1 s) ou immobilité (10 s) ; UINT64_MAX hors mouvement */
+    bool     wait;                    /* COMMANDED, le 0x1D pas encore déposé : il attend la fin de l'arrêt surveillé */
+    uint64_t due;                     /* démarrage (1 s) ou immobilité (10 s) ; UINT64_MAX hors mouvement, et en attente */
     still_t  still;                   /* l'immobilité du mouvement, suivie à part de celle du homing */
 
     /* la commande en vol : CMD_FOCUS_GOTO ou CMD_FOCUS_MOVE */
@@ -40,6 +42,11 @@ static struct {
     uint16_t unconfirmed;             /* les abandons de l'arrêt d'un déplacement suivi, jamais oubliés (motion_unconfirmed) */
     uint64_t stop_due;                /* UINT64_MAX éteinte */
     still_t  stop_still;              /* l'immobilité depuis le 0x1C, suivie à part */
+
+    /* les q dont le 0x1C est retenu jusqu'au 0x04, par sa place dans la file de TRANSACTION : leur accusé final attend
+     * son départ (motion_q_end) */
+    bool     q_held[BSK_TXN_HELD_MAX];
+    uint32_t q_seq[BSK_TXN_HELD_MAX];
 } m;
 
 /* La surveillance de l'arrêt, allumée (`sends` envois déjà faits, la fenêtre depuis `now`) ou éteinte (0). */
@@ -50,14 +57,16 @@ static void stop_watch(uint8_t sends, uint64_t now)
     m.stop_still.have = false;
 }
 
-/* Le mouvement n'est journalisé que s'il change : motion_forget le remet au repos à chaque session. */
+/* Le mouvement n'est journalisé que s'il change : motion_forget le remet au repos à chaque session. Un goto n'attend qu'en
+ * COMMANDED : ABORTED par q, ou la session oubliée, son 0x1D ne part plus. */
 static void motion(bsk_motion_state_t st)
 {
     if (m.state != st) bsk_journal_motion((uint8_t)st);
     m.state = st;
+    m.wait = m.wait && st == MOTION_COMMANDED;
 }
 
-static bool moving(void) { return m.state == MOTION_COMMANDED || m.state == MOTION_MOVING || m.state == MOTION_SETTLING; }
+bool motion_moving(void) { return m.state == MOTION_COMMANDED || m.state == MOTION_MOVING || m.state == MOTION_SETTLING; }
 
 /* L'accusé final de la commande en vol, s'il y en a une. */
 static void cmd_end(bsk_ack_result_t r, bsk_err_t why)
@@ -90,20 +99,40 @@ static void mv_settling(uint64_t due)
     m.due = due;
 }
 
-/* PLANNING -> COMMANDED : la cible telle quelle, déposée pour la prochaine trame 0x04. PLANNING n'est jamais publié :
- * la recette d'approche du retour à la marque est calculée par restore.c. Une cible égale à la position mène à ARRIVED
- * dès l'immobilité, bien avant 1 s. */
-static void mv_start(uint16_t target, uint64_t now)
+/* Le 0x1D de la cible, déposé pour la prochaine trame 0x04 : le démarrage attendu 1 s, suivi depuis la position lue. */
+static void mv_send(uint64_t now)
 {
-    stop_watch(0, now);               /* un 0x1C renvoyé n'évince jamais un goto postérieur */
-    drive_goto(target);
-    motion(MOTION_COMMANDED);
+    m.wait = false;
+    drive_goto(m.target);
     m.sends = 1;
-    m.target = target;
     m.pos0 = m.prev06 = lens_rx()->pos;
     m.move_nz = false;
     m.still.have = false;
     m.due = now + (uint64_t)START_MS * MS;
+}
+
+/* La surveillance finie, l'arrêt confirmé ou abandonné : le goto qui attendait part (mv_start). */
+static void stop_end(uint64_t now)
+{
+    stop_watch(0, now);
+    if (m.wait) mv_send(now);
+}
+
+/* PLANNING -> COMMANDED : la cible telle quelle. PLANNING n'est jamais publié : la recette d'approche du retour à la
+ * marque est calculée par restore.c. Une cible égale à la position mène à ARRIVED dès l'immobilité, bien avant 1 s.
+ * Ticket #787 : un arrêt surveillé (le 0x1C de q ou de STALLED, motion_stop, motion_expire) n'est peut-être pas fini dans
+ * l'objectif. Le 135 reprend 0x1D et 0x1C au même traitement de trame, le 0x1D d'abord (samyang.md § 2.4, § 4.1) : le
+ * 0x1C efface le goto que le 0x1D vient d'armer, ou le goto retarde l'arrêt jusqu'à l'arrêt forcé de 1,2 s (§ 4.5). Le
+ * 0x1D attend donc la fin de la surveillance (stop_end) : l'arrêt confirmé, ou le 0x1C abandonné après son troisième
+ * envoi, 4,5 s au plus. Jusque-là rien de ce goto n'est émis, ni échu (m.due, UINT64_MAX hors mouvement, le reste) : il
+ * n'est ni renvoyé ni STALLED pour avoir attendu ; un 0x1C renvoyé ne peut pas l'évincer, il n'est pas parti. */
+static void mv_start(uint16_t target, uint64_t now)
+{
+    motion(MOTION_COMMANDED);
+    m.target = target;
+    m.pos0 = lens_rx()->pos;          /* la position au dépôt (motion_aim), relue au départ du 0x1D */
+    if (m.stop_sends) m.wait = true;
+    else mv_send(now);
 }
 
 /* À chaque 0x05 ou 0x06 ; `acked` : un accusé 1D suit le 0x06 dans la trame.
@@ -145,21 +174,35 @@ void motion_forget(void)
     motion(MOTION_IDLE);
     m.due = UINT64_MAX;
     stop_watch(0, 0);
+    motion_q_end(0);                  /* un q retenu : son 0x1C abandonné avec la boucle, ACK_FAILED, E_ABORTED */
 }
 
 bsk_motion_state_t motion_state(void) { return m.state; }
 
 bool motion_busy(void) { return m.busy; }
 
+bool motion_aim(uint16_t *target, uint16_t *from)
+{
+    if (!m.busy) return false;
+    *target = m.target;
+    *from = m.pos0;
+    return true;
+}
+
 uint16_t motion_unconfirmed(void) { return m.unconfirmed; }
 
-/* CMD_FOCUS_GOTO (arg : la cible) et CMD_FOCUS_MOVE (arg : ±n depuis la position lue). Sans 0x06, ni position ni
- * bornes : toute cible est refusée. */
-void motion_command(const bsk_cmd_t *c, uint64_t now)
+/* Sans bornes connues (lim : sans 0x06, ou un intervalle invalide), toute cible est refusée. */
+bool motion_admit(int64_t target)
 {
     const lens_rx_t *l = lens_rx();
-    int64_t target = c->op == CMD_FOCUS_MOVE ? (int64_t)l->pos + c->arg : (int64_t)c->arg;
-    if (!l->have06 || target < l->fmin || target > l->fmax) {
+    return l->lim && target >= l->fmin && target <= l->fmax;
+}
+
+/* CMD_FOCUS_GOTO (arg : la cible) et CMD_FOCUS_MOVE (arg : ±n depuis la position lue). */
+void motion_command(const bsk_cmd_t *c, uint64_t now)
+{
+    int64_t target = c->op == CMD_FOCUS_MOVE ? (int64_t)lens_rx()->pos + c->arg : (int64_t)c->arg;
+    if (!motion_admit(target)) {
         session_ack(c->seq, ACK_REJECTED, E_LIMIT);
         return;
     }
@@ -177,9 +220,44 @@ bsk_err_t motion_stop(uint64_t now)
 {
     m.stop_tracked = m.busy || (m.stop_sends && m.stop_tracked);   /* un second q reste l'arrêt du goto qu'il surveille */
     bsk_err_t e = drive_stop();
-    if (moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
+    if (motion_moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
     stop_watch(e == E_OK ? 1 : 0, now);   /* pas parti, q le dit (ACK_FAILED) : rien à surveiller */
     return e;
+}
+
+/* L'issue du premier envoi du 0x1C de q, à `now` : son accusé final, et la surveillance s'il est parti. Pas parti, q le dit
+ * (ACK_FAILED) : rien à surveiller, et un goto déposé après lui, qui attendait (mv_start), part. Aucun 0x1C ne part
+ * après le 0x1D d'un goto : un goto dont le 0x1D est parti (la surveillance finie pendant la retenue) ne la rallume
+ * pas. */
+static void q_sent(uint32_t seq, bsk_err_t e, uint64_t now)
+{
+    if (!motion_moving() || m.wait) {
+        if (e == E_OK) stop_watch(1, now);
+        else stop_end(now);
+    }
+    session_ack(seq, e == E_OK ? ACK_COMPLETED : ACK_FAILED, e);
+}
+
+void motion_q(uint32_t seq, uint64_t now)
+{
+    uint8_t k;
+    bsk_err_t e = motion_stop(now);
+    if (e == E_OK && drive_stop_held(&k)) {   /* retenu jusqu'au 0x04 : accusé, et surveillé de nouveau, à son départ */
+        m.q_held[k] = true;
+        m.q_seq[k] = seq;
+        return;
+    }
+    q_sent(seq, e, now);
+}
+
+void motion_q_end(uint64_t now)
+{
+    bsk_err_t e;
+    for (uint8_t k = 0; k < BSK_TXN_HELD_MAX; k++) {
+        if (!m.q_held[k] || !drive_stop_end(k, &e)) continue;
+        m.q_held[k] = false;
+        q_sent(m.q_seq[k], e, now);
+    }
 }
 
 void motion_leave(bsk_err_t why) { cmd_end(ACK_FAILED, why); }
@@ -189,10 +267,13 @@ void motion_leave(bsk_err_t why) { cmd_end(ACK_FAILED, why); }
  * (motion_stop) et de STALLED (motion_expire) sont surveillés, pas celui du homing de démarrage. */
 static bool stopped(uint64_t now) { return lens_rx()->ack1c || still(&m.stop_still, now); }
 
+/* Le goto qui attend ne lit pas la trame qui finit l'arrêt : son 0x1D n'est pas parti, l'accusé 1D qu'elle peut porter
+ * est celui du goto arrêté (le 135 l'accuse 1D 00 au moteur arrêté, dans le 0x06 de l'accusé 1C). */
 void motion_frame(uint8_t type, uint64_t now)
 {
-    if (moving() && (type == 0x05 || type == 0x06)) mv_frame(type, lens_rx()->ack1d, now);
-    if (m.stop_sends && (type == 0x05 || type == 0x06) && stopped(now)) stop_watch(0, now);
+    if (type != 0x05 && type != 0x06) return;
+    if (motion_moving() && !m.wait) mv_frame(type, lens_rx()->ack1d, now);
+    if (m.stop_sends && stopped(now)) stop_end(now);
 }
 
 uint64_t motion_due(void) { return m.stop_due < m.due ? m.stop_due : m.due; }
@@ -210,7 +291,7 @@ static void stop_expire(uint64_t now)
     } else {
         bsk_journal_giveup(0x1C, E_TIMEOUT);
         if (m.stop_tracked) m.unconfirmed++;
-        stop_watch(0, now);
+        stop_end(now);
     }
 }
 
@@ -224,7 +305,7 @@ static void stop_expire(uint64_t now)
  * fausse arrivée (mv_frame). */
 bool motion_expire(uint64_t now)
 {
-    if (now >= m.stop_due) {          /* jamais avec un mouvement en cours : mv_start l'éteint */
+    if (now >= m.stop_due) {          /* jamais avec un 0x1D parti : un goto déposé attend la fin (mv_start) */
         stop_expire(now);
         return true;
     }

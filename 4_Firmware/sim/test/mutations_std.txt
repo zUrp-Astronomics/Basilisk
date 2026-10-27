@@ -576,16 +576,6 @@
 - #define TRIES01        3
 + #define TRIES01        1
 
-@ test_std | components/session/session.c | on_due
-= cut_rails ignoré, la coupure jamais faite (coupure : le F051 hors tension 500 ms, il repart à froid)
--         if (!s.p.cut_rails) {
-+         if (1) {
-
-@ test_std | components/session/session.c | on_due
-= la coupure sans durée (coupure : rails rétablis 500 ms après la coupure)
--         wait_for(S_REC_CUT, s.p.cut_ms);
-+         wait_for(S_REC_CUT, 0);
-
 @ test_std | components/journal/journal.c | frame_all
 = les morceaux d'une trame entière sous LOG ALL sans un même #id (log_all_minute : la réponse au 0x08, 202 octets, jamais réassemblée)
 -             int w = n > CHUNK ? snprintf(s, sizeof s, "%s +%u/%u#%lu", pre, (unsigned)off, (unsigned)n, (unsigned long)j.frames)

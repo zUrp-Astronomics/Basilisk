@@ -224,7 +224,7 @@ jd_rc_t jd_line(const char *line, jd_frame_t *out, const char **why)
 void jd_drain(jd_meter_t *m, uint64_t now_us, void (*cb)(const jd_frame_t *d, void *ctx), void *ctx)
 {
     char b[640];
-    uint8_t g;
+    uint32_t g;
     size_t n, ring = 0;
     uint32_t here = 0;
     while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {

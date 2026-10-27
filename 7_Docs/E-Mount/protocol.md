@@ -1,10 +1,5 @@
 # The Sony E-mount protocol — common reference
 
-**Date** : 2026-10-07
-**Dernière révision** : 2026-10-10
-**Statut** : actif — first of the five interoperability documents of `7_Docs/E-Mount/` (ticket #505), with `samyang.md`, `tamron.md`, `traces.md`, `provenance.md` and the index `README.md`
-**Référencé par** : `7_Docs/E-Mount/README.md`, `samyang.md`, `tamron.md`, `traces.md`, `provenance.md`, the comments of `4_Firmware/components/` and `4_Firmware/include/` (ticket #558)
-**Dérivé de** : the code of this repository (`4_Firmware/components/`, `4_Firmware/include/`), the captures (`4_Firmware/traces/`, `7_Docs/E-Mount/traces/`) and public sources cited in each section, and the project's own static analyses of Samyang and Tamron lens firmware, which are not published
 
 ## 0. What this reference is
 
@@ -12,8 +7,7 @@
 and what decides what the lens answers, for everything that is **common** to the lens makers the
 project has studied: Sony (from captures), Samyang and Tamron (from captures where they exist, from
 static analysis otherwise). Someone who has only this folder should be able to rewrite the
-body-side firmware of this repository (`4_Firmware/`) and the fake lenses it uses in simulation
-(`4_Firmware/sim/lens135.c`, `4_Firmware/sim/lens_std.c`) without ever opening a lens firmware.
+body-side firmware of this repository (`4_Firmware/`) using its documented interface contracts without ever opening a lens firmware.
 It stops at the mount: it says what the body sees on the ten contacts and which inputs determine
 the lens's answers. It does not describe the inside of a lens (motor control, internal timers,
 memories). What only one maker does goes to `samyang.md` and `tamron.md` (§ 13).
@@ -29,17 +23,9 @@ memories). What only one maker does goes to `samyang.md` and `tamron.md` (§ 13)
 - **Numbers.** Hexadecimal is written `0x..` or as bare byte pairs (`F0 0B 00`). Every 16-bit field
   is little-endian unless stated. B→L is body to lens, L→B lens to body.
 
-**Order of authority** (decision of the project owner, 2026-10-07). When sources disagree:
+**Evidence and disagreements.** A capture establishes what the named device did in that session, not what every model or revision must do. This repository's code establishes Basilisk's behavior; it is not independent proof of lens behavior. Static analysis supplies version-specific interface hypotheses where direct observations are absent. Public sources retain their own attribution and scope.
 
-1. **what a trace shows**: the lens really did it;
-2. **what the code of this repository does**: it is the code that moves real lenses, validated on
-   the Samyang AF 135 F1.8 FE and in part on the Sony FE 24-105 mm F4 G OSS;
-3. **our static analyses**, only for what neither traces nor code cover, always marked
-   **static analysis, not observed**.
-
-Where our code is contested, this document says what the code does **and** that it is contested,
-with the reason (§ 11). Where our code contradicts a trace, it says so (§ 11). Nothing here
-corrects the code.
+When these disagree, preserve the disagreement (§ 11) and its provenance. A simulated lens is an implementation of a model, never an additional hardware observation. Nothing in this reference silently corrects the code.
 
 **Proof.** Every statement carries one of these:
 

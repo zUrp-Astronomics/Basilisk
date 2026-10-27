@@ -29,7 +29,7 @@
  *   - LENS_CS, lue par la carte : haute pendant que l'objectif émet ; elle ne délimite pas la réception ;
  *   - D2 (XDETECT), le contact de présence de la monture, lu par la carte ;
  *   - D0 et D1, les rails d'alimentation de l'objectif, commandés par la carte ;
- *   - TXD, l'émission de l'UART vers l'objectif, routée ou non (bsk_phy_lines).
+ *   - TXD, l'émission de l'UART vers l'objectif, et RXD, sa réception, routées ou non (bsk_phy_lines).
  * PHY lit D2, rapporte sa présence, commande les rails et ne décide rien : les décisions d'alimentation appartiennent à
  * la SESSION. Une exception, le verrou de XDETECT.
  *
@@ -179,8 +179,8 @@ bool bsk_phy_poll(bsk_phy_event_t *ev);
 bool bsk_phy_rail(bsk_rail_t rail, bool on);
 
 /* TXD et BODY_CS, les lignes que la carte émet vers l'objectif hors de la VD.
- *   - false, relâchées : haute impédance, tirées bas ; TXD n'est plus routée à l'UART ;
- *   - true, pilotées : TXD routée à l'UART, haute au repos ; BODY_CS pilotée basse.
+ *   - false, relâchées : haute impédance, tirées bas ; ni TXD ni RXD ne sont plus routées à l'UART ;
+ *   - true, pilotées : TXD routée à l'UART, haute au repos ; BODY_CS pilotée basse ; RXD routée à l'UART.
  * La VD a sa commande, bsk_phy_vd : arrêtée, elle est au même repos. Pourquoi : une ligne tenue haute vers un
  * objectif non alimenté l'alimente par ses diodes de protection, et sur la carte cible les rails sont commutés.
  * Les trois sont au repos au démarrage (bsk_phy_init). SESSION, propriétaire de l'alimentation, les met au repos
@@ -189,14 +189,26 @@ bool bsk_phy_rail(bsk_rail_t rail, bool on);
  * pose BODY_CS basse, quoi qu'on lui ait demandé entre-temps.
  * false : le verrou de XDETECT est posé et `drive` est vrai, les lignes restent au repos ; true sinon. Les relâcher
  * passe toujours. Si le verrou tombe pendant l'appel (le routage de TXD n'est pas fait sous section critique), les
- * lignes sont remises au repos avant de rendre false. */
+ * lignes sont remises au repos avant de rendre false.
+ * La fenêtre d'écoute : la réception de l'objectif (RXD) n'est ouverte que lignes pilotées, de bsk_phy_lines(true) à
+ * bsk_phy_lines(false) ou à la coupure du verrou. Hors d'elle, ce qui arrive sur RXD n'est pas lu : aucune trame, aucune
+ * E_FRAMING, aucune E_BUS d'une erreur du pilote UART ne remonte, et rien n'en est compté. À sa fermeture, ce que la
+ * réception tenait (octets écartés pas encore rapportés, début de trame) est oublié : une trame rendue n'est faite que
+ * d'octets reçus dans la fenêtre ouverte où elle est rendue, et ce qui était dans la file des événements avant reste
+ * rendu. Pilotées de nouveau sans avoir été relâchées (la reprise), la fenêtre reste ouverte. LENS_CS, une autre entrée,
+ * est lue et publiée hors d'elle aussi, comme l'E_BUS d'un front perdu. Pourquoi : un objectif qu'on coupe se décharge,
+ * et sa ligne d'émission fait lire à l'UART des octets et des erreurs qui ne disent rien de lui (la première trace de la
+ * carte v1.0 : une rafale d'E_BUS environ 5,6 s après chaque p0) ; et aucun objectif ne parle avant la poignée de main et
+ * le 0x01 de la carte, le protocole est maître-esclave (7_Docs/E-Mount/protocol.md). Lignes au repos, RXD ne présente
+ * aucun niveau haut à l'objectif (components/phy/phy.c, en tête de rxd_rest). */
 bool bsk_phy_lines(bool drive);
 
 /* Ce que la PHY compte pour `DEBUG` (PROTOCOL.md § 3), sans rien changer à ce qu'elle fait. À zéro au démarrage de la
  * carte.
  *   - evq_drop : les événements jetés parce que la file était pleine (le plus ancien, au profit du nouveau) ;
  *   - tx_wait_us, tx_timeout : la plus longue attente de fin d'émission de bsk_phy_send, en µs, sur la pile de
- *     son appelant, et les échéances de 100 ms de cette attente atteintes ;
+ *     son appelant, et les échéances de 100 ms de cette attente atteintes, plus les trames refusées sans rien écrire
+ *     parce que la précédente n'était pas partie à son échéance (components/phy/phy.c, bsk_phy_send) ;
  *   - fault_motor, fault_logic : les activations du FAULT de chaque rail, comptées par la PHY où elle voit le front.
  * Les PHY de test (sim/phy_sim.c, sim/test/phy_script.c) rendent zéro pour les trois premiers : une file simulée qui
  * déborde prouverait le simulateur, pas la carte. Elles comptent les FAULT qu'on leur fait lever, comme la carte. Lu sur

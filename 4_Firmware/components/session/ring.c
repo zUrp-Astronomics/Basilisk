@@ -23,9 +23,12 @@
 #define PAUSE_US    400000u   /* une pause clôt le geste */
 #define PUB_US      1000000u  /* sans changement de l'ouverture publiée depuis 1 s, les impulsions reprennent (aperture) */
 #define CAP_PER_S   3u        /* décision de l'humain : 3 tiers par seconde au plus */
+#define GESTURE_N   4096u     /* un geste est clos à son 4096e 0x05 non nul (aperture) */
 
 /* Les crans d'un tiers (f/1.0 à f/45), en codes 256(Av+16) : lround(256 × (2·log2(f) + 16)). La SESSION ne parle qu'en
- * codes objectif : le cran le plus proche est cherché en codes, pas en f/. */
+ * codes objectif : le cran le plus proche est cherché en codes, pas en f/. La même échelle est en f/ x10 dans la couche
+ * HOTE (host.c, thirds), le nom usuel d'une ouverture relue : les deux sont confrontées cran par cran à une liste écrite
+ * à la main (test_session_script, t_thirds). */
 static const uint16_t THIRDS[] = {0x1000, 0x1046, 0x1087, 0x10F9, 0x115B, 0x11B2, 0x1200, 0x1246, 0x12A5, 0x12F9, 0x135B, 0x139D,
                                   0x1400, 0x1457, 0x14A5, 0x14F9, 0x1550, 0x15A8, 0x1600, 0x1657, 0x16A5, 0x16EB, 0x1767, 0x179D,
                                   0x1800, 0x1857, 0x18A5, 0x18EB, 0x194A, 0x19B7, 0x1A00, 0x1A57, 0x1AA5, 0x1AFC};
@@ -105,6 +108,13 @@ static void gesture_end(void)
  * différé : retiré de la somme, compté dans la ligne du geste. Rien n'est appliqué sur un 0x05 sans impulsion : la bague
  * arrêtée, l'ouverture s'arrête. Le cap court à travers gestes, bascules et sessions : il borne la bague, pas un geste.
  * L'ouverture publiée et CMD_APERTURE_SET n'y passent pas.
+ * La borne : un geste est clos à son GESTURE_N-ième 0x05 non nul, sa ligne écrite comme à la pause, et le suivant repart
+ * de là ; le reste de la somme (accum) et le cap (third_us) n'en sont pas touchés, et la pause jette ce reste même quand
+ * la borne a déjà clos le geste : la consigne suit les mêmes tiers qu'un geste non borné. Sans elle, un flux continu à +127 ferait déborder la somme signée (int32_t, un comportement
+ * indéfini) après 2^31 / 127 trames, 78 h à 60 Hz. Bornés, la somme tient en 128 × GESTURE_N, et thirds, frames et
+ * capped en 64 × GESTURE_N (au plus (1 + 128) / PULSES tiers dus par trame). GESTURE_N 0x05 non nuls, c'est plus d'une
+ * minute de bague tournée dans un sens sans pause de 400 ms, à 60 Hz, quand le cap parcourt les 34 crans de la table en
+ * moins de 12 s : la borne ne coupe qu'un flux défectueux, jamais un geste.
  * La suspension : une ouverture publiée qui change fait taire les impulsions PUB_US. Elle défend un objectif qui publie
  * les deux pour le même geste : le Samyang AF 16 F2.8 P. Il pose ±1 à l'offset 60 à chaque front de bague, dans toutes
  * les configurations du commutateur, et, en position APERTURE avec le bit AF du boîtier, publie aux offsets 17-19
@@ -139,8 +149,9 @@ static void aperture(const lens_rx_t *l, uint64_t t)
             }
             r.accum -= r.accum > 0 ? PULSES : -PULSES;
         }
-    } else if (r.gesture && t - r.last_us > PAUSE_US) {
-        gesture_end();
+        if (r.frames == GESTURE_N) gesture_end();
+    } else if (t - r.last_us > PAUSE_US) {
+        if (r.gesture) gesture_end();
         r.accum = 0;
     }
 }

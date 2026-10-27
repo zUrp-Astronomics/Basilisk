@@ -1,10 +1,5 @@
 # The bench captures — how to read them
 
-**Date** : 2026-10-08
-**Dernière révision** : 2026-10-09
-**Statut** : actif — fourth interoperability document of `7_Docs/E-Mount/` (ticket #544); the eleven captures it describes are published, byte for byte, in `7_Docs/E-Mount/traces/`
-**Référencé par** : `7_Docs/E-Mount/README.md`, `protocol.md` (§ 0, § 13), `samyang.md` (§ 0), `provenance.md`
-**Dérivé de** : the captures of `7_Docs/E-Mount/traces/` and `4_Firmware/traces/`; the history of this repository (the commits named below); `7_Docs/E-Mount/protocol.md`, `samyang.md`
 
 ## 0. What this document is
 

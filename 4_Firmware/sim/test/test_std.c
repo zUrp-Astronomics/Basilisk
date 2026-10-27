@@ -48,9 +48,17 @@ static int sc_fails;            /* le scénario en cours */
 static bool sc_listed;          /* le scénario en cours est un constat */
 static bool quiet;              /* un démarrage rejoué pour atteindre READY : ses attendus sont ceux de demarrage_froid */
 
+/* La garde de durée, en secondes : 20 ; la passe sous sanitizers de 4_Firmware/run.sh et les mutants en -O0
+ * (sim/test/mutants.sh) la relèvent (-DGARDE_S). */
+#ifndef GARDE_S
+#define GARDE_S 20
+#endif
+#define TEXTE_(x) #x
+#define TEXTE(x) TEXTE_(x)
+
 static void too_long(int sig)
 {
-    static const char m[] = "  ECHEC : le programme ne termine pas en 20 s (boucle sans fin)\n";
+    static const char m[] = "  ECHEC : le programme ne termine pas en " TEXTE(GARDE_S) " s (boucle sans fin)\n";
     (void)sig;
     (void)!write(1, m, sizeof m - 1);
     _exit(1);
@@ -261,23 +269,6 @@ static void observe(void)
     last_mv = st.motion_state;
 }
 
-/* L'alimentation du F051 suivie par le rail logique (rails_power), comme sur la carte à rails commutés ; la PHY
- * simulée ne la commande pas (phy_sim.h). Chaque mise hors et sous tension notée (t_pw_off, t_pw_on, la dernière) ; à la
- * mise hors tension, `unhang` lève le silence du F051 : l'hypothèse du scénario coupure, un objectif muet qu'un cycle
- * d'alimentation remet en marche. */
-static bool rails_power, unhang;
-static uint64_t t_pw_off, t_pw_on;
-
-static void follow_rail(void)
-{
-    bool on = phy_sim_wires()->rail[BSK_RAIL_LOGIC];
-    if (!rails_power || on == L.powered) return;
-    lens_sim_power(lens_sim_std(&L), phy_sim_now(), on);
-    if (on) t_pw_on = phy_sim_now();
-    else t_pw_off = phy_sim_now();
-    if (!on && unhang) L.f.silent = false;
-}
-
 static void run_to(uint64_t t_end)
 {
     for (;;) {
@@ -287,7 +278,6 @@ static void run_to(uint64_t t_end)
         if (t > t_end) t = t_end;
         phy_sim_run(t);
         bsk_session_step(t);
-        follow_rail();
         observe();
         if (t >= t_end) break;
     }
@@ -312,11 +302,9 @@ static void bench(void)
     bsk_session_init(&P);
     bsk_journal_init(phy_sim_now);
     bsk_journal_set(false, false);
-    bsk_host_init("1.3", "poweron");
+    bsk_host_init("1.3", "poweron", phy_sim_now);
     host_mode = false;
     n_rules = 0;                                     /* aucune trame perdue */
-    rails_power = unhang = false;                    /* l'alimentation commandée par le scénario */
-    t_pw_off = t_pw_on = 0;
     n_log = n_chg = n_mchg = n_acks = 0;
     n_vd = 0;
     d2_due = 0;
@@ -974,6 +962,83 @@ static void restauration(void)
     CHECK(count_rx(0, 0x02) == 0 && lens_clean(), "aucun 0x02 ; le F051 reste dans son modèle (%s)", L.oom_why ? L.oom_why : "bloqué");
 }
 
+/* Les transitions sorties du journal depuis le dernier appel, sans leur instant (« * session powering »), à la suite ;
+ * les autres lignes comptées par leur début. */
+static char TR[64][96];
+static size_t n_tr, n_rail, n_bounce;
+
+static void tr_take(void)
+{
+    char b[400];
+    uint32_t g;
+    size_t n;
+    while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
+        const char *t, *rest;
+        b[n] = 0;
+        n_rail += !strncmp(b, "* rail ", 7);
+        n_bounce += !strncmp(b, "* xdetect ", 10) && strstr(b, " bounce");
+        if (strncmp(b, "* session ", 10) && strncmp(b, "* motion ", 9) && strncmp(b, "* restore ", 10)) continue;
+        t = strchr(b + 2, ' ');                      /* l'espace avant l'instant */
+        rest = strchr(t + 1, ' ');                   /* celle qui le suit */
+        if (n_tr < sizeof TR / sizeof TR[0]) snprintf(TR[n_tr], sizeof TR[0], "%.*s%s", (int)(t - b), b, rest ? rest : "");
+        n_tr++;
+    }
+}
+
+/* Ticket #714 : le démarrage du F051 sous LOG ON, sous une charge plus lourde que celle de la carte réelle dans sa première
+ * seconde (la première trace, 2026-10-19 : `* session ready` perdu aux deux démarrages du FE 24-105) : un front de FAULT
+ * du rail moteur toutes les 5 ms (`* rail`, sous le plafond, 200 par seconde ; le journal seul) et, l'insertion confirmée,
+ * un rebond de XDETECT toutes les 100 ms (`* xdetect <t> bounce`, sous le plafond ; rien de coupé). La marque 20000
+ * rangée, sens inconnu : RESTORING par le dépassement, 20063 puis 20000 (restauration) ; le 1D 00 du F051 vient à la fin
+ * du déplacement (goto) : COMMANDED, MOVING, SETTLING, ARRIVED, deux fois. Chaque transition du démarrage est au journal,
+ * dans l'ordre, écrite à la main ; les lignes de charge, elles, restent plafonnées. */
+static void demarrage_charge(void)
+{
+    static const char *const want[] = {
+        "* session powering", "* session identifying", "* session restoring",
+        "* restore mark=20000 dir=unknown x=63 path=overshoot via=20063",
+        "* motion commanded", "* motion moving", "* motion settling", "* motion arrived",
+        "* motion commanded", "* motion moving", "* motion settling", "* motion arrived",
+        "* session ready", "* restore end=arrived",
+    };
+    const size_t n_want = sizeof want / sizeof want[0];
+    uint64_t t0, tr = 0;
+    unsigned edges = 0, bounces = 0, lost = 0;
+    uint32_t d0;
+    bool active = false;
+    bench();
+    store_sim_poke(KEYF051, 20000);
+    bsk_journal_set(true, false);
+    tr_take();
+    n_tr = n_rail = n_bounce = 0;
+    d0 = bsk_journal_dropped();
+    t0 = phy_sim_now();
+    mount_cold();
+    for (unsigned i = 0; phy_sim_now() < t0 + 15000 * MS && (!tr || phy_sim_now() < tr + 1000 * MS); i++) {
+        phy_sim_rail_fault(BSK_RAIL_MOTOR, active = !active);
+        edges++;
+        if (phy_sim_now() >= t0 + 400 * MS && i % 20 == 0) {
+            phy_sim_d2(false);
+            run_for(1 * MS);
+            phy_sim_d2(true);
+            bounces++;
+        }
+        run_for(5 * MS);
+        tr_take();
+        if (!tr && status().session_state == SESSION_READY) tr = phy_sim_now();
+    }
+    for (size_t k = 0; k < n_want; k++) lost += k >= n_tr || strcmp(TR[k], want[k]);
+    CHECK(tr && n_tr == n_want && lost == 0, "chaque transition du démarrage, dans l'ordre : %zu sur %zu, %u manquante(s) ou autre(s)",
+          n_tr, n_want, lost);
+    for (size_t k = 0; lost && k < n_tr && k < sizeof TR / sizeof TR[0]; k++) printf("    reçue : « %s »\n", TR[k]);
+    CHECK(n_rail < edges && n_bounce < bounces && bsk_journal_dropped() - d0 >= edges - n_rail + bounces - n_bounce,
+          "la charge plafonnée : %zu `* rail` sur %u, %zu rebonds sur %u, %lu lignes tues", n_rail, edges, n_bounce, bounces,
+          (unsigned long)(bsk_journal_dropped() - d0));
+    CHECK(status().focus_position == 20000 && lens_clean(), "READY sur la marque, le F051 dans son modèle (%s)",
+          L.oom_why ? L.oom_why : "bloqué");
+    bsk_journal_set(false, false);
+}
+
 /* L'adaptateur du F051 à l'interface commune (sim/lens_sim_std.c) : il refuse, sans rien démarrer, ce que le F051 ne
  * sait pas représenter — le mode service (aucun canal 0x40, § 5.2 : ≥ 0x40 refusé), un flux sans mise en page, une
  * mise en page sans flux — et passe la mise en page telle quelle. */
@@ -1221,7 +1286,7 @@ static void renvoi_goto(void)
 static bool jline(const char *line)
 {
     char b[400];
-    uint8_t g;
+    uint32_t g;
     size_t n;
     bool found = false;
     while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
@@ -1235,7 +1300,7 @@ static bool jline(const char *line)
 static void jflush(void)
 {
     char b[400];
-    uint8_t g;
+    uint32_t g;
     while (bsk_journal_take(b, sizeof b, &g) > 0) {}
 }
 
@@ -1318,22 +1383,32 @@ static void renvoi_arret(void)
           "le 0x1C reçu : 1C 01, jamais renvoyé");
 }
 
-/* Un goto admis pendant la surveillance de l'arrêt l'éteint : le 0x1C perdu n'est pas renvoyé, il arrêterait ce goto. */
+/* Un goto admis pendant la surveillance de l'arrêt attend sa fin (ticket #787) : le 0x1C perdu est renvoyé à 1,5 s, avant
+ * le 0x1D du goto, qui n'est pas parti ; c'est lui qui arrête le F051 (1C 01), puis le 0x1D part, et aucun 0x1C ne le
+ * suit. */
 static void renvoi_arret_goto(void)
 {
     rule_t *r;
     size_t from;
     uint32_t g;
+    uint64_t tq;
+    long b, a, d;
     if (!ready_slow()) return;
     (void)cmd(CMD_FOCUS_GOTO, 22000);
     run_for(300 * MS);
     r = lose(true, 0x1C, 1, PHY_SIM_LOSE);
     from = n_log;
+    tq = phy_sim_now();
     (void)cmd(CMD_FOCUS_STOP, 0);
     run_for(500 * MS);
     g = cmd(CMD_FOCUS_GOTO, 22000);
     run_for(8000 * MS);
-    CHECK(r->hit == 1 && nth_1c(from, 1) < 0, "aucun 0x1C après le goto admis");
+    b = nth_1c(from, 1);
+    a = b >= 0 ? find_ack((size_t)b, 0x1C, 0x01) : -1;
+    d = nth_1d(from, 0);
+    CHECK(r->hit == 1 && b >= 0 && LOG[b].t == tq + 1500 * MS && a > b && d > a && nth_1c(from, 2) < 0,
+          "le 0x1C perdu renvoyé à 1,5 s, avant le 0x1D du goto admis ; l'arrêt accusé (1C 01), puis le 0x1D ; aucun 0x1C"
+          " après lui");
     CHECK(accepted_then(g, ACK_COMPLETED, E_OK) && lstd_position(&L) == 22000, "le goto arrive, 22000 (%ld)", (long)lstd_position(&L));
 }
 
@@ -1438,85 +1513,6 @@ static void muet_puis_repond(void)
     CHECK(count_rx(0, 0x02) == 0 && lens_clean(), "aucun refus ; le F051 reste dans son modèle (%s)", L.oom_why ? L.oom_why : "bloqué");
 }
 
-/* Le premier instant, à partir de `t`, où l'état `st` est publié ; 0 sinon. */
-static uint64_t entered_at(uint8_t st, uint64_t t)
-{
-    for (size_t k = 0; k < n_chg; k++)
-        if (chg[k].t >= t && chg[k].state == st) return chg[k].t;
-    return 0;
-}
-
-/* La première entrée à partir de l'instant `t` : trame émise ou reçue de type `type` ; -1 sinon. */
-static long nth_from(act_kind_t kind, uint8_t type, uint64_t t)
-{
-    for (size_t i = 0; at(i); i++)
-        if (LOG[i].kind == kind && LOG[i].t >= t && LOG[i].frame.msg[0] == type) return (long)i;
-    return -1;
-}
-
-/* Les trames reçues de type `type` à partir de l'instant `t`. */
-static size_t rx_from(uint8_t type, uint64_t t)
-{
-    long i = nth_from(A_RX, type, t);
-    return i < 0 ? 0 : count_rx((size_t)i, type);
-}
-
-/* Une trame reçue à partir de l'instant `t` dont le message est exactement `m`. */
-static bool rx_exact_from(const uint8_t *m, size_t n, uint64_t t)
-{
-    long i = find_rx_exact(0, m, n);
-    while (i >= 0 && LOG[i].t < t) i = find_rx_exact((size_t)i + 1, m, n);
-    return i >= 0;
-}
-
-/* La coupure de RECOVERING activée (cut_rails, décision de l'humain : gardée pour la carte à rails commutés), contre le F051
- * alimenté par le rail logique (rails_power). READY à froid ; le F051 se tait (silent) : la perte 2 s après sa dernière
- * télémétrie (plus 1 µs) ; 3 s après, les rails coupés : le F051 hors tension ; 500 ms après (cut_ms), POWERING, le rail
- * logique, le F051 sous tension. L'hypothèse du scénario : le cycle d'alimentation lève son silence (unhang). Il repart à
- * froid (§ 2.1 : phase init, état libre) : son 0x01 servi (33 octets), aucun refus, l'init entière, le 10 00 (son homing, en 16384,
- * home_pos [NÉ]), READY. Sans la coupure (cut_rails faux), le même F051 resté alimenté refuserait le 0x01 en flux (§ 8,
- * reste_alimente). */
-static void coupure(void)
-{
-    static const uint8_t st[] = {SESSION_RECOVERING, SESSION_POWERING, SESSION_IDENTIFYING, SESSION_READY};
-    uint64_t tl = 0, tr, ts;
-    long i01, r01;
-    bench();
-    P.cut_rails = true;
-    bsk_session_init(&P);
-    rails_power = true;
-    d2(true);
-    run_for(10000 * MS);
-    CHECK(status().session_state == SESSION_READY && L.powered && t_pw_on > 0,
-          "précondition : READY, le F051 alimenté par le rail logique (état %s)", bsk_state_name(status().session_state));
-    if (status().session_state != SESSION_READY) return;
-    ts = phy_sim_now();
-    L.f.silent = true;
-    unhang = true;
-    run_for(2500 * MS);
-    for (size_t i = 0; at(i); i++)
-        if (LOG[i].kind == A_RX && (LOG[i].frame.msg[0] == 0x05 || LOG[i].frame.msg[0] == 0x06) && LOG[i].t > tl) tl = LOG[i].t;
-    tr = entered_at(SESSION_RECOVERING, ts);
-    CHECK(status().session_state == SESSION_RECOVERING && tr == tl + 2000 * MS + 1,
-          "la perte : RECOVERING 2 s après la dernière télémétrie (%lld µs)", (long long)(tr - tl));
-    run_for(15000 * MS);
-    CHECK(t_pw_off == tr + 3000 * MS && t_pw_on == tr + 3500 * MS,
-          "les rails coupés 3 s après la perte, rétablis 500 ms plus tard : le F051 hors tension 500 ms");
-    CHECK(states_from(tr, st, sizeof st), "RECOVERING, POWERING, IDENTIFYING, READY, et rien d'autre");
-    CHECK(entered_at(SESSION_POWERING, tr) == tr + 3500 * MS, "POWERING à la fin de la coupure");
-    i01 = nth_from(A_SEND, 0x01, t_pw_on);
-    r01 = i01 >= 0 ? find((size_t)i01, A_RX, 0x01) : -1;
-    CHECK(r01 > i01 && LOG[r01].frame.len == 33 && !memcmp(LOG[r01].frame.msg, R01_HEAD, sizeof R01_HEAD) &&
-              nth_from(A_SEND, 0x07, t_pw_on) > r01,
-          "à froid : le premier 0x01 après la coupure servi, 33 octets, puis le 0x07");
-    CHECK(rx_from(0x02, t_pw_on) == 0 && rx_exact_from(R10_OK, sizeof R10_OK, t_pw_on),
-          "aucun refus après la coupure ; l'init entière, son 10 00");
-    CHECK(status().session_state == SESSION_READY && status().position_valid && status().focus_position == 16384 &&
-              status().last_error == E_OK && !ever(SESSION_FAULT),
-          "READY en 16384, sans FAULT (état %s, %ld)", bsk_state_name(status().session_state), (long)status().focus_position);
-    CHECK(L.phase == LSTD_FLOW && lens_clean(), "le F051 en flux, dans son modèle (%s)", L.oom_why ? L.oom_why : "bloqué");
-}
-
 static const struct {
     const char *name;
     const char *what;
@@ -1543,15 +1539,16 @@ static const struct {
      renvoi_goto},
     {"renvoi_arret", "q : le 0x1C perdu, renvoyé à 1,5 s ; trois perdus, l'abandon ; reçu, jamais renvoyé",
      renvoi_arret},
-    {"renvoi_arret_goto", "un goto admis pendant la surveillance de l'arrêt : aucun 0x1C renvoyé", renvoi_arret_goto},
+    {"renvoi_arret_goto", "un goto admis pendant la surveillance de l'arrêt : le 0x1C renvoyé avant son 0x1D, aucun après", renvoi_arret_goto},
     {"renvoi_arret_restoring", "q en RESTORING, le 0x1C perdu : renvoyé à 1,5 s, en READY", renvoi_arret_restoring},
     {"restauration", "RESTORING : la marque préchargée, 20063 puis 20000 (X = 1 % de la course), READY sur elle",
      restauration},
+    {"demarrage_charge", "le démarrage sous charge (FAULT de rail, rebonds de XDETECT), RESTORING : aucune transition tue",
+     demarrage_charge},
     {"muet_fault", "un F051 muet : 0x01, reset soft, 0x01, échec compté ; FAULT, E_LOST au quatrième", muet_fault},
     {"muet_puis_repond", "le premier 0x01 perdu, le second répondu : l'init sans reset soft, READY", muet_puis_repond},
     {"log_all_minute", "LOG ALL, une minute à 60 Hz : chaque trame au journal et reconstruite, rien de perdu, le débit",
      log_all_minute},
-    {"coupure", "cut_rails : la perte, les rails coupés 500 ms, le F051 repart à froid, READY", coupure},
 };
 #define N_SC (sizeof SC / sizeof SC[0])
 
@@ -1564,7 +1561,7 @@ int main(int argc, char **argv)
         return 2;
     }
     signal(SIGALRM, too_long);
-    alarm(20);
+    alarm(GARDE_S);
     load_constats(argv[1]);
     for (size_t i = 0; i < N_SC; i++) {
         long k = constat(SC[i].name);

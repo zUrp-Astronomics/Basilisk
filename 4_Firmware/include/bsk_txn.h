@@ -26,15 +26,23 @@
  *     front suivant programme la sienne ; des fronts datés avant le début du pas, seul le plus récent peut être servi
  *     (à 60 Hz, la paire d'un front plus ancien a plus de 2 ms de retard). Rien d'autre ne part entre le 0x03 et le
  *     0x04 : une émission demandée dans l'intervalle (bsk_txn_send, bsk_txn_request) est retenue et part juste
- *     derrière le 0x04, ou derrière sa place s'il est jeté. Son contenu vient de l'étage du dessus, que TRANSACTION
+ *     derrière le 0x04, ou derrière sa place s'il est jeté ; un message accroché après elle part après elle (l'ordre
+ *     d'émission est celui du dépôt, bsk_txn_attach). Son contenu vient de l'étage du dessus, que TRANSACTION
  *     n'interprète pas : les champs du 0x03 et du 0x04 qu'il pose, un message accroché à la prochaine trame 0x04 qui
  *     part, et le compte rendu de chaque paire partie ;
  *   - un message de classe 1 confié seul (bsk_txn_send), sans réponse attendue ;
- *   - au plus une requête ponctuelle en vol, de classe 2 : elle se termine par sa réponse (la première
- *     trame reçue dont le premier message est du type demandé) ou son échéance (E_TIMEOUT). Une erreur de réception
- *     (E_FRAMING, E_BUS de PHY) ne coûte que la trame qu'elle touche : la requête attend toujours sa réponse jusqu'à
- *     son échéance. Seule son émission ratée la termine avant (E_BUS, E_FORBIDDEN). Aucun réessai ici : le réessai
- *     est une politique, il vit dans SESSION.
+ *   - au plus une requête ponctuelle en vol, de classe 2 : elle se termine par sa réponse ou son échéance (E_TIMEOUT).
+ *     Sa réponse est la première trame reçue dont le premier message est du type demandé et, pour trois types, le
+ *     contenu celui de la réponse à cette requête-là, d'après le protocole et quel que soit l'objectif : 0x40, la même
+ *     MainCmd et la même sous-commande ; 0x0B, l'écho exact ; 0x0A, aucun bit ni aucun octet hors de la requête
+ *     (l'écho, ou la requête masquée par les capacités de l'objectif). Une autre trame de son type (une notification
+ *     0x40, la réponse en retard à une requête différente) ne la termine pas : elle attend toujours sa réponse. Deux
+ *     requêtes identiques ont la même réponse : la réponse en retard à la première termine la seconde, et le protocole
+ *     E ne porte aucun identifiant qui les sépare (le Sony et le 135 répondent sous le numéro de séquence 0) ; c'est à
+ *     SESSION de ne pas redemander ce qui peut encore recevoir une réponse en retard (CUSTOM, cmd.c). Une erreur de
+ *     réception (E_FRAMING, E_BUS de PHY) ne coûte que la trame qu'elle touche : la requête attend toujours sa réponse
+ *     jusqu'à son échéance. Seule son émission ratée la termine avant (E_BUS, E_FORBIDDEN). Aucun réessai ici : le
+ *     réessai est une politique, il vit dans SESSION.
  * Chaque trame passe par bench_core (bsk_bench_send), avec la déclaration de l'objectif que
  * SESSION lui a faite (bsk_txn_samyang). Un refus (E_FORBIDDEN) termine la requête comme un échec.
  *
@@ -57,7 +65,7 @@ typedef enum {
  * (bsk_bench_core.h). */
 void bsk_txn_samyang(bsk_bench_lens_t lens);
 
-/* Émet `msg` (classe 2) et attend un message du même type pendant `timeout_ms`, à partir de son émission.
+/* Émet `msg` (classe 2) et attend sa réponse (ci-dessus) pendant `timeout_ms`, à partir de son émission.
  * Elle remplace la requête précédente, quel que soit son état : SESSION n'en émet une qu'après avoir lu
  * la fin de la précédente, ou après l'avoir oubliée (nouvelle session). Rend l'état atteint : WAIT, ou
  * FAILED si l'émission a échoué (E_FORBIDDEN de bench_core, E_BUS de PHY). Le numéro de séquence
@@ -66,16 +74,31 @@ void bsk_txn_samyang(bsk_bench_lens_t lens);
  * trame ni erreur ne la termine avant ; FAILED, E_BUSY, si la file des retenues est pleine. */
 bsk_txn_state_t bsk_txn_request(const uint8_t *msg, uint16_t len, uint32_t timeout_ms, uint64_t now_us);
 
+/* La file des émissions retenues entre le 0x03 et le 0x04 (bsk_txn_send, bsk_txn_request) : au-delà, refusées (E_BUSY). */
+#define BSK_TXN_HELD_MAX 4u
+
 /* Émet `msg` seul, en classe 1, sans réponse attendue ; le numéro de séquence avance s'il est parti. Rend E_OK, ou
  * l'échec de l'émission (E_FORBIDDEN de bench_core, E_BUS de PHY). La requête en vol n'en est pas touchée. Entre le 0x03
- * et le 0x04 de la boucle : retenu, il part derrière le 0x04, et E_OK le dit retenu, pas parti (un échec
- * de son émission n'est alors rendu à personne) ; E_BUSY si la file des retenues est pleine. */
+ * et le 0x04 de la boucle : retenu, il part derrière le 0x04, et E_OK le dit retenu, pas parti : sa place dans la file
+ * (bsk_txn_held_place) dit l'issue de son émission quand elle est connue (bsk_txn_held_end) ; E_BUSY si la file des
+ * retenues est pleine. */
 bsk_err_t bsk_txn_send(const uint8_t *msg, uint16_t len);
+
+/* La place dans la file (< BSK_TXN_HELD_MAX) du message que le dernier bsk_txn_send a retenu ; BSK_TXN_SENT s'il ne l'a
+ * pas retenu (parti, raté, ou refusé, la file pleine). */
+#define BSK_TXN_SENT 0xFFu
+uint8_t bsk_txn_held_place(void);
+
+/* L'issue du message retenu à `place` (bsk_txn_held_place) : faux tant qu'il attend le 0x04 ; vrai ensuite, et `*e` reçoit
+ * E_OK (parti derrière le 0x04, ou à sa place s'il est jeté ou raté), l'échec de son émission (E_FORBIDDEN, E_BUS), ou
+ * E_ABORTED (la boucle arrêtée avant son départ, rien d'émis). Elle tient jusqu'à ce qu'un autre message soit retenu à cette
+ * place : l'appelant la lit après chaque bsk_txn_tick et après bsk_txn_loop(false), avant toute émission. */
+bool bsk_txn_held_end(uint8_t place, bsk_err_t *e);
 
 /* La boucle. Son contenu est tenu ici tel que l'étage du dessus l'a posé, boucle arrêtée comprise : c'est à lui de
  * l'oublier avec la session. Arrêtée, la paire en attente ne part pas, ni son 0x03 ni son 0x04, et le compte rendu n'est
- * pas donné ; rien de ce qui attendait son 0x04 ne part : une émission retenue est perdue, une requête retenue finit en
- * FAILED, E_ABORTED, sans avoir été émise. */
+ * pas donné ; rien de ce qui attendait son 0x04 ne part : un message seul retenu finit E_ABORTED (bsk_txn_held_end), une
+ * requête retenue en FAILED, E_ABORTED, sans avoir été émise. */
 void bsk_txn_loop(bool on);
 bool bsk_txn_loop_on(void);
 
@@ -92,10 +115,13 @@ void bsk_txn_loop03(uint8_t off, uint8_t mask, uint8_t bits);
 void bsk_txn_loop04(uint8_t off, uint8_t mask, uint8_t bits);
 
 /* Accroche `msg` (len <= BSK_TXN_ATTACH_MAX, copié) derrière le prochain 0x04 de la boucle, dans la même trame, sous
- * le numéro du 0x03 (y compris celui d'une paire dont le 0x03 est déjà parti). Il part une fois : le 0x04 qui le porte
- * le retire quand il part. Une paire qui ne part pas (une trame hors de sa fenêtre, une émission ratée, le 0x04 parti
- * peut-être en partie) le garde, tel quel, pour la suivante : il doit donc pouvoir partir deux fois sans effet de plus
- * (le 0x1D, une position absolue). Un message pas encore parti est remplacé ; len 0 le retire (msg peut être NULL). */
+ * le numéro du 0x03 (y compris celui d'une paire dont le 0x03 est déjà parti). Sauf si une émission retenue attend déjà ce
+ * 0x04 (bsk_txn_send, bsk_txn_request entre le 0x03 et le 0x04) : déposé après elle, il part après elle, avec la paire
+ * suivante (le 0x1D d'un goto ne part jamais devant le 0x1C d'un arrêt déposé avant lui ; ticket #680). Il part une
+ * fois : le 0x04 qui le porte le retire quand il part. Une paire qui ne part pas (une trame hors de sa fenêtre, une
+ * émission ratée, le 0x04 parti peut-être en partie) le garde, tel quel, pour la suivante : il doit donc pouvoir partir
+ * deux fois sans effet de plus (le 0x1D, une position absolue). Un message pas encore parti est remplacé ; len 0 le
+ * retire (msg peut être NULL). */
 void bsk_txn_attach(const uint8_t *msg, uint16_t len);
 
 /* Le message du dernier bsk_txn_attach a-t-il été porté par un 0x04 dont l'émission a été tentée et a raté ? Ce 0x04 a pu
@@ -110,6 +136,11 @@ bool bsk_txn_attach_failed(void);
  * champs, accrocher et émettre (bsk_txn_send). Un seul observateur ; NULL, aucun. */
 typedef void (*bsk_txn_pair_fn)(void);
 void bsk_txn_loop_observer(bsk_txn_pair_fn fn);
+
+/* Le nombre de 0x03 de la boucle échus depuis le démarrage, partis, jetés ou ratés (modulo 2^32). Lu au dépôt, puis dans
+ * le compte rendu d'une paire (dont le 0x03 est parti) : changé, ce 0x03 est parti après le dépôt ; le même, avant (le
+ * dépôt fait entre son 0x03 et son 0x04). Une lecture seulement : TRANSACTION n'en change rien. */
+uint32_t bsk_txn_n03(void);
 
 /* Un événement de PHY, après bsk_txn_tick à son instant : BSK_PHY_VD programme la paire si la boucle tourne ;
  * BSK_PHY_FRAME termine la requête en vol s'il en est la réponse ; BSK_PHY_ERROR n'y change rien (la requête attend son

@@ -83,24 +83,28 @@ typedef enum {
 /* Le domaine des codes d'ouverture 256·(Av+16) que la carte convertit en f/ : de f/0,5 (Av -2, 0x0E00 ; la limite d'un
  * objectif dans l'air, et le plancher que la conversion f/ -> code avait jusqu'ici) à f/256 (Av 16, 0x2000 ; deux diaphragmes au-delà
  * du f/64 d'un objectif photographique, et f/ x10 = 2560 tient sur 16 bits), bornes comprises. Hors de lui, un code n'est
- * pas une ouverture et n'est jamais converti : une plage du 0x08 qui en contient un n'est pas retenue (ni aperture_min,
- * aperture_max, ni CAP_APERTURE), une ouverture relue hors de lui (aperture_current, 0 sans 0x05) est inconnue. */
+ * pas une ouverture et n'est jamais converti : une plage du 0x08 qui en contient un, ou dont le minimum dépasse le maximum,
+ * n'est pas retenue (ni aperture_min, aperture_max, ni CAP_APERTURE), une ouverture relue hors de lui est inconnue
+ * (aperture_current à 0, comme sans 0x05). La session ne publie que des codes du domaine, ou 0 : ses lecteurs ne
+ * refont pas ce jugement. */
 #define BSK_AP_CODE_MIN 0x0E00u
 #define BSK_AP_CODE_MAX 0x2000u
 
 /* focus_min, focus_max de l'instantané : les bornes que l'objectif publie dans son 0x06, offsets 7-8 et 9-10
- * (petit-boutiste), relues à chaque 0x06 valide, jamais rangées. Elles sont valides comme la position
- * (position_valid) : même trame, même validité. Chacune est resserrée de 5 pas à la lecture (borne basse + 5, borne
- * haute − 5), pour ne jamais atteindre la butée ; une cible hors de [focus_min, focus_max] est refusée avant
- * émission, E_LIMIT. Aucune marge sur l'ouverture. */
+ * (petit-boutiste), relues à chaque 0x06 valide, jamais rangées. Chacune est resserrée de 5 pas à la lecture (borne
+ * basse + 5, borne haute − 5), pour ne jamais atteindre la butée. Elles sont connues (limits_valid) quand un 0x06 est lu
+ * (la même trame que la position) et que, resserrées, elles forment un intervalle non vide dans 0..65535 ; sinon
+ * inconnues, à 0, comme sans 0x06, et la position reste publiée (position_valid) : elle n'est pas soumise aux
+ * bornes. Sans bornes connues, toute cible est refusée avant émission, E_LIMIT, comme une cible hors de
+ * [focus_min, focus_max]. Aucune marge sur l'ouverture. */
 
 /* Le seq du goto que dépose le bouton du fût (appui court), par la même boîte que l'hôte : ses accusés suivent, et
- * l'hôte y lit la fin du déplacement (move_rc) comme pour les siens. L'hôte alloue ses seq à partir de 1 : 0 n'en
- * désigne aucun. */
+ * l'hôte y lit la fin du déplacement (move_rc) comme pour les siens. L'hôte alloue ses seq à partir de 1, et repart de 1
+ * après 2^32 − 1 : 0 n'en désigne aucun. */
 #define BSK_SEQ_BOARD 0u
 
 typedef struct {
-    uint32_t     seq;    /* strictement croissant, alloue par l'hote */
+    uint32_t     seq;    /* croissant, alloue par l'hote, rebouclé de 2^32 - 1 à 1 (BSK_SEQ_BOARD) */
     bsk_cmd_op_t op;
     int32_t      arg;
 } bsk_cmd_t;
@@ -125,19 +129,26 @@ typedef enum { BSK_UNKNOWN, BSK_NO, BSK_YES } bsk_tri_t;
 typedef struct {
     uint8_t  session_state;  /* bsk_session_state_t, § 3.1 */
     uint8_t  motion_state;   /* bsk_motion_state_t, § 3.2 */
+    bool     moving;         /* un mouvement en cours, tel que MOUVEMENT le décide (motion_moving) ; la couche HOTE le lit
+                                pour `e` et ne refait pas la liste des états */
+    bool     held;           /* OFF tenu par CMD_DETACH jusqu'au prochain CMD_ATTACH, quel qu'en soit le demandeur : aucun
+                                démarrage sur D2 ; vrai en OFF seulement. Le maintien de `p0` n'a que cette représentation :
+                                la couche HOTE le lit pour `t` (power_off) et `b`, et n'en tient pas de copie */
 
     bool     position_valid; /* vrai uniquement en READY */
     int32_t  focus_position; /* pas objectif, lu de l'objectif */
-    int32_t  focus_min, focus_max;   /* les bornes du 0x06, valides comme la position (ci-dessus) */
+    bool     limits_valid;   /* bornes connues (ci-dessus), dans tout état : un 0x06 lu, un intervalle valide */
+    int32_t  focus_min, focus_max;   /* les bornes du 0x06, avec limits_valid ; 0 sans elles */
 
-    uint16_t aperture_current;       /* unites objectif -- 16 bits : le code Sony ; hors de BSK_AP_CODE_MIN..MAX, inconnue */
+    uint16_t aperture_current;       /* unites objectif -- 16 bits : le code Sony, dans BSK_AP_CODE_MIN..MAX ; 0 inconnue */
     uint16_t aperture_min, aperture_max;   /* dans BSK_AP_CODE_MIN..MAX avec CAP_APERTURE ; 0 sans plage */
 
     uint32_t lens_id_product;
     char     lens_name[65];          /* le nom que l'objectif donne lui-meme ; vide s'il n'en donne pas */
     uint32_t capabilities;           /* champ de bits CAP_*, § 5 */
 
-    bool     mark_valid;             /* une marque existe pour cet objectif a cette focale */
+    bool     mark_valid;             /* une marque est rangee pour cet objectif a cette focale (relue, ou rangee par un
+                                        geste ; jamais une ecriture en attente) */
     int32_t  mark_position;          /* sa position, en pas objectif ; sans objet si !mark_valid */
 
     bsk_err_t last_error;
@@ -148,8 +159,9 @@ typedef struct {
     uint8_t  oss;                    /* bsk_tri_t, stabilisateur en marche (offset 64, bit 4) */
 
     /* Les gestes de marque de l'utilisateur, modulo 2^16, que la LED joue : comptés par chaque CMD_SET_MARK et
-     * CMD_CLEAR_MARK servie (le bouton du fût compris), jamais sur un zoom ni une relecture, que mark_valid et
-     * mark_position ne distinguent pas ; jamais oubliés avec la session. Ni `t` ni la couche HOTE ne les lisent. */
+     * CMD_CLEAR_MARK (le bouton du fût compris) une fois son écriture rangée en NVS, à son résultat, jamais au
+     * dépôt, ni sur un zoom ni une relecture, que mark_valid et mark_position ne distinguent pas ; jamais oubliés avec
+     * la session. Ni `t` ni la couche HOTE ne les lisent. */
     uint16_t mark_sets;              /* js, le bouton */
     uint16_t mark_clears;            /* jx */
 

@@ -3,9 +3,21 @@
  * DATE: 2026-10-04
  * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte
  *
- * L'anneau de 8 Ko (entrées [longueur 16 bits][génération][octets]), le plafond de 30 lignes par seconde, les lignes.
+ * L'anneau de 8 Ko (entrées [longueur 16 bits][génération 32 bits][octets]), le plafond de 30 lignes par seconde, les
+ * lignes.
  *
- * L'anneau n'a qu'un producteur, la tâche de SESSION, et qu'un consommateur : des indices atomiques, pas de verrou. */
+ * L'anneau n'a qu'un producteur, la tâche de SESSION, et qu'un consommateur : des indices atomiques, pas de verrou.
+ *
+ * La génération (bsk_journal_gen) : 32 bits, avancée de 1 par chaque LOG OFF (bsk_journal_set), et rien d'autre. Une ligne,
+ * ou un compte de `* lost`, produite sous la génération g n'est prise pour une ligne de la génération courante que si elle
+ * a vu passer un multiple non nul de 2^32 LOG OFF sans être écrite ni jetée. LOG OFF n'arrive que par une ligne de l'hôte
+ * (host.c, `LOG`), que la tâche de SESSION traite au plus une par pas (bsk_host_usb_service, main.c), et un pas au plus
+ * par tic de FreeRTOS (vTaskDelay(1), CONFIG_FREERTOS_HZ=1000 dans sdkconfig.defaults) : 2^32 LOG OFF prennent au moins
+ * 2^32 ms, 49 jours de LOG OFF sans arrêt. C'est la borne, et aucune ligne n'y arrive : la tâche qui vide l'anneau
+ * (host_usb.c, journal_task) passe au plus 2 s sur une ligne (son verrou et ses trois écritures, 500 ms chacun), et
+ * l'anneau tient au plus 8192 / (HDR + 1) entrées, moins d'une heure d'attente ; affamée par les tâches au-dessus d'elle,
+ * elle l'est avec la tâche de repos du système, plus bas encore, que le chien de garde surveille
+ * (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0, le défaut d'ESP-IDF) : la carte redémarre en 10 s. */
 #include "bsk_journal.h"
 
 #include <stdarg.h>
@@ -18,6 +30,7 @@
 
 #define RING     8192u
 #define PER_S    30u
+#define TR_PER_S 30u     /* les transitions, hors du plafond : leur propre compte dans sa fenêtre (voir le plafond) */
 #define CHUNK    64u
 #define LEN04    14u     /* un 0x04 seul ; au-delà, la consigne 0x1D le suit */
 #define LEN06    40u     /* un 0x06 seul ; au-delà, des accusés le suivent */
@@ -25,6 +38,7 @@
 #define MARK_MAX 24u     /* le repère « +<off>/<n>#<id> » à son plus long : off et n (16 bits) sur 5 chiffres, id (32) sur 10 */
 #define N_REF    5u      /* les références de la forme différence, une par sens et type (KEYS) */
 #define LOST_N   0xFFFFFFu   /* le compte des lignes perdues par le consommateur, sous sa génération */
+#define HDR      6u      /* l'en-tête d'une entrée de l'anneau : la longueur (2 octets), la génération (4) */
 
 /* La borne de hex_lines et de frame_all, qui cumulent leurs snprintf dans une ligne de LINE_MAX : un préfixe écrit par
  * snprintf dans un tampon de `size` octets (`size` - 1 caractères au plus), le repère et 64 octets en hexa (3 * CHUNK)
@@ -53,17 +67,18 @@ static struct {
     uint8_t  ring[RING];
     _Atomic uint32_t head;       /* écrit par le producteur seul */
     _Atomic uint32_t tail;       /* écrit par le consommateur seul */
-    _Atomic uint8_t  gen;
+    _Atomic uint32_t gen;
     uint32_t dropped;            /* plafond, anneau plein : le producteur */
     _Atomic uint32_t lost;       /* écritures ratées : le consommateur */
     bool     win;                /* une fenêtre d'une seconde est ouverte */
     uint64_t win_ms;
     uint32_t win_n, win_rx;      /* lignes admises, trames reçues tues */
+    uint32_t win_tr;             /* transitions admises */
     uint32_t frames;             /* le numéro #<id> des morceaux */
     ref_t    ref[N_REF];         /* le producteur seul */
     uint32_t seen;               /* bsk_journal_dropped() à la dernière trame écrite sous LOG ALL */
     uint32_t unsaid;             /* lignes perdues anneau plein sous LOG ALL, pas encore dites (`* lost`) */
-    _Atomic uint32_t lost_unsaid;   /* écritures ratées sous LOG ALL, pas encore dites : génération << 24 | compte */
+    _Atomic uint64_t lost_unsaid;   /* écritures ratées sous LOG ALL, pas encore dites : génération << 32 | compte */
 } j;
 
 static uint64_t now_us(void) { return j.clock ? j.clock() : 0; }
@@ -75,18 +90,18 @@ static bool room(size_t n)
     uint32_t h = atomic_load_explicit(&j.head, memory_order_relaxed);
     uint32_t t = atomic_load_explicit(&j.tail, memory_order_acquire);
     uint32_t used = (h - t + RING) % RING;
-    return RING - 1 - used >= n + 3;
+    return RING - 1 - used >= n + HDR;
 }
 
 static void put_raw(const char *b, size_t n)
 {
     uint32_t h = atomic_load_explicit(&j.head, memory_order_relaxed);
+    uint32_t g = atomic_load_explicit(&j.gen, memory_order_relaxed);
     j.ring[h] = (uint8_t)(n & 0xFF);
     h = (h + 1) % RING;
     j.ring[h] = (uint8_t)(n >> 8);
     h = (h + 1) % RING;
-    j.ring[h] = atomic_load_explicit(&j.gen, memory_order_relaxed);
-    h = (h + 1) % RING;
+    for (unsigned k = 0; k < 4; k++, h = (h + 1) % RING) j.ring[h] = (uint8_t)(g >> 8 * k);
     for (size_t i = 0; i < n; i++, h = (h + 1) % RING) j.ring[h] = (uint8_t)b[i];
     atomic_store_explicit(&j.head, h, memory_order_release);
 }
@@ -98,7 +113,7 @@ static bool put(const char *b, size_t n)
 {
     char m[24];
     int k = j.unsaid ? snprintf(m, sizeof m, "* lost %lu", (unsigned long)j.unsaid) : 0;
-    if (!room(n + (k ? (size_t)k + 3 : 0))) {
+    if (!room(n + (k ? (size_t)k + HDR : 0))) {
         j.dropped++;
         if (atomic_load_explicit(&j.all, memory_order_relaxed)) j.unsaid++;
         return false;
@@ -111,20 +126,20 @@ static bool put(const char *b, size_t n)
 
 /* Les écritures ratées sous LOG ALL sont dites par `* lost <n>` avant la ligne suivante, sous la génération
  * où elles ont été comptées : une perte d'avant LOG OFF ne sort pas après son `ok` (bsk_journal.h). */
-static size_t lost_line(char *buf, size_t cap, uint8_t *gen)
+static size_t lost_line(char *buf, size_t cap, uint32_t *gen)
 {
     char m[24];
-    uint32_t v = atomic_exchange_explicit(&j.lost_unsaid, 0, memory_order_acq_rel);
+    uint64_t v = atomic_exchange_explicit(&j.lost_unsaid, 0, memory_order_acq_rel);
     int n;
     if (!(v & LOST_N)) return 0;
     n = snprintf(m, sizeof m, "* lost %lu", (unsigned long)(v & LOST_N));
-    *gen = (uint8_t)(v >> 24);
+    *gen = (uint32_t)(v >> 32);
     if ((size_t)n > cap) n = (int)cap;
     memcpy(buf, m, (size_t)n);
     return (size_t)n;
 }
 
-size_t bsk_journal_take(char *buf, size_t cap, uint8_t *gen)
+size_t bsk_journal_take(char *buf, size_t cap, uint32_t *gen)
 {
     uint32_t t = atomic_load_explicit(&j.tail, memory_order_relaxed);
     uint32_t h = atomic_load_explicit(&j.head, memory_order_acquire);
@@ -135,28 +150,28 @@ size_t bsk_journal_take(char *buf, size_t cap, uint8_t *gen)
     t = (t + 1) % RING;
     n |= (size_t)j.ring[t] << 8;
     t = (t + 1) % RING;
-    *gen = j.ring[t];
-    t = (t + 1) % RING;
+    *gen = 0;
+    for (unsigned k = 0; k < 4; k++, t = (t + 1) % RING) *gen |= (uint32_t)j.ring[t] << 8 * k;
     for (size_t i = 0; i < n; i++, t = (t + 1) % RING)
         if (i < cap) buf[i] = (char)j.ring[t];
     atomic_store_explicit(&j.tail, t, memory_order_release);
     return n > cap ? cap : n;
 }
 
-uint8_t bsk_journal_gen(void) { return atomic_load_explicit(&j.gen, memory_order_acquire); }
+uint32_t bsk_journal_gen(void) { return atomic_load_explicit(&j.gen, memory_order_acquire); }
 
 /* La génération est lue avant LOG ALL : LOG OFF éteint LOG ALL avant de changer de génération (bsk_journal_set), donc une
  * perte comptée sous la nouvelle génération ne l'est plus sous LOG ALL, et une perte comptée sous l'ancienne est périmée. */
 void bsk_journal_lost(void)
 {
-    uint8_t g = atomic_load_explicit(&j.gen, memory_order_seq_cst);
-    uint32_t v, w;
+    uint32_t g = atomic_load_explicit(&j.gen, memory_order_seq_cst);
+    uint64_t v, w;
     atomic_fetch_add_explicit(&j.lost, 1, memory_order_relaxed);
     if (!atomic_load_explicit(&j.all, memory_order_seq_cst)) return;
     v = atomic_load_explicit(&j.lost_unsaid, memory_order_relaxed);
     do {
-        uint32_t k = (uint8_t)(v >> 24) == g ? v & LOST_N : 0;
-        w = (uint32_t)g << 24 | (k < LOST_N ? k + 1 : k);
+        uint64_t k = (uint32_t)(v >> 32) == g ? v & LOST_N : 0;
+        w = (uint64_t)g << 32 | (k < LOST_N ? k + 1 : k);
     } while (!atomic_compare_exchange_weak_explicit(&j.lost_unsaid, &v, w, memory_order_acq_rel, memory_order_relaxed));
 }
 
@@ -167,25 +182,34 @@ uint32_t bsk_journal_dropped(void) { return j.dropped + atomic_load_explicit(&j.
 /* Le plafond vaut pour toutes les lignes, une ligne tue est comptée dans `dropped`, et une trame est admise entière ou
  * pas du tout : jamais un morceau sans les autres (l'anneau plein peut en perdre une partie : hex_lines le dit).
  * Hors du plafond, ni admises par lui ni comptées dans sa fenêtre (l'anneau plein les perd quand même, comptées) :
- *   - `* xdetect absent|present` : le démarrage du 135 écrit déjà 29 lignes dans sa première seconde, et l'insertion
- *     confirmée tombe avec `* session powering` : sous le plafond, elle ferait tomber `* session ready`. Au plus 2 lignes
- *     par 300 ms ; une retombée n'est jamais tue ;
+ *   - les transitions, `* session`, `* motion` et `* restore` : la première trace sur la carte (2026-10-19) a perdu au
+ *     plafond `* session ready` aux deux démarrages du FE 24-105, `restoring` et `commanded` au troisième du 135 ; la mise
+ *     sous tension réelle ajoute des `* xdetect <t> bounce` et des erreurs de réception aux 29 lignes de la première
+ *     seconde du 135. Elles ont leur propre compte, TR_PER_S par fenêtre (transition), et non la vitesse de l'automate :
+ *     une commande de l'hôte en écrit une ou plusieurs (`b` relance le démarrage dans tout état, `p0` repasse en OFF même
+ *     en OFF, `f` puis `q`), une ligne USB par pas de SESSION, donc des centaines par seconde sans lui. Un démarrage en
+ *     écrit au plus 15 — POWERING, IDENTIFYING, HOMING, RESTORING et READY, l'entrée et la sortie du retour, deux gotos de
+ *     quatre états (le dépassement) ; le suivant ne part que 3 s après un échec (retry_wait_ms, RECOVERING), ou après
+ *     une retombée (OFF) et une insertion tenue 300 ms : sans commande, une fenêtre en tient moins de TR_PER_S ;
+ *   - `* xdetect absent|present` : l'insertion confirmée tombe au début du démarrage, dont le 135 écrit déjà 29 lignes
+ *     dans sa première seconde ; sous le plafond, elle prendrait la place de l'une d'elles. Au plus 2 lignes par
+ *     300 ms ; une retombée n'est jamais tue ;
  *   - `* ring … gesture` : sous LOG ALL, les trames remplissent la fenêtre à chaque seconde ; une ligne par geste ;
  *   - `* std … step=08` : une par init, dans la première seconde du démarrage ;
  *   - toute trame sous LOG ALL : à 60 Hz, au moins 300 lignes par seconde, dont le plafond tuerait les trois quarts ; la
  *     forme différence les tient à quelques Ko par seconde.
- * Les autres lignes et les erreurs de réception le gardent. */
+ * Les autres lignes et les erreurs de réception le gardent. Par fenêtre d'une seconde, le journal écrit donc au plus
+ * PER_S lignes du plafond, TR_PER_S transitions, les lignes bornées ci-dessus, et sous LOG ALL les trames. */
 
-/* `lines` lignes à l'instant `t_us`, admises ensemble ou pas du tout ; `rx` : une trame reçue (ou une
- * erreur de réception), que `* rxflood` compte si elle est tue. */
-static bool admit(uint32_t lines, bool rx, uint64_t t_us)
+/* La fenêtre d'une seconde à l'instant `t_us` : ouverte, ou renouvelée, avec le résumé de la précédente. */
+static void window(uint64_t t_us)
 {
     uint64_t ms = t_us / 1000;
     if (!j.win || ms >= j.win_ms + 1000) {      /* nouvelle fenêtre, résumé de la précédente */
         uint32_t supp = j.win ? j.win_rx : 0;
         j.win = true;
         j.win_ms = ms;
-        j.win_n = j.win_rx = 0;
+        j.win_n = j.win_rx = j.win_tr = 0;
         if (supp) {
             char b[40];
             int n = snprintf(b, sizeof b, "* rxflood %lu", (unsigned long)supp);
@@ -193,6 +217,13 @@ static bool admit(uint32_t lines, bool rx, uint64_t t_us)
             put(b, (size_t)n);
         }
     }
+}
+
+/* `lines` lignes à l'instant `t_us`, admises ensemble ou pas du tout ; `rx` : une trame reçue (ou une
+ * erreur de réception), que `* rxflood` compte si elle est tue. */
+static bool admit(uint32_t lines, bool rx, uint64_t t_us)
+{
+    window(t_us);
     if (j.win_n + lines > PER_S) {
         j.dropped += lines;
         if (rx) j.win_rx++;
@@ -202,19 +233,48 @@ static bool admit(uint32_t lines, bool rx, uint64_t t_us)
     return true;
 }
 
+/* Une transition à l'instant `t_us`, hors du plafond : la TR_PER_S-ième de sa fenêtre passée, tue et comptée dans
+ * `dropped`, comme une ligne du plafond. */
+static bool admit_tr(uint64_t t_us)
+{
+    window(t_us);
+    if (j.win_tr >= TR_PER_S) {
+        j.dropped++;
+        return false;
+    }
+    j.win_tr++;
+    return true;
+}
+
 /* Chaque format de ce fichier, ses champs à leur plus long, tient dans LINE_MAX : le plus long, `* restore … via=`, fait
  * moins de 130 octets. */
+static void vline(const char *fmt, va_list ap) __attribute__((format(printf, 1, 0)));
+static void vline(const char *fmt, va_list ap)
+{
+    char b[LINE_MAX];
+    int n = vsnprintf(b, sizeof b, fmt, ap);
+    put(b, (size_t)n);
+}
+
 static void line(bool rx, uint64_t t_us, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 static void line(bool rx, uint64_t t_us, const char *fmt, ...)
 {
-    char b[LINE_MAX];
     va_list ap;
-    int n;
     if (!j.on || !admit(1, rx, t_us)) return;
     va_start(ap, fmt);
-    n = vsnprintf(b, sizeof b, fmt, ap);
+    vline(fmt, ap);
     va_end(ap);
-    put(b, (size_t)n);
+}
+
+/* `* session`, `* motion` et `* restore` : hors du plafond, sous leur propre compte (admit_tr). */
+static void transition(uint64_t t_us, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void transition(uint64_t t_us, const char *fmt, ...)
+{
+    va_list ap;
+    if (!j.on || !admit_tr(t_us)) return;
+    va_start(ap, fmt);
+    vline(fmt, ap);
+    va_end(ap);
 }
 
 /* ─────────────────────────── les trames ─────────────────────────── */
@@ -390,9 +450,9 @@ void bsk_journal_session(uint8_t state, bsk_err_t last_error)
 {
     uint64_t t = now_us();
     if (state == SESSION_FAULT)
-        line(false, t, "* session %llu %s %s", (unsigned long long)(t / 1000), bsk_state_name(state), bsk_err_token(last_error));
+        transition(t, "* session %llu %s %s", (unsigned long long)(t / 1000), bsk_state_name(state), bsk_err_token(last_error));
     else
-        line(false, t, "* session %llu %s", (unsigned long long)(t / 1000), bsk_state_name(state));
+        transition(t, "* session %llu %s", (unsigned long long)(t / 1000), bsk_state_name(state));
 }
 
 void bsk_journal_handshake(bsk_hs_t r, uint64_t up_us)
@@ -409,7 +469,7 @@ void bsk_journal_handshake(bsk_hs_t r, uint64_t up_us)
 void bsk_journal_motion(uint8_t state)
 {
     uint64_t t = now_us();
-    line(false, t, "* motion %llu %s", (unsigned long long)(t / 1000), bsk_motion_name(state));
+    transition(t, "* motion %llu %s", (unsigned long long)(t / 1000), bsk_motion_name(state));
 }
 
 /* La valeur brute : le sens des offsets 64 et 66 n'est pas établi. */
@@ -436,7 +496,7 @@ void bsk_journal_btn(bsk_btn_t press, bsk_btn_result_t r, const char *why)
 
 void bsk_journal_mark(bsk_mark_ev_t ev, const char *key, const bsk_mark_t *m)
 {
-    static const char *const o[] = {"set", "clear", "store=er"};
+    static const char *const o[] = {"set", "clear", "store=er", "load=er"};
     static const char *const d[] = {"unknown", "inc", "dec"};
     uint64_t t = now_us();
     if (m)
@@ -446,30 +506,31 @@ void bsk_journal_mark(bsk_mark_ev_t ev, const char *key, const bsk_mark_t *m)
         line(false, t, "* mark %llu %s key=%s", (unsigned long long)(t / 1000), o[ev], key);
 }
 
-/* approach_dir de 0 à 2, comme `* mark` : mark.c n'en tient pas d'autre (decode). */
-void bsk_journal_restore(const bsk_mark_t *m, int32_t x, int32_t via)
+/* approach_dir de 0 à 2, comme `* mark` : mark.c n'en tient pas d'autre (decode), restore.c non plus (restore_init). */
+void bsk_journal_restore(const bsk_mark_t *m, bool last, int32_t x, int32_t via)
 {
     static const char *const DIR[] = {"unknown", "inc", "dec"};
     uint64_t t = now_us();
     if (via < 0)
-        line(false, t, "* restore %llu mark=%ld dir=%s x=%ld path=direct", (unsigned long long)(t / 1000), (long)m->position,
-             DIR[m->approach_dir], (long)x);
+        transition(t, "* restore %llu %s=%ld dir=%s x=%ld path=direct", (unsigned long long)(t / 1000),
+                   last ? "pos" : "mark", (long)m->position, DIR[m->approach_dir], (long)x);
     else
-        line(false, t, "* restore %llu mark=%ld dir=%s x=%ld path=overshoot via=%ld", (unsigned long long)(t / 1000),
-             (long)m->position, DIR[m->approach_dir], (long)x, (long)via);
+        transition(t, "* restore %llu %s=%ld dir=%s x=%ld path=overshoot via=%ld", (unsigned long long)(t / 1000),
+                   last ? "pos" : "mark", (long)m->position, DIR[m->approach_dir], (long)x, (long)via);
 }
 
-void bsk_journal_restore_skip(const char *why, const bsk_mark_t *m)
+void bsk_journal_restore_skip(const char *why, bool last, const bsk_mark_t *m)
 {
     uint64_t t = now_us();
-    if (m) line(false, t, "* restore %llu skip=%s mark=%ld", (unsigned long long)(t / 1000), why, (long)m->position);
-    else line(false, t, "* restore %llu skip=%s", (unsigned long long)(t / 1000), why);
+    if (m) transition(t, "* restore %llu skip=%s %s=%ld", (unsigned long long)(t / 1000), why, last ? "pos" : "mark",
+                      (long)m->position);
+    else transition(t, "* restore %llu skip=%s", (unsigned long long)(t / 1000), why);
 }
 
 void bsk_journal_restore_end(const char *why)
 {
     uint64_t t = now_us();
-    line(false, t, "* restore %llu end=%s", (unsigned long long)(t / 1000), why);
+    transition(t, "* restore %llu end=%s", (unsigned long long)(t / 1000), why);
 }
 
 /* 106 caractères au plus, tous les champs à leur plus long. Hors du plafond (voir l'en-tête). */
@@ -578,7 +639,8 @@ const char *bsk_motion_name(uint8_t state)
 const char *bsk_err_token(bsk_err_t e)
 {
     static const char *const n[] = {"ok",       "timeout",     "framing",  "rejected",  "bus",  "stall",   "limit",
-                                    "home_failed", "identity", "forbidden", "busy", "lost", "aborted", "nocap"};
-    _Static_assert(sizeof n / sizeof n[0] == E_NOCAP + 1, "un jeton par erreur");
+                                    "home_failed", "identity", "forbidden", "busy", "lost", "aborted", "nocap", "store",
+                                    "desync"};
+    _Static_assert(sizeof n / sizeof n[0] == E_DESYNC + 1, "un jeton par erreur");
     return n[e];
 }

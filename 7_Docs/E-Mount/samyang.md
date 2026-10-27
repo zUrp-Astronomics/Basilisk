@@ -1,73 +1,15 @@
 # Samyang E-mount lenses — what the body sees
 
-**Date** : 2026-10-07
-**Dernière révision** : 2026-10-10
-**Statut** : actif — third interoperability document of `7_Docs/E-Mount/` (ticket #521); only the Samyang AF 135 F1.8 FE has been on the bench: every fact on the eleven other models is static analysis
-**Référencé par** : `7_Docs/E-Mount/protocol.md` (§ 0, § 4.1, § 6.1, § 6.2, § 7.1, § 7.4, § 7.4.2, § 7.8, § 7.13, § 7.15, § 7.18, § 7.20, § 10, § 13), `7_Docs/E-Mount/README.md`, `traces.md`, `provenance.md`, the comments of `4_Firmware/components/` and `4_Firmware/include/`, `7_Docs/PROTOCOL.md` § 3.1, `CLAUDE.md` § Interdits (ticket #558); the fake AF 135 and the tests of `4_Firmware/sim/` (ticket #563)
-**Dérivé de** : `7_Docs/E-Mount/protocol.md`; the captures of the Samyang AF 135 (`4_Firmware/traces/`, and the bench captures published as `7_Docs/E-Mount/traces/`); the code of this repository (`4_Firmware/components/session/`, `4_Firmware/components/bench_core/bench_core.c`, `4_Firmware/sim/lens135.c`, `4_Firmware/sim/sources135.c`, `5_App/tool_station/`, `7_Docs/PROTOCOL.md`); the project's own static analyses of twelve Samyang lens firmwares, which are not published
 
 ## 0. What this document is
 
-**Scope.** What a Sony E-mount body sees of a Samyang lens, beyond what `protocol.md` says for every
-maker: the twelve models the project has read (§ 1), the session automaton of the AF 135 as the
-body sees it (§ 2), homing (§ 3), focus moves, their acknowledgements and bounds (§ 4), the ring and
-the barrel switches, and what the lens reads of the body (§ 5), the service channel `0x40` (§ 6),
-the writes to the lens's non-volatile memory, model by model and path by path (§ 7), how each model
-departs from the AF 135 and from `protocol.md` (§ 8), and what our board does with a Samyang (§ 9).
-With this file and `protocol.md`, one should be able to write the Samyang part of a body-side
-driver, and a fake Samyang that answers with the decoded fields given here.
+This is the Samyang supplement to [the common protocol](protocol.md). It covers model identity, the AF 135 session, motion, controls and the bounded service subset used by Basilisk. Offsets start after the message type; sizes include it. Multi-byte fields are little-endian unless stated otherwise.
 
-**`protocol.md` first.** The frame, the classes, the message sizes, the stream layouts, the
-encodings and the common meaning of each message are in `protocol.md` and are not repeated. This
-document uses its conventions: offsets counted after the type byte, sizes with the type byte, B→L
-and L→B, little-endian 16-bit fields (`protocol.md` § 0). It stops at the mount, as `protocol.md`
-does: the inside of a lens appears only where it decides what the body sees.
+The direct bench evidence concerns **AF 135 firmware 1.05**. Static analysis concerns **1.06** and eleven other images listed in § 1. A disagreement between those versions remains a disagreement; a capture is evidence for the device that produced it. Code references establish the board or simulator's behavior, not an independent measurement of the lens.
 
-**One Samyang has been on the bench.** The Samyang AF 135 F1.8 FE, firmware 1.05, against earlier
-firmwares of this board (`4_Firmware/traces/`) and against its firmware 1.0 (`traces/samyang.txt`).
-The bench captures cited as `` `traces/<file>` line <n> `` are relative to `7_Docs/E-Mount/` and are
-published by the `traces.md` ticket (`protocol.md` § 0). The firmware the project decompiled for the
-135 is version 1.06: where a capture of the 1.05 and the 1.06 analysis disagree, the capture wins,
-and the disagreement is written (§ 3.2). The eleven other models have never been connected.
+Paragraphs or tables labelled **static analysis, not observed** retain that status throughout the section. Captures are cited by original filename and line. See [provenance](provenance.md) for the source matrix and publication boundary. Internal calibration algorithms, memory maps and factory write procedures are omitted; decoded interface fields and their limitations remain.
 
-**Order of authority** (decision of the project owner, 2026-10-07):
-
-1. **what a trace shows**: for the AF 135 only;
-2. **what the code of this repository does**: the board's code, which drives the AF 135 on the
-   bench (`4_Firmware/components/`), and the fake AF 135 of the simulation (`4_Firmware/sim/lens135.c`,
-   whose byte templates are copied from the traces, `4_Firmware/sim/sources135.c`, `g_src135`). This
-   code was written from our analyses and from the traces; where it is contested, this document says
-   so and does not correct it (§ 9.3, and `protocol.md` § 11);
-3. **our static analyses**, marked **static analysis, not observed**. For the eleven models other
-   than the AF 135 this is the only source; their sections say so at their head.
-
-**Proof.** Every statement carries one of: a capture line, `` `4_Firmware/traces/<file>` line <n> ``
-or `` `traces/<file>` line <n> ``; a file of this repository with its function or constant; a public
-URL; or the words *static analysis, not observed*. Where a paragraph or a table is entirely static,
-its heading says so once.
-
-**What is not published.** The firmwares and their decompilations stay private. A Samyang answers
-some requests with constant blocks of its flash or with values computed from calibration tables (a
-distance per focus position, an aperture per ring step, the constant byte of the `'M'` reply, the
-blocks of `0x3B`). **Their raw bytes are not published.** What is published: the decoded fields
-(meaning, offset, and the value where it has a meaning of its own: an identifier, a flag, a size, a
-version, a bound in motor steps, the name in clear), the sizes of the replies, and the masks
-described field by field. Bytes we have not decoded are declared **not published (extracted from
-firmware, meaning unknown)**. The bytes the AF 135 sent in **our captures** are not concerned: they
-are our observations of the wire, and they are cited where they are.
-
-**Three cautions on the material** (static analysis, not observed):
-
-- the analyses of six models (AF 135, V-AF 24, AF 35-150, AF 16, AF 14 on PIC32 and on STM32) were
-  made partly by delegated readers whose citations were not all reread; the AF 135 and the AF 14 on
-  STM32 were then read as complete automatons (§ 2, § 8.1);
-- the analyses of the six newer models (AF 24 in two hardware revisions, AF 75, AF 85 II, AF 35 P,
-  AF 14-24) enumerate every writer of non-volatile memory and trace their callers; the limit of that
-  proof is in § 7.3;
-- the firmware images do not contain the boot loaders: what a lens does once it has jumped to its
-  boot loader is unknown on all twelve.
-
----
+The numerical section IDs are retained for references from firmware comments, notably § 6.3 and § 7.2. Those sections now state the public service contract and persistent-effect conclusions rather than a factory command inventory.
 
 ## 1. The twelve models
 
@@ -208,162 +150,70 @@ the simplifications S1 to S15 in its header).
 
 ### 2.1 Three machines, and no guard
 
-- **No message is guarded by a phase.** Every type the lens has a size for is served in every state:
-  an init message while it streams, a `0x1D` while it does not. The AF 135 never refuses a message and
-  never sends a `0x02` (`protocol.md` § 7.2); nor does the 14 A (§ 8.1). The capture of a lens left
-  powered shows an init served while it was streaming: 29 `0x05` were received during that init
-  (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 8-41).
-- **The link** carries the only real changes of state: handshake at power-up, normal, 1.5 Mbaud
-  switch, shutdown, sleep, wake-up handshake (§ 2.2).
-- **The stream** is a switch that decides whether the lens *sends* its `0x05` and `0x06`; it decides
-  nothing about what it accepts. Only the `0x0A` (§ 2.3) and the sleep that follows a `0x16` write
-  it. It is off at power-up.
-- **The processing** (homing, focus orders, iris) runs on events the body gives: VD edges, `0x03`,
-  `0x04` (§ 2.4).
-- **At power-up** every session variable is zero: stream off, no homing done (positions not
-  referenced until a `0x10` has run), no focus order, no acknowledgement pending, 750 000 baud,
-  service mode off.
+**Static analysis of AF 135 firmware 1.06, not observed unless a capture is cited.**
+
+The AF 135 does not impose the Tamron init/stream admission rules: supported init messages can be served while streaming. A capture contains 29 `0x05` messages during init (`4_Firmware/traces/sy135-2026-09-20-full.txt`, lines 8–41). Do not take acceptance of an init request as proof that the lens is no longer streaming.
+
+After power-up, the link starts at 750 000 baud, streaming and service mode are off, and focus is not referenced until homing. Link negotiation, stream selection and ongoing motion are separate conditions: switching the stream does not reset the entire lens. Their observable effects are described below.
 
 ### 2.2 The link
 
-- **Handshake.** `protocol.md` § 2, steps 1 to 5. The AF 135 runs its loop, and so starts the
-  handshake, about 20 ms after power-up. **Before step 3 the AF 135 cannot receive
-  anything**: its UART is opened there. The 14 A opens its UART before the handshake (§ 8.1).
-- **A lens left powered never shakes hands again**: the body's handshake gets no `LENS_CS`, and the
-  `0x01` is answered all the same (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 7-9;
-  `4_Firmware/traces/sy135-2026-09-20-reboots-0x10-stall.txt` line 108). Nothing brings a powered lens
-  back to the handshake but the sleep that follows a `0x16`.
-- **`0x0C`**: `0C 01` at once, then a second short CS handshake, then 1.5 Mbaud **until the power is
-  cut**, a wake-up from sleep included (`protocol.md` § 5).
-- **`0x16`**: the handler does not answer itself. A shutdown task takes the iris to a rest position,
-  waits at least 128 ms then for both motors to stop, **with no deadline** (a 1.5 s error branch exists
-  and cannot run), answers `16 00`, and 16 ms later goes to sleep: stream off, buffers emptied, UART
-  closed. It then waits for one of its input lines to be low, waits 50 ms without reading it again,
-  and requires it still low; the peripherals are reset, **not the RAM**, and the lens waits for the
-  wake-up handshake, at the speed it had. Which mount contact that input line is, is not established.
-  No write to non-volatile memory is part of these steps (§ 7.2). `protocol.md` § 7.15 lines
-  1082-1086 point here.
-- **Throughout**, the dispatcher keeps running: a `0x0C` or a `0x16` received during another
-  transition rewrites the link state.
+**Static analysis, not observed, except the cited captures.**
+
+Use the handshake in `protocol.md` § 2. AF 135 receive becomes available during that handshake; the 14 A differs (§ 8.1). A lens left powered may answer `0x01` without repeating the handshake (`4_Firmware/traces/sy135-2026-09-20-full.txt`, lines 7–9; `sy135-2026-09-20-reboots-0x10-stall.txt`, line 108).
+
+`0x0C` requests a speed switch followed by a short CS handshake. The selected 1.5 Mbaud rate persists through sleep until power is removed. Basilisk does not issue this command.
+
+`0x16` requests shutdown and can wait indefinitely for motion to stop before `16 00`. Sleep is not a cold reset; a subsequent wake-up does not establish the default speed or clear service mode. The wake input's mapping to a mount contact is not established. Basilisk refuses `0x16` because its persistent effects differ across models (§ 7.2).
+
+Do not overlap link transitions: acceptance of another request is not proof that a previous transition finished.
 
 ### 2.3 The `0x0A`: layout, motors, and the stream switch
 
-A task serves it in two steps:
+**Static analysis, not observed, except the cited captures.**
 
-1. outside slots 1 and 2 of the frame (§ 2.4): if focus or iris moves, **the `0x1D` order in progress
-   is cancelled without acknowledgement** and both motors are asked to stop;
-2. once the transmitter is free and the motors stopped, **200 ms at most**: the stream is switched
-   off, the layout of the `0x05` and `0x06` is **recomputed from the masks at every `0x0A`**, the
-   reply — **the request, echoed** — leaves in class 2, and the stream is switched back on if any of
-   the 16 mask bytes is non-zero; with all masks zero it stays off and pending `0x05`/`0x06` are
-   forgotten.
+`0x0A` can stop both motors, cancel an active `0x1D` without its acknowledgement, suspend the status stream and recompute its layout. The reply echoes the request. Nonzero masks enable the selected stream blocks; all-zero masks leave the stream off. This is not the Tamron phase toggle.
 
-- On the wire: the echo 6 ms after the request (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines
-  38-39); 97-byte `0x05` and 40-byte `0x06` for the masks `FF 7F … 3F`
-  (`4_Firmware/traces/sy135-2026-09-20-dump05.txt` lines 5 and 11). Before any `0x0A` the `0x05` is
-  109 bytes (static analysis, not observed).
-- **A `0x0A` during a homing stops the reference movement in progress**; the homing step that waited
-  for it goes on as if it had finished. What that does to the reference is not established.
-- **A second `0x0A` during the first restarts step 1.**
-- **Consequence for a body**: a `0x0A` mid-session stops the focus, drops the acknowledgement of the
-  current `0x1D` and suspends the stream; it does not toggle anything as on a Tamron
-  (`tamron.md` § 2.4). Our board sends it once per session, and once more only as the soft reset of a
-  silent `0x01` (`init.c`, comment of `idempotent()` and of `INIT0A`).
+The AF 135 capture shows a reply 6 ms after the request (`4_Firmware/traces/sy135-2026-09-20-full.txt`, lines 38–39). The requested masks `FF 7F … 3F` produce a 97-byte `0x05` and 40-byte `0x06` (`sy135-2026-09-20-dump05.txt`, lines 5 and 11). The 109-byte layout before a first `0x0A` is a static finding, not an observed alternative in this capture corpus.
 
-`protocol.md` § 7.10 lines 1022-1024 and § 13 line 1361 ("`0x0A` stopping the motors") point here.
+During homing, `0x0A` may interrupt reference motion without establishing a valid reference. Repeating it while a previous `0x0A` is pending restarts its processing. Treat it as a state-changing command, not an idempotent query. Basilisk uses it once in normal init and as the explicitly defined soft-reset attempt after a silent `0x01` (`init.c`, `INIT0A`).
 
 ### 2.4 What paces the lens: VD, slots, and the `0x03`/`0x04` pair
 
-- **VD.** A falling edge of VD, in interrupt: starts the movements that are ready (focus and iris
-  movements start only here, with one exception below); restarts the slot timer at slot 0; in stream,
-  adds one to the stream sequence. **The lens does not measure the VD period.**
-- **Slots.** The slot timer cuts the frame into eight slots, then stops until the next VD. Its period
-  is set by the `0x0D` (below): an eighth of a frame at the declared rate, 2083 µs at 60 Hz.
-  - slot 0: a `0x03` received since the last slot 0 makes a `0x05` due;
-  - slot 1: a `0x04` received makes a `0x06` due;
-  - slot 3: iris processing, **when the stream is off**;
-  - slot 4: frame processing (focus homing, focus orders, focus planner), **when the stream is off**.
-- **The pair.** Each `0x03` received triggers the iris processing, in every state; each `0x04`
-  received triggers the frame processing, in every state.
-- **The stream is a reply**: **one `0x05` per `0x03` received and one `0x06` per `0x04` received**,
-  sent at the next slot 0 or 1, and only while the stream is on. No `0x03`, no `0x05`; no VD, no slot,
-  hence no `0x05`/`0x06` at all. A `0x03`/`0x04` that arrives after slots 0 and 1 of a frame waits for
-  the next VD. `protocol.md` § 6.2 line 501 and § 13 line 1361 ("stream cadenced by the pair") point
-  here.
+**Static analysis, not observed.**
 
-| Situation | Iris, iris homing | Focus homing, focus orders | Movements |
-|---|---|---|---|
-| stream off, VD present | every frame (slot 3) | every frame (slot 4) | start at the next VD |
-| stream off, no VD | at each `0x03` only | at each `0x04` only | **never** (one exception below) |
-| stream on, `0x03` and `0x04` every frame | at the `0x03` | at the `0x04` | start at the next VD |
-| stream on, no `0x03`/`0x04` | **stopped** | **stopped** | one already started runs to its end; nothing new |
+The body must supply VD and the `0x03`/`0x04` pair. While streaming, one `0x03` permits a `0x05`, and one `0x04` permits a `0x06`; transmission is scheduled relative to VD. Missing a scheduling window can defer a response to the next frame. Without VD, a body cannot rely on receiving either stream.
 
-- **The exception**: step 4 of the iris homing starts its motor directly, without VD; it is reached
-  by the iris processing, so by a `0x03` even without VD. `protocol.md` § 1.3 says "without VD it
-  never starts": true of every other movement.
-- **A movement started runs to its target without further VD.**
-- **The `0x0D`** (offset 0, bits 0-1): 0 = 60 Hz, 1 = 50 Hz, 2 = 48 Hz, 3 = 60 Hz; there is no 30 Hz.
-  It sets the slot period, and the period the lens uses to time its steps and to forecast its
-  position. A real VD at another rate than the one declared is not detected: the step rate does not
-  change, only the frames do. Before any `0x0D` the slots have the 60 Hz period. `protocol.md` § 7.13
-  line 1052 and § 13 line 1361 point here.
-- **A 120-VD cap on focus movements.** While bit 1 of the last `0x04`'s offset 3 is set (and it is
-  taken as set before any `0x04`), a focus movement is cut after 121 VD, about 2 s at 60 Hz; while it
-  is clear, an overshoot check runs at each VD instead. `protocol.md` § 7.4 line 620 ("read when a
-  movement is stopped") points here.
+While streaming, aperture processing needs `0x03` and focus/homing processing needs `0x04`. With streaming off, VD also advances the corresponding processing. An already-started movement can run to its target after the body stops supplying VD. Therefore stopping the clock is not a focus-stop command. One iris homing movement can start without VD; a blanket statement that no motor can move without it is false.
+
+`0x0D` offset 0 bits 0–1 select 60, 50, 48 and 60 Hz respectively. The lens does not establish the actual VD rate from these bits: supply a clock consistent with the declared rate. At 60 Hz the response slots are spaced approximately 2083 µs.
+
+Bit 1 of `0x04` offset 3 affects the motion stopping policy: when set, a movement is capped at approximately 121 VD periods. This is a body-visible timing dependency, not a general guarantee that every focus operation terminates within two seconds. The relevant fields are in `protocol.md` § 7.4.
 
 ### 2.5 Replies, and the transmit lock
 
-- **There is no reply state.** Each reply leaves through one sender, from its handler or later from a
-  task. Its class is that of its first message's entry in the lens's emission table; a class 2 or 3
-  frame leaves with sequence 0 and resets the stream sequence to 0 (`protocol.md` § 3.4).
-- **The lock.** A class 2 or 3 frame waiting to leave locks the sender until its last byte is out,
-  and that frame first waits for BODY_CS low. **While it is locked, any other class 2 or 3 reply is
-  dropped, silently and for good.** Hence:
-  - **two init messages in one frame get one reply**, the first's;
-  - a `0x40` reply or notification pending makes a standard reply be dropped, and the reverse (§ 6.1);
-  - **a BODY_CS that never goes low stops every reply**, and the `0x05`/`0x06` too, which are built
-    only while the sender is free;
-  - class 1 frames (`0x05`, `0x06`, the immediate `1E 00`) do not set the lock but are refused while it
-    is set.
-- **Deferred replies**:
+**Static analysis, not observed, except the cited timings.**
 
-  | Reply | When | On the wire |
-  |---|---|---|
-  | `0A …` | motors stopped, 200 ms at most (§ 2.3) | 6 ms (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 38-39) |
-  | `10 00` | end of the homing (§ 3) | 527 to 757 ms for `10 1F` (§ 3.1) |
-  | `16 00` | 128 ms at least, then both motors stopped, no deadline (§ 2.2) | not captured |
-  | `34 …` | at the next frame processing, as soon as the move is launched (§ 4.6) | not captured |
-  | `40 …` | 50 ms at least after the command; for some commands, after the motor stops (§ 6.1) | 61-62 ms (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 42-43, 178-187); 141 ms for an `'F'` `FB` that moved the focus (lines 387-393) |
-  | `17 xx yy` | an internal failure (§ 3.2, § 4.4) | not captured |
+Serialize requests. Overlapping class 2/3 replies can be dropped permanently; two init messages packed into one frame may yield only the first reply. Standard replies and `0x40` replies or notifications compete for transmission. Keeping BODY_CS high can withhold both replies and streams.
 
-- **Immediate replies** (all other types): 5 to 6 ms, 9 ms for the 202 bytes of the `0x08`
-  (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 8-25). These delays are those of a lens in
-  service mode (§ 6.5) against an earlier firmware of this board; they say nothing of a Sony body.
-- **Transmission**: the lens waits for BODY_CS low, raises LENS_CS, sends, waits more than 200 µs,
-  lowers LENS_CS (`protocol.md` § 1.4).
+| Reply | Body-visible completion condition |
+|---|---|
+| `0A …` | Motors stopped and layout selected; static analysis indicates a bounded wait of up to 200 ms |
+| `10 00` | End of a homing path, not proof of a successful reference (§ 3) |
+| `16 00` | Shutdown motion finished, potentially unbounded |
+| `34 …` | Move launched, not necessarily arrived |
+| `40 …` | Deferred; some operations wait for motion |
+| `17 xx yy` | Error notification; absence is not proof of success |
+
+In the older service-mode captures, ordinary replies took 5–6 ms, the 202-byte `0x08` took 9 ms, and service replies took at least 61–62 ms. A service focus move took 141 ms (`4_Firmware/traces/sy135-2026-09-20-full.txt`, lines 8–25, 42–43, 178–187, 387–393). These are observations from that session, not universal deadlines. The sender waits for BODY_CS low and signals transmission with LENS_CS (`protocol.md` § 1.4).
 
 ### 2.6 Bad frames and unknown types
 
-- **A bad frame is dropped in silence**: start byte missing, length under 9, length high byte not
-  zero (over 255 bytes), class 0 or over 3, wrong checksum, last byte not `55`; bytes received while
-  BODY_CS is low are never stored. No reply, no state changed. The parser resynchronises only after
-  the announced length (`protocol.md` § 3.2).
-- **The body cannot tell** a lost frame from a reply dropped by the lock, a lens at 1.5 Mbaud or a
-  blocked lens: in every case nothing comes back.
-- **A type the lens has no size for blocks it until its power is cut.** The dispatcher adds the size
-  of each message and stops when the count equals the frame length; a size of zero leaves it looping
-  on the same byte, the background loop never runs again, and only the interrupts go on. The
-  watchdog is disabled by the PIC32 configuration word. Types with no size: `0x02`, `0x05`, `0x06`,
-  `0x0E`, `0x0F`, `0x11`-`0x13`, `0x17`, `0x18`, `0x1A`, `0x20`, `0x21`, `0x23`-`0x25`, `0x27`,
-  `0x29`-`0x2D`, `0x30`-`0x33`, `0x36`-`0x39`, `0x41`-`0x4A`. **`0x02`, `0x05` and `0x06` are types
-  the lens sends itself.** Type 0 and types at or above `0x4D` read a size outside the table, from
-  bytes that change while the lens runs: a block, or a size and a copy address that are arbitrary;
-  which, is not established. `0x4B` and `0x4C` have a size (3 and 8) and no handler: consumed and
-  ignored. No trace shows a block.
-- **A message of the wrong size** shifts the paving; a shift that crosses the end of the frame
-  without landing on it makes the dispatcher read bytes beyond the frame until a size of zero.
-- `protocol.md` § 4 lines 316-318 and § 7.20 point here.
+**Static analysis, not observed.**
+
+Malformed frames can be ignored without a refusal reply. An unsupported message type or incorrectly sized sequence of sub-messages can leave the studied firmware unresponsive until power is removed. No project trace demonstrates that failure, and the public reference does not provide a recipe for provoking it.
+
+Use the exact sizes and directions in `protocol.md` § 4; do not infer that a lens can accept a type merely because it transmits it. Unknown types are not extension points. Silence cannot distinguish a lost frame, an overlapping reply, a different link speed or an unresponsive lens. The controller needs its own bounded timeout and recovery policy.
 
 ### 2.7 No session timeout; a lens left powered
 
@@ -396,52 +246,15 @@ A task serves it in two steps:
 
 ### 3.1 The AF 135
 
-Static analysis, not observed, except where a capture is cited.
+**Static analysis of firmware 1.06, not observed except the captures below.**
 
-- **Request offset 0**: bit 2 = iris then focus; bit 3 alone = focus only (`protocol.md` § 7.14).
-  **Neither bit: nothing happens, and no reply ever comes.** The handler first reconfigures the motor
-  driver and busy-waits about 10 ms.
-- **No guard: a `0x10` during a homing restarts it from its first step.**
-- **The steps**: the iris looks for its optical fork, then settles on its rest aperture; then, if
-  bit 3 is set, the focus reads its fork, goes towards a stop, looks for the edge, recomputes its
-  position and settles; then `10 00`. Each step has a deadline of 1.5 s, 3 s for the iris search.
-  The first iris move, the iris rest move and the focus part each start after a pause of about 5 ms.
-- **The focus part**, in order (the fake AF 135 plays it so: `4_Firmware/sim/lens135.c`,
-  `homing_focus()`). On the lower side of its fork the lens declares its position to be the lower
-  soft limit (§ 4.3), moves up 1600 steps and reads the fork again; on the upper side it declares the
-  upper soft limit and moves down towards the lower one until the fork changes, then reads it again.
-  From the upper side it declares the upper limit once more and moves towards 14623 until the edge
-  of the fork; it stops there, gives its position the value the edge must read, and settles (§ 3.2).
-  The edge search runs at the speed of an `'F'` `FB` move, the other moves at twice that speed. The
-  value given to the edge is computed from a correction held in the lens's non-volatile memory; on
-  the wire the edge reads 14834 and 14837 after a homing (`'H'` notifications,
-  `4_Firmware/traces/sy135-2026-09-20-astro-normal.txt` lines 323 and 403), and the published
-  position jumps to the limits during one (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 30-34).
-- **The homing progresses on the pacing of § 2.4**: with the stream on, the iris steps need `0x03`
-  and the focus steps `0x04`; with the stream off, VD edges. **A lens that streams and receives no
-  pair stalls its homing.** Three captured sessions fit it: a lens left powered, a `10 1F` sent
-  during an init, no `10 00` in 8 s, one `0x05` received by the board in all that time
-  (`4_Firmware/traces/sy135-2026-09-20-reboots-0x10-stall.txt` lines 128-132, 259-263, 500-504); what
-  the board sent meanwhile (pairs, VD edges) is not in the captures. This is why our board
-  starts its `0x03`/`0x04` loop with the `0x10` for a recognised Samyang, and only after the `0x0A`
-  reply otherwise (`init.c`, `init_reply()`, case `S_Q0D`, `loop_start()`). `protocol.md` § 6.1 line
-  472 and § 13 line 1361 ("homing in stream") point here.
-- **Durations on the wire**, `10 1F` to `10 00`: 675 ms (`4_Firmware/traces/sy135-2026-09-20-full.txt`
-  lines 27-35), 527 and 663 ms (`4_Firmware/traces/sy135-2026-09-20-reboots-0x10-stall.txt`, the
-  sessions at lines 332-333 and 854-855), 757 ms (`4_Firmware/traces/sy135-2026-09-20-astro-normal.txt`
-  lines 241-251). During it the published position sweeps the whole range, down to 13723 and up to
-  30988 (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 30-34).
-- **The reply is always `10 00`**, success or not. A focus homing that fails twice still answers
-  `10 00`, then tries a `0x17` (lost if the `10 00` has not left yet, § 2.5). A first iris failure
-  hands over to the focus homing; a second one, even in a later homing, sends `0x17` and **abandons
-  the homing without any `10 00`**; the retry flags survive from one homing to the next until the
-  power is cut. Each abandon also blocks the lens's background loop for 300 ms.
-- **The service channel also homes** (§ 6.3): `'F'` `0x32` homes the focus only, and its end sends a
-  standard `10 00` although no `0x10` was sent (`4_Firmware/traces/sy135-2026-09-20-reboots-0x10-stall.txt`
-  lines 547-549, 329 ms).
-- **During a homing every message is served**, the `0x0A` included, which stops the reference
-  movement (§ 2.3). A `0x1D` received in stream during a homing is served at the next `0x04` like any
-  order; how it interacts with the reference is not established.
+`0x10` requests homing; offset 0 bit 2 selects the iris path and bit 3 the focus path. Neither bit set can produce no action and no reply. Reissuing `0x10` during homing restarts it. During streaming, keep sending `0x03`/`0x04` and VD so the homing can progress (§ 2.4).
+
+Observed `10 1F` → `10 00` delays are 527, 663, 675 and 757 ms (`4_Firmware/traces/sy135-2026-09-20-full.txt`, lines 27–35; `sy135-2026-09-20-reboots-0x10-stall.txt`, lines 332–333 and 854–855; `sy135-2026-09-20-astro-normal.txt`, lines 241–251). Other captured sessions have no completion in eight seconds after a restart with the lens still powered; those logs do not record all VD/pair activity, so they support but do not alone prove the pacing explanation.
+
+Published positions can sweep or jump while the lens references itself. `10 00` is not an unconditional success indication: static analysis finds failure paths that still send it and other failures that produce no completion. Check subsequent position, limits and motion state; do not copy the lens's internal homing procedure into a body controller.
+
+A service focus homing can also end with `10 00` without a preceding `0x10` (`sy135-2026-09-20-reboots-0x10-stall.txt`, lines 547–549). Avoid unrelated commands during referencing; `0x0A` can interrupt it (§ 2.3).
 
 ### 3.2 Where the focus rests after a homing
 
@@ -462,29 +275,11 @@ Static analysis, not observed, except where a capture is cited.
 
 ### 3.3 The other models
 
-Static analysis, not observed.
+**Static analysis, not observed.**
 
-- **Same steps on the six newer models**: re-referencing on the fork, a rest move, wait for the motor,
-  then the `0x10` reply: in normal mode **the rest move happens before the reply**. Rest position,
-  cold / after `'M'`: 24 and 24 A 16384 / 16048 (the infinity origin of their table); 75 16384 /
-  unchanged; 85 II 16384 / 15486; 35 P 15734 (its infinity) in both; 14-24 the infinity of the current
-  focal length, unless a distance is memorised, with an overshoot of +500 then an approach by +300
-  after `'M'`. After a sleep (`0x16`), the six newer models go back to their position before the sleep.
-- **What moves after the reply** (normal mode): nothing on the 24, 24 A, 75 and 35 P; the 85 II sends
-  its `0x10` **without stopping the motor** when a homing step misses its deadline a second time;
-  **the 14-24 moves on its own after the reply**: its zoom follower sees a changed zoom index, and
-  drives the focus to the memorised distance at the current focal length. Outside a homing, the focus
-  of the 14-24 and of the 35-150 follows the zoom ring continuously.
-- **In preset mode** (button held during the iris homing, 24 and 24 A only): return to the EEPROM
-  mark at the 61st VD after the reply, after any homing (`0x10` or `'F'` `0x32`), about 1.02 s at
-  60 Hz plus the travel.
-- The 14-24 also sends its `0x10` reply, identical, when its focus initialisation fails twice: success
-  and failure are indistinguishable.
-- **The 14 A** (§ 8.1): an iris-only homing (`0x10` with bit 2 and not bit 3, or `'I'` `0x32`) **never
-  answers**; a first focus failure retries the focus only. **The 14 P**: a focus homing that fails twice
-  sends `0x17` without `10 00`.
+Homing behavior is model-specific. Some studied models make their rest move before the reply; the AF 85 II has a failure path that replies while motion continues, and the 14–24 can move after the reply to maintain its zoom-dependent focus distance. Waking from sleep can restore a previous position instead of the cold-start rest position.
 
----
+Do not encode per-model rest constants or regard `0x10` completion as proof of mechanical stillness. Read the published state and limits. The detailed AF 135 sequence and its timings do not transfer to the other eleven images.
 
 ## 4. Focus moves
 
@@ -515,8 +310,8 @@ The flags of offset 3 have the layout of `protocol.md` § 7.4.2, on all twelve m
 | bit 2 | 0 = absolute, 1 = relative: target = position + the signed value ± half the oscillation amplitude, then clamped. On the STM32 models the base of a relative move is **the last target commanded**, not the encoder |
 | bit 3 | wait: while offset 11 of the last `0x03` is not zero the order stays pending, frame after frame; the test is reached only when offset 10 of the `0x03` is 1 or a cycle is running. Same on the STM32 models. With our board's `0x03` (offset 11 always 0) the order would start at once (`drive.c`; `protocol.md` § 7.3) |
 | bits 4-5 and offset 2 | oscillation amplitude, **in relative mode only**: scale 0 = the raw byte, 2 = scaled by the depth constant, divided by 16 or by 32 depending on the body profile (§ 5.3). The 85 II and the V-AF 24 have three scales chosen by the aperture |
-| bits 6-7 | side of arrival, **absolute only**: the target is shifted by +20 steps for `01` and by −23 for `10` on the AF 135; `00` compensates 3 to 5 steps depending on the previous direction. Constants −5 / −8 on the 14 P family, ±10 / −20 / −30 on the 14 A; not read on the 35 P and the 35-150 |
-| speed | **not in the `0x1D`**: offset 12 of the `0x03`, bits 3-4, with the body profile (§ 5.3). AF 135: speed `0x180` with bit 3 clear (our board never sets it), `0x100` with the a7r4 signature of § 5.3. STM32 models: offset 12 bits 3-4 = `01` → slow, otherwise fast |
+| bits 6-7 | Side-of-arrival behavior is model-dependent; do not copy internal compensation constants into the body. Captured AF 135 target/readback differences are listed below. |
+| speed | Not carried by `0x1D`; affected by `0x03` fields and the body profile. No physical speed is established by an internal numeric constant. |
 
 - **A `0x34` changes the speed profile of later `0x1D`** (§ 4.6).
 - **On the wire** the AF 135 moves on `1D lo hi 00 00`, the order our board sends (`drive.c`,
@@ -525,30 +320,15 @@ The flags of offset 3 have the layout of `protocol.md` § 7.4.2, on all twelve m
   (`traces/firmware2_ring.txt` lines 42-44). The compensation of bits 6-7 = `00` is the probable
   cause; it is not modelled by the fake (`lens135.c`, header, S6).
 
-`protocol.md` § 7.4.2 lines 661-662 point here.
+`protocol.md` § 7.4.2 point here.
 
 ### 4.3 Bounds and limits
 
-- **Internal soft limits** of the AF 135: 13723 and 30988 at start-up. Every target of a `0x1D`,
-  `0x1F`, `0x3C` or `0x34` is **clamped silently** into them. On the wire the homing reaches both
-  (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 30 and 32), and a focus moved by the ring stops
-  at 13723 with `0x06` offset 0 = `52`, bit 6 set (`traces/195_samyang.txt` line 186).
-- **Published limits**: `0x06` offsets 7-10 read **13873 and 30738** (`4_Firmware/traces/sy135-2026-09-20-dump05.txt`
-  line 11; `traces/samyang.txt` line 38): 150 steps inside the internal lower limit and 250 inside the
-  upper one. The lens accepts targets between the published and the internal limits. Our board
-  narrows the published limits by 5 more steps and never targets beyond (`lens_rx.c`, `LIMIT_MARGIN`).
-- **The limiter narrows the soft limits** to 17884-30988 or 13723-21386, depending on two inputs of
-  the lens (a limiter selector), when the service mode is off, **bit 1 of the last `0x04`'s offset 3
-  is set**, and two other internal conditions hold; otherwise they stay at their start-up values.
-  `protocol.md` § 7.4 lines 619-620 point here.
-- **Two other thresholds**, 14623 and 29988, drive bits 4 and 3 of `0x06` offset 0 (§ 4.8).
-- **No hard stop zone**: an order towards the inside always runs.
-- **Already at a limit, target beyond it**: the two analyses disagree. The AF 135 analysis says no
-  movement, then `1D 00`; the 14 A analysis reads the same code on both models and finds that the
-  "target = position" exit compares the target *before* clamping, so that a movement towards the
-  current position is launched, with an effect not read. Not settled.
-- **The other models**: § 6.3 gives the bounds of `'F'` `FB`; the 14 A and 14 P have fixed soft limits,
-  3810-4909, with no limiter; the 35-150 and 14-24 bounds move with the focal length.
+**Static analysis, not observed except the captures below.**
+
+Targets can be silently clamped to internal limits. The useful body interface is the **published** lower/upper pair at `0x06` offsets 7–10. On the bench AF 135 those fields read 13873 and 30738 (`4_Firmware/traces/sy135-2026-09-20-dump05.txt`, line 11; `traces/samyang.txt`, line 38). Homing and ring motion can reach further: 13723 and 30988 appear in the captures (`sy135-2026-09-20-full.txt`, lines 30 and 32; `traces/195_samyang.txt`, line 186).
+
+These are observations of one lens, not constants to encode for a model. A limiter can further restrict motion under model-specific conditions. Read both position and status; neither a target being accepted nor an acknowledgement proves arrival. Basilisk narrows the published range by another five steps (`lens_rx.c`, `LIMIT_MARGIN`).
 
 ### 4.4 Acknowledgements and eviction
 
@@ -595,7 +375,7 @@ order of the calls).
 - **It sets a mode that changes the speed profile of every later `0x1D`.** The mode is cleared only
   when a `0x05` is built while bit 4 of the last `0x03`'s offset 12 is clear; with the stream off no
   `0x05` is built and the mode stays. Our board never sends `0x34`, and its `0x03` carries bit 4 for
-  30 pairs after each `0x1D` (`drive.c`, `AF_FRAMES`). `protocol.md` § 7.18 lines 1173-1174 point here.
+  30 pairs after each `0x1D` (`drive.c`, `AF_FRAMES`). `protocol.md` § 7.18 point here.
 
 ### 4.7 `0x1F`, `0x3C`, `0x22`, `0x2E`
 
@@ -669,30 +449,13 @@ Static analysis, not observed, except where a capture is cited.
 
 ### 5.2 The Custom switch of the AF 135, and its forcing
 
-Static analysis of the AF 135, not observed, except where a capture, the code or `7_Docs/PROTOCOL.md` is
-cited.
+**Static analysis of AF 135 firmware 1.06, not observed.**
 
-- **Configuration.** One byte of the lens's flash: M1 in the high nibble, M2 in the low one; each
-  position 0 = APERTURE, 1 = AF, 2 = MF. **Factory value `0x10`: M1 = AF, M2 = APERTURE**; the lens
-  takes this default when both of its flash pages are invalid. It is read from flash into RAM at
-  power-up only (`7_Docs/PROTOCOL.md` § 3.1; `4_Firmware/sim/lens135.c`, header, S13 and S14).
-- **Forcing.** At every pass of its loop, once a `0x08` has been received and the homing has put the
-  lens in its normal mode, the lens **forces M1 = AF and M2 = MF in RAM** if the body profile asks for
-  it (§ 5.3): the body's `0x01` carried `FF 01 00` at offsets 6-8 and no `0x08` with bit 2 cleared
-  that flag since, or the `0x08` had neither bit 1 nor bit 2. **The forcing writes RAM only, and the
-  flash value is not read again**: a later `0x08` with bit 2 lifts the forcing but does not bring the
-  configuration back; only a power cut does.
-- **Consequence on a re-init without power cut**: our `0x01` re-arms the flag, the lens forces the RAM
-  between the `0x01` and the `0x08`, and the configuration is lost until the lens is unplugged
-  (`7_Docs/PROTOCOL.md` § 3.1, "Après une reprise sans coupure").
-- **Offset 62 bit 1** of the `0x05`: set in a position configured MF, clear in AF and APERTURE, clear
-  outside the normal mode; forced to 1 in the astro mode (§ 5.6); also set at start-up if the button is
-  held. **AF and APERTURE cannot be told apart by offset 62**: only by what moves when the ring turns,
-  offset 60 in AF, offsets 17-19 in APERTURE (§ 5.4, § 5.5).
-- **The only persistent writer is the service channel**: `'P'` `0x38` (§ 6.3). A debug console of the
-  lens changes the two positions in RAM only (§ 7.2).
-- **Same forcing** on the V-AF 24, the AF 16, the 24 and the 75; the 14 A and 14 P have no switch; the
-  35-150 was not compared (static analysis, not observed).
+The persistent switch byte has M1 in the high nibble and M2 in the low nibble, each 0 = APERTURE, 1 = AF, 2 = MF. The documented factory assignment is M1 = AF, M2 = APERTURE. Reading and writing it is the restricted `P/FA` and `P/38` interface (§ 6.3).
+
+A body profile can force a temporary assignment independently of the stored byte. `0x08` offset 0 bit 2 affects that behavior; enabling it later does not necessarily restore the stored configuration until power is cycled. Basilisk sends `08 06` followed by seven zero bytes to recognised Samyang lenses (§ 5.3).
+
+`0x05` offset 62 bit 1 reports the effective MF condition; it does not distinguish AF from APERTURE. The analysis associates the upper switch position with M1; that physical assignment still needs checking. Verify the actual ring behavior after a Custom change and power-cycle, rather than treating a stored byte alone as proof of the physical result.
 
 ### 5.3 What the lens reads of the body: "old" and "modern" bodies
 
@@ -709,7 +472,7 @@ Static analysis of the AF 135, not observed; the codes are those the AF 135 comp
 - The `0x01` of the NEX-7 and of our board carries `FF 01 00` at offsets 6-8 (`protocol.md` § 6.1).
 - The a6000 and `FF 01 00` flags are cleared only by a `0x08` with bit 2 of offset 0; the a7r4 flag is
   never cleared. **They survive from one session to the next while the lens stays powered.**
-- `protocol.md` § 7.1 lines 551-552 point here.
+- `protocol.md` § 7.1 point here.
 
 **The `0x08` request.**
 
@@ -746,101 +509,37 @@ Static analysis of the AF 135, not observed; the codes are those the AF 135 comp
   and the 35-150 without a7r4) and the same role for bit 2 of the `0x08`; the V-AF 24 identifies the
   body by offsets 4-5 and reads, in the a6000 profile, a setting of its EEPROM.
 
-`protocol.md` § 7.8 lines 961-963 and § 13 line 1361 ("`0x08` flags") point here.
+`protocol.md` § 7.8 and § 13 ("`0x08` flags") point here.
 
 ### 5.4 The focus ring: focus by wire
 
-Static analysis of the AF 135, not observed, except where a capture or the code is cited.
+**Static analysis, not observed unless a capture is cited.**
 
-- **Bit 1 of `0x04` offset 3 clear means "focus by wire"**: at each `0x04` received, with that bit
-  clear, the lens moves its focus by the ring, whatever the switch position and whatever the body
-  profile. With the bit set, the ring does not move the focus. Before any `0x04` the bit is taken as
-  set. The NEX-7 sends `83` (set) to an AF lens (`protocol.md` § 7.4).
-- **Conditions**: the stream on; not during a return to the mark; an arming sequence first: from the
-  first `0x04` without the bit, the lens needs about 16 ms and two more `0x04` before the focus moves;
-  the ring edges turned meanwhile are lost.
-- **The step**: per `0x04`, the edge count is bounded to ±15, multiplied by a sensitivity of 4, 6 or 8
-  (a setting of the flash), scaled, capped at 100 steps, and the target clamped to the soft limits.
-- **Offset 60 of the `0x05`**:
+Ring behavior depends on the lens's effective switch assignment and body profile. In MF it can command focus internally, while reporting motion and position to the body. In aperture mode it can publish a requested aperture (§ 5.5). A controller must distinguish lens-driven motion from its own in-flight request.
 
-  | Position (configuration) | `0x04` bit 1 | Lens | Offset 60 |
-  |---|---|---|---|
-  | AF | set | nothing from the ring | ±1 if an edge since the last `0x04`, cleared at each `0x04` |
-  | AF | clear | focus by wire | the direction of the movement launched, `01`, `FF` or `00` |
-  | APERTURE | set | native aperture (§ 5.5) | 0 |
-  | APERTURE | clear | focus by wire; the native aperture stops | the direction of the movement launched |
-  | MF | clear | focus by wire | the direction of the movement launched |
-  | MF | set | nothing | 0 |
+For AF 135, `0x05` offset 60 carries ring-motion information; offsets 17–19 carry the native aperture request and validity. These are different signals, not interchangeable measurements of ring position. Their common decoding is in `protocol.md` § 7.5. The body must continue supplying its normal stream/timing inputs for the session.
 
-- On the wire: with `0x04` offset 3 = `81` the AF 135 moves its focus by the ring, offset 60 = `01`,
-  offset 22 = `C0`, the `0x06` position climbing (`traces/195_samyang.txt` lines 3 and 124-146).
-- **Our board** sets the bit when it gives the ring the aperture role, and clears it in the focus role;
-  the role follows offset 62 bit 1 (`4_Firmware/components/session/ring.c`, `role()`, `BODY_AF_OFF`,
-  `BODY_AF_BIT`, `SW_MF`). In APERTURE and AF the board is in the aperture role, so the AF 135 does
-  focus by wire only in a position configured MF.
+The lens's acceleration curves, ring-edge accumulation, calibration scaling and internal motor target computation are not required to consume those fields and are omitted. Their effects are already represented by reported state; do not reproduce the proprietary ring-control algorithm in the body.
 
 ### 5.5 The native aperture (APERTURE position)
 
-Static analysis of the AF 135, not observed, except where the code or `7_Docs/PROTOCOL.md` is cited.
+**Static analysis, not observed except where the original captures are cited by `protocol.md` § 7.5.**
 
-- **Conditions**: normal mode (after the homing), the current position configured APERTURE, and bit 1
-  of `0x04` offset 3 set.
-- **What the lens does**: it counts every ring edge into an index of 133 steps, f/1.8 to f/22 in
-  thirds of a stop, **six edges per third**; the first step comes after 3 edges and is worth 3 indexes;
-  it publishes the aperture at `0x05` offsets 17-18, with offset 19 bit 0 set (`protocol.md` § 7.5).
-  On entering the mode the index starts from the body's target (`0x03` offsets 3-4), after a
-  resynchronisation that waits for three sequence numbers without `0x03` offset 12 bit 4 and two equal
-  targets; edges turned meanwhile are lost.
-- **It does not move the iris**, except in the a6000 profile: the body must copy the published
-  aperture into its `0x03`. Our board does (`ring.c`, path of the published aperture;
-  `7_Docs/PROTOCOL.md` § 2, "La bague").
-- **Leaving the mode** (bit cleared, or switch moved): the publication is cleared at the second
-  `0x03`.
-- **The 23 aperture codes**, each held by six indexes (index 132 is the 23rd): the widest aperture of
-  the `0x08` reply (offsets 0-1, `0x11BF` on the wire), then the exact thirds of `protocol.md` § 8.1
-  from f/2 (`0x1200`) to the narrowest aperture of the `0x08` (offsets 2-3, `0x1900`), each third
-  `256 / 3` truncated (`4_Firmware/traces/sy135-2026-09-20-full.txt` line 15; the fake computes them,
-  `4_Firmware/sim/lens135.c`, `ap_table()`). The table read in the firmware is not published.
-- **The AF 16 publishes both** (static analysis, not observed): it sets `0x05` offset 60 to ±1 at
-  every ring edge, in every switch configuration (the guard meant to reserve this to the AF position
-  always lets the write through), and in the APERTURE position, with bit 1 of `0x04` offset 3 set, it
-  publishes at offsets 17-19 an aperture drawn from the same edge count. One ring edge then shows at
-  both places. The AF 135 never has both at once (offset 60 is 0 while it publishes, § 5.4), nor does
-  any other Samyang read. Our board, which takes ring pulses from offset 60 and the published aperture
-  from offsets 17-19, mutes the pulses for 1 s after a change of the published aperture
-  (`4_Firmware/components/session/ring.c`, `aperture()`, `PUB_US`).
+With the ring assigned to APERTURE, the AF 135 publishes its requested aperture at `0x05` offsets 17–18, valid when offset 19 bit 0 is set. The actual reported aperture remains at offsets 0–3. A controller must not confuse a ring request with the aperture already achieved.
+
+The effective behavior depends on the body profile (§ 5.3). Ring pulses can coexist with a published aperture change; applying both as independent changes would double-count one gesture. Basilisk prioritises a changed published aperture and mutes pulse interpretation for one second (`ring.c`, `aperture()`, `PUB_US`). This is a board policy, not a lens-protocol requirement.
+
+The proprietary index-to-aperture table and its internal update algorithm are omitted. The transmitted aperture code and its validity bit are sufficient to consume this interface.
 
 ### 5.6 The button and the astro (preset) mode
 
-Static analysis, not observed, except where a capture or the code is cited.
+**Static analysis, not observed except the cited capture.**
 
-- **AF 135**: the button held during step 2 of the iris homing puts the lens in its astro mode until
-  a homing without the button or a wake-up from sleep. In that mode offset 62 bit 1 is forced to 1 and
-  offset 64 bit 3 to 0, so the body sees no button press; the switch forcing and the native aperture do
-  not apply. A short press drives the focus to the lens's mark; **holding the button more than 120 VD
-  counts stores the current position and the direction of the last manual movement in the lens's
-  EEPROM** (§ 7.2). The recall arrives on the mark always from the side of the last manual movement
-  before the memorisation, overshooting by 200 steps only when the direct path would arrive from the
-  other side; an invalid direction (a blank mark) arrives decreasing. A blank mark reads as 14623.
-  After every homing in this mode the lens returns to its mark on its own (§ 3.2).
-- **On the wire**: `'W'` 01 for a press with offset 64 bit 3 at 0, then the recall
-  (`4_Firmware/traces/sy135-2026-09-20-astro-normal.txt` lines 296-303).
-- **The body cannot enter or leave this mode**, cannot read the mark, and no reply says whether a
-  lens has the mode or is in it, on any of the twelve. It only chooses when the homing happens.
-- **V-AF 24**: the preset is entered by the switch configuration, recomputed continuously; no return
-  after the homing; offset 62 not forced; the overshoot is 50 steps; a button held about 9.7 s
-  recalibrates infinity and restarts the lens (§ 7.2).
-- **35-150**: two presets, entered by configuration; the mark is a distance stored in flash; no
-  `'W'`, no autonomous return: its preset is invisible to the body.
-- **24 and 24 A**: preset by the button held at the iris homing, as the AF 135; return at the 61st VD
-  after the homing reply; overshoot ±50 steps; the long press writes the mark and a longer one erases
-  the EEPROM (§ 7.2).
-- **AF 16, 14 A, 14 P, 75, 85 II, 35 P**: no preset machine; the 14-24 has one, never reached.
-- **Our board's own mark** (`4_Firmware/components/session/mark.c`, `restore.c`) is kept in the
-  board's memory, not the lens's; its recall copies the AF 135's recipe with an overshoot of 200 steps
-  on the AF 135 (`restore.c`, `X_135`) and 1 % of the published range on other lenses.
+The lens's native preset feature is separate from Basilisk's mark. On the AF 135, a native preset mode can hide the barrel button from the usual `0x05` button bit, recall a position autonomously and store that position persistently in the lens. A capture shows a `'W'` button notification while the usual bit is clear, followed by a recall (`4_Firmware/traces/sy135-2026-09-20-astro-normal.txt`, lines 296–303).
 
----
+No standard reply identified by this project reports the native mode or its stored mark. Native preset and calibration gestures differ across models and may write persistent data without any mount command. Their factory gestures, erase sequences and implementation algorithms are outside this interface reference; use the lens manufacturer's operating instructions for native features.
+
+Basilisk's own mark is stored in the board's NVS and has independent controls. Its approach policy is defined by the board code (`mark.c`, `restore.c`), not by an assumption that a native preset was read or changed.
 
 ## 6. The service channel `0x40`
 
@@ -848,93 +547,35 @@ Static analysis, not observed, except where a capture or the code is cited.
 
 ### 6.1 The message
 
-- **Request**, 19 bytes, class 2: `40 <main> <sub> <16 data bytes>`; the main command is an ASCII
-  letter. **Reply**, 19 bytes: `40 <main> <sub> <16 data bytes>` (`4_Firmware/traces/sy135-2026-09-20-full.txt`
-  lines 42-43). The AF 135 does not list `0x40` in its `0x01` bitmap (`protocol.md` § 7.1) and serves it
-  all the same; the 14 A and 14 P list it (§ 1.3).
-- **Served in every state**: in or out of stream, during a homing or a `0x0A`, and during the link
-  transitions while the UART is open. It never blocks the dispatcher. It does not change the stream or
-  the link state.
-- **Deferred reply**: 50 ms at least after the command, and, for the commands that move a motor,
-  after it stops. Some commands have **no `0x40` reply**: `'F'` `0x32`, `EB` and `20`, `'I'` `0x32`, and
-  `'X'` outside `34`-`37` on the 135, 35-150 and 14 A; they end with the standard `10 00` of the homing
-  they start (§ 3.1).
-- **The transmit lock is shared** (§ 2.5): a pending `0x40` reply or notification drops a standard
-  class 2 reply, and the reverse. **The notifications share the reply buffer of the channel**: a `'W'`
-  emitted while a reply is pending replaces its content, and a `'W'` lost to the lock is never sent
-  again.
-- **Any other main command** gets an echo with zero data (AF 135, 35-150).
-- `protocol.md` § 4.1 line 361, § 7.20 line 1204 and § 0 line 19 point here.
+The service request and reply are both 19 bytes including the type: `40 <main> <sub> <16 data bytes>`, class 2. The main command is an ASCII letter. This envelope is observed in `4_Firmware/traces/sy135-2026-09-20-full.txt`, lines 42–43.
+
+An absent capability bit does not by itself mean this channel is absent: the AF 135 serves it without advertising `0x40`. The envelope does not make subcommands portable between models. Replies can be delayed, lost through overlap with standard replies, or be replaced by unsolicited notifications (static analysis, not observed). Serialize the operations and establish success from the operation's actual readback.
 
 ### 6.2 Main commands, model by model
 
-| Model | Main commands |
-|---|---|
-| AF 135, 14 A, 14 P | F I J K M P V X |
-| V-AF 24 | F I J K M P V X, and `a` |
-| AF 35-150 | F I J K M P S V X Z |
-| AF 16 | F I J K M P S V X Z (its `Z` sets the AF, not a zoom) |
-| 24, 24 A, 75, 85 II, 35 P, 14-24 | at least F I J K M P V X (the commands read for § 7.2); the 35 P and 14-24 also `Z` |
+**Static analysis, not observed.**
+
+The command families and their persistent effects vary by model and firmware. This reference publishes the bounded subset used by Basilisk (§ 6.3 and § 6.6), not a factory adjustment command catalogue. Recognising a Samyang family is insufficient to enable an AF 135 configuration operation.
 
 ### 6.3 The commands
 
-- **`'V'` `00`**: the version, data bytes 0-1 (`01 05` on the bench lens,
-  `4_Firmware/traces/sy135-2026-09-20-full.txt` lines 43-44; § 1.1 for the others). **On the 14-24,
-  `'V'` also sets the service mode** (§ 6.5).
-- **`'F'` `FA`**: the focus position, u16 little-endian in data bytes 0-1
-  (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 178-188: 14623). Its reply is deferred like
-  `FB`'s, with the position read when the command was received.
-- **`'F'` `FB`**: a focus target, u16 little-endian in data bytes 0-1, **clamped** to the bounds below
-  (never refused); the reply, data zero, is deferred until the motor is still
-  (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 387-394). With the "MTF" flag of `'P'` `FA`
-  set (below), the AF 135 also sends an immediate `0x40` echo of the `FB`. The 85 II has no deadline: a motor
-  that never settles gets no reply. After an `'F'` `0x20` the 75 uses another speed once, and the
-  35-150 swallows the first `FB` within bounds.
+**Scope:** static analysis, not observed unless the capture is cited. These are protocol facts for the studied models, not permission to probe arbitrary lenses.
 
-  | Model | `FB` bounds, motor steps |
-  |---|---|
-  | AF 135 | 13723-30988 |
-  | V-AF 24 | 15848-18216 |
-  | AF 16 | 15748-19063 |
-  | 14 A, 14 P | 3810-4909 |
-  | 24, 24 A | 15848-18216 |
-  | 75 | 15459-18931 |
-  | 85 II | 15336-19109 |
-  | 35 P | 15434-19040 |
-  | 35-150, 14-24 | move with the focal length: infinity − 300 to closest + 300 (14-24: ±600 in service mode) |
+| Main / subcommand | Interface meaning | Evidence and limit |
+|---|---|---|
+| `'V'` / `00` | Version in data bytes 0–1, major then minor | AF 135 returns `01 05` in `4_Firmware/traces/sy135-2026-09-20-full.txt`, lines 43–44. On the 14–24, analysis also finds a service-mode side effect. |
+| `'F'` / `FA` | Focus position, little-endian u16 in data bytes 0–1 | Same capture, lines 178–188. A deferred sample is not necessarily a fresh arrival measurement. |
+| `'F'` / `FB` | Focus target, little-endian u16 in data bytes 0–1 | Same capture, lines 387–394. Targets are clamped by the lens. Use reported limits, never constants extracted from an image. |
+| `'F'` / `32` | Focus-only homing | Completes with standard `10 00`, not necessarily a `0x40` reply (§ 3.1). |
+| `'M'` / `00`, `31` | Service-mode/notification controls | Historical captures use service mode; it is not needed by the current session (§ 6.5–6.6). |
+| `'P'` / `FA` | AF 135 switch configuration in reply data byte 7 | Static analysis of 1.06; the request also has transient side effects. Power-cycle after use. |
+| `'P'` / `38` | AF 135 persistent M1/M2 assignment | Static analysis of 1.06. Data byte 0 is `0x30 + ((M1 << 4) | M2)`, each assignment 0 = AP, 1 = AF, 2 = MF. |
 
-  Increasing steps mean closer focus on the 24, 24 A, 85 II and 35 P; on the 75, not established.
-- **`'F'` `0x32`**: a focus-only homing, no `0x40` reply, ended by `10 00` (§ 3.1).
-- **`'F'` `0x32`, `EB`, `20`, `'I'` `0x32`, `'I'` `0x20`, and `'X'` outside `34`-`37`** restart the homing
-  and reset the slot period to the 60 Hz value of the `0x0D` (AF 135, 14 A).
-- **`'M'`**: sets the service mode (§ 6.5); its reply carries one constant byte per model, different on
-  each, meaning unknown: not published, except the AF 135's, `26` on the wire
-  (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 52-56). On the 135, V-AF 24, 16 and 85 II it
-  arms the `'W'` notifications; `'M'` `0x31` stops the `'H'`/`'L'` notifications (§ 6.4), except on the
-  14 P, which ignores the sub-command.
-- **`'I'`**, whatever its sub-command, also sets the service mode (AF 135, 35-150, 14 A).
-- **`'P'` `FA`**: the AF 135 returns its switch configuration at data byte 7 (`7_Docs/PROTOCOL.md`
-  § 3.1); data bytes 0-6 are other settings of the same flash page, zero from the factory, changed
-  only by `'P'` `0x11` and `0x31`-`0x37` (§ 7.2). It also declares a factory bench: with data byte `0x53` it sets an "MTF" flag that changes
-  the reply of `'F'` `FB`, any other byte takes a "JIG" branch; without an `'S'` it makes the AF 135
-  emit a spurious `'W'` 05/06. Effects in RAM only, forgotten at power-up.
-- **`'P'` `0x38`**: writes the switch configuration of the AF 135 (§ 7.2): data byte 0 =
-  `0x30 + (M1 << 4 | M2)`, each 0, 1 or 2; the lens also applies it in RAM at once; another value
-  writes nothing. The reply is an echo with zero data, whether the value was stored or not
-  (`7_Docs/PROTOCOL.md` § 3.1).
-- **`'P'` `FA` and `'P'` `0x38` read data byte 0 only** on the AF 135; the 15 others are ignored. Our
-  board's whitelist therefore examines only that byte (`4_Firmware/components/bench_core/bench_core.c`,
-  `svc135_allowed()`).
-- **`'X'` `0x34`**: data `01` writes the update flag and restarts the lens into its boot loader; data
-  `00` writes the flag back to zero **in flash**; another value does nothing (§ 7.2). This is the
-  service channel's `'X'`, sub-command `0x34` — not the standard message `0x34` of § 4.6, which moves
-  the focus and writes nothing.
-- **`'Z'`** (35-150, 14-24, 35 P, 16): `'Z'` `0x57` reads the switches of the 35-150, but other `'Z'`
-  sub-commands write its flash.
-- **`'a'`** (V-AF 24, sub-commands `0x31`-`0x45`): writes nothing in the lens; it makes an accessory
-  store a calibration point over a serial link.
-- **The other sub-commands** of `'F'`, `'I'`, `'J'`, `'K'`, `'P'` are adjustment commands; those that
-  write are in § 7.2. None is described further here.
+For the AF 135 `P/FA` and `P/38`, only request data byte 0 is read by the studied handlers. Basilisk rejects `P/FA` with that byte equal to `0x53` and accepts `P/38` only for the nine valid assignment pairs. The other fifteen bytes are not a channel for additional settings. A `P/38` echo with zero data does **not** establish that storage succeeded; read the setting back and verify after power-cycling.
+
+This `P/38` contract does not transfer to other Samyang lenses. The board recognises the AF 135 by LensType2 8 and does not check the lens firmware version. The public tool is `5_App/tool_station/tool_station.py`; the USB interface is `7_Docs/PROTOCOL.md` § 3.1.
+
+Every unlisted service subcommand remains outside the allowed interface. Factory calibration, firmware update and reset operations can write persistent memory. The standard message `0x34` for focus is distinct from a service subcommand numbered `0x34`.
 
 ### 6.4 Notifications
 
@@ -951,28 +592,16 @@ Static analysis, not observed, except where a capture or the code is cited.
 
 ### 6.5 The service mode
 
-Set by `'M'` (all twelve), by `'I'` (AF 135, 35-150, 14 A), by `'X'` outside `34`-`37` (AF 135, 14 A) and by
-`'V'` (14-24); **never cleared but by a power cut**; it survives the sleep. Its effects, model by model:
+**Static analysis, not observed, except the historical capture context.**
 
-| Model | End-of-homing rest position | Other effects |
-|---|---|---|
-| AF 135 | 14623 instead of 16384 (§ 3.2) | the limiter is ignored; **a short wait before every byte the lens sends**, standard frames included (duration not established); LED; iris profiles |
-| V-AF 24 | 16048 instead of 16384 | not read |
-| 24, 24 A | 16048 instead of 16384 | forks left on; iris profiles; a wait before each byte sent |
-| 75 | unchanged | forks; iris profiles; a wait before each byte sent |
-| 85 II | 15486 instead of 16384 | forks; iris profiles; a wait before each byte sent |
-| 35 P | unchanged | forks; iris; LEDs forced again at each `0x04` |
-| 14-24 | the infinity of the current focal length, with overshoot | **`'F'` `FB` bounds ±600 instead of ±300**; zoom calibration and filters; iris profiles |
-| 14 A, 14 P | not read | no wait before each byte |
+Service mode can change homing rest positions, limiter behavior, iris behavior and byte timing. Sleep is not enough to clear it; remove lens power. The effects differ between models, including entry through commands that look like reads.
 
-All the captures of `4_Firmware/traces/` were taken with the service mode set: the board firmware of
-the time sent `'M'` at every boot (`4_Firmware/traces/sy135-2026-09-20-full.txt` lines 52-56).
+The four `4_Firmware/traces/` captures were made with service mode enabled by the old board firmware (`sy135-2026-09-20-full.txt`, lines 52–56). Their timings and rest positions therefore do not establish ordinary-mode behavior. The current session does not send `'M'` at startup. No per-model calibration or internal motor-profile constants are required to use that distinction.
 
 ### 6.6 What our board sends on `0x40`
 
 - `bench_core` lets through, **to a recognised Samyang only**: `'V'` `00`, `'F'` `FA`, `FB`, `0x32`,
-  `'M'` `00` and `0x31` (`4_Firmware/components/bench_core/bench_core.c`, `svc_allowed()`), none of
-  which writes non-volatile memory on any of the twelve (§ 7.2); and, **to the AF 135 only**, `'P'`
+  `'M'` `00` and `0x31` (`4_Firmware/components/bench_core/bench_core.c`, `svc_allowed()`), with no persistent write identified in the reviewed paths (§ 7.2); and, **to the AF 135 only**, `'P'`
   `0x38` and `'P'` `FA` (§ 7.4).
 - The session sends only `'P'` `FA` and `'P'` `0x38`, through the lab command `CUSTOM`
   (`4_Firmware/components/session/cmd.c`, `CMD_LENS_CUSTOM`; `7_Docs/PROTOCOL.md` § 3.1). It sends no
@@ -984,85 +613,32 @@ the time sent `'M'` at every boot (`4_Firmware/traces/sy135-2026-09-20-full.txt`
 
 ### 7.1 The memories
 
-Static analysis, not observed.
+The studied lenses can persist configuration, native presets and factory calibration. Those effects can originate from mount commands, startup or the lens's own controls. A body-side transmit allowlist limits what the body requests; it cannot prohibit every internal write a lens may perform.
 
-- **Flash pages** of the microcontroller, a user page and, on most models, a backup page: all
-  twelve. The 24 A has no backup page; the 35-150 and 14-24 have a sub-command that erases both pages.
-- **An external I²C EEPROM**: AF 135 (the astro mark), V-AF 24 (the mark, an infinity correction, a
-  body setting), 24 and 24 A (the mark). None on the 75, 85 II, 35 P, 14-24.
-- **The application never erases its own code**; reprogramming happens in a boot loader that is not
-  in the images.
+The storage layout, flash pages, recovery copies and factory-console implementation are not part of this public interface reference.
 
 ### 7.2 The map: model × path
 
-Static analysis, not observed. Each cell is either **recorded** — what is written, and the limit of
-the proof — or **unknown**: no source read covers it. Columns:
+**Static analysis, not observed.** This section retains the persistent-effect conclusions needed to review the board's allowlist; it does not publish the factory write catalogue.
 
-- **`0x40`**: the sub-commands of the service channel that write, as `<main>: <sub-commands>`, hex;
-  `'X'` `34` is the letter `'X'`, sub-command `0x34` (§ 6.3);
-- **`0x14`**, **`0x16`**: the standard messages;
-- **start-up**: writes at power-up with no message;
-- **gestures**: writes caused by the lens's own controls, with no message;
-- **serial consoles**: debug or factory consoles on a serial port of the lens.
+| Path | Finding and scope |
+|---|---|
+| Standard messages emitted by Basilisk | No direct persistent write identified in the reviewed ordinary paths. The V-AF 24 `0x09` accessory-state path remains an explicit uncertainty; see `bench_core.c`, `listed_size()` comment. |
+| Allowed legacy service subset `V/00`, `F/FA`, `F/FB`, `F/32`, `M/00`, `M/31` | No non-volatile write identified in the reviewed handlers across the twelve images. Transient service-mode effects still exist. This is analysis, not proof of universal absence. |
+| AF 135 `P/38` | Writes the M1/M2 configuration; deliberately allowed only for this model and the valid values of § 6.3. |
+| AF 135 `P/FA` | Reads the setting, with transient mode effects. The permitted request excludes the factory-bench selector. |
+| Other service operations | Adjustment, reset or update paths can write flash or EEPROM. Unknown/unlisted operations remain refused; no cross-model permission is inferred. |
+| Standard `0x14` / `0x15` | Update-related operations, outside the board's allowed set. |
+| Standard `0x16` | Shutdown is not uniformly free of writes: the V-AF 24 analysis reports a persistent accessory/body setting. Basilisk refuses it for every lens. |
+| Startup and barrel controls | Some models can persist defaults, recover settings or save native presets without a mount command. A blocked transmit command does not prevent these autonomous paths. |
 
-| Model | `0x40` | `0x14` | `0x16` | Start-up | Gestures | Serial consoles |
-|---|---|---|---|---|---|---|
-| AF 135 | F: EB DB CB BB AB 4B 20 21 22 23 · I: 23 · J: FB · K: FB · P: 11, 31-38 (38 = the switch configuration) · **X: 34, data `00` as `01`** | writes the update flag, waits 3 s, restarts into the boot loader if present | none in the steps read (iris to rest, wait for the motors, `16 00`, sleep) (1) | unknown (2) | **the EEPROM mark**, by the button held more than 120 VD in astro mode, and only by the button | unknown: a debug console changes the switch configuration in RAM only; no write established (3) |
-| V-AF 24 | F: EB AB 20 21 22 23 CB BB 4B · I: 23 · J: FB · K: FB · P: 11, 36, 37, 38 and every other value but FA · X: 34 · F: 20 also writes the EEPROM (infinity correction) | unknown | **writes the EEPROM** (two bytes) when the body has the a6000 profile (§ 5.3) (4) | unknown | the mark in EEPROM (preset); **a hold of about 9.7 s writes the infinity correction to the EEPROM, then restarts the lens** | unknown |
-| AF 35-150 | F: EB DB CB BB AB 4B 20-23 · I: 23 · J: FB · K: FB · P: 11, 36, 37 (erases both pages), 38, and a range of configuration entries · X: 34, `00` and `01` · Z: 32 34 36 38-3D 3F 40-46 59 | unknown | unknown | unknown | **the preset mark, a distance, in flash**; the long press erases nothing | unknown |
-| AF 16 | F: EB AB 20-23 CB BB 4B · I: 23 · J: FB · K: FB · P: 11, 31-38 · X: 34 · Z: 38 39 3C | unknown | unknown | unknown | none found: no preset machine (5) | unknown |
-| 14 A | F: EB DB CB BB AB 4B 20-23 · I: 23 · J: FB · K: FB · P: 11, 31-38 · X: 34, `00` as `01` | writes the update flag in flash, waits about 3.9 s, resets the microcontroller | none in the steps read (iris to rest, wait for the motors, `16 00`, sleep in the microcontroller's Stop mode) (1) | **at every start, if the update flag is set, it is reset and the flash page rewritten** | none: no button, no switch, no preset (5) | a debug console on a serial port separate from the mount; it moves iris and focus; no write reported; its link to the contacts is not established |
-| 14 P | F: EB DB CB BB AB 4B 20-23 · I: 23 · J: FB · K: FB · P: 11, and every other value but FA · X: 34 | unknown | unknown | unknown | none: no button, no switch, no preset (5) | unknown |
-| 24 | F: EB DB CB BB AB 4B 20-23 · I: 23 · J: FB · K: FB · P: 11, 31-37, 38 (a valid value) · X: 34, `00` and `01` | **update flag = 3 written to flash**, a wait of about 3000 ticks, a reset if a boot loader is present | **none**: sleep, no write, no reset | (6) | **in preset: held more than 120 VD writes the mark (position and direction) to the EEPROM; held 462 VD more erases the EEPROM** | consoles on separate serial ports write the flash and the EEPROM; link to the contacts not established |
-| 24 A | as the 24 | as the 24 | as the 24 | (6), no backup page | as the 24 | as the 24 |
-| 75 | F: EB DB CB BB AB 4B 20-23 · I: 23 · J: FB · K: FB · P: 11, 31-37, 38 · X: 34 | as the 24 | as the 24 | (6) | none | consoles write the flash; link not established |
-| 85 II | as the 75 | as the 24 | as the 24 | (6) | none | consoles write the flash; link not established; an over-long console line would overwrite the RAM copy of the flash data |
-| 35 P | F: EB CB BB AB 4B 20-23 · I: 23 · J: FB · K: FB · P: 11, 31-38 · X: 34 · Z: 38 39 3C | as the 24 | as the 24 | (6) | none | consoles write the flash; a console command resets the lens; link not established |
-| 14-24 | F: EB DB CB BB AB 4B 20-23 · I: 23 · J: FB · K: FB · P: 11, 31-38 (37 erases both pages) · X: 34 · Z: 32 34 36 38-3D 3F 40-46 59 | as the 24 | as the 24 | (6) | none: the preset path exists but the mode it needs is never set | consoles write the flash; a console command resets the lens; link not established |
-
-Notes:
-
-1. **AF 135 and 14 A `0x16`**: established by reading the handler and its shutdown task, not by a
-   census of the memory writers as for the six newer models. `protocol.md` § 7.20 line 1201 ("on one
-   Samyang model it also writes the lens's memory") is the V-AF 24 (note 4).
-2. **AF 135 start-up**: when both flash pages are invalid the lens takes the factory switch
-   configuration `0x10` (§ 5.2); whether it then writes it to flash is not established.
-3. **AF 135 console**: the console that changes the two switch positions in RAM is the lens's internal
-   serial link, not the mount; its other commands were not read.
-4. **V-AF 24**: the `0x16` write and the EEPROM part of `'F'` `20` come from a delegated reading, not
-   reread. The same model's `0x09` reloads an accessory flag read from its EEPROM, and an accessory
-   task resets that byte to zero when it was 1, a value only an accessory sets; whether that reset
-   writes the EEPROM is not stated (`4_Firmware/components/bench_core/bench_core.c`, comment of
-   `listed_size()`, which keeps the `0x09` because refusing it would break every init). On the six
-   newer models the `0x09` only answers.
-5. **AF 16, 14 A, 14 P gestures**: the analyses establish the absence of a preset machine, the only
-   gesture-to-memory path known on the other models; no other gesture path was searched.
-6. **Six newer models, start-up**, with no message: no valid page → the defaults are written; the main
-   page invalid → restored from the backup; the two pages different → the backup copied (except the
-   24 A); and once per start, if the update flag is not zero, it is reset and the page rewritten.
-   **Any configuration write is therefore followed by a second write at the next start.**
-
-- **On the six newer models no command of our board's `0x40` list** (`'V'` `00`, `'F'` `FA`/`FB`/`0x32`,
-  `'M'` `00`/`0x31`), whatever its 16 data bytes, delayed effects included, **and no standard message
-  our board sends** writes non-volatile memory; only `0x14` and `'X'` `0x34` lead to the update path
-  (§ 7.3 for the limit). On the six older models the same holds for the `0x40` list by the reading of
-  each handler (`bench_core.c`, comment of `svc_allowed()`).
-- **On the wire**, no write has been provoked or observed; the bench lens has received only the
-  `0x40` list above and, since `CUSTOM`, `'P'` `FA` and `'P'` `0x38`.
+The positive `P/38` exception and the negative default are the relevant public contract. Keeping the factory command list private does not turn unknown cases into harmless ones.
 
 ### 7.3 The limit of the proof
 
-Static analysis, not observed.
+The evidence covers the application images and the paths actually read. It is not a formal proof and does not cover bootloaders. Coverage varies: newer-model write paths were followed more broadly; several older-model conclusions rely on individual handler reads. Some accessory paths remain unresolved (§ 7.2).
 
-- **Six newer models**: a census on each image of the accesses to the flash-programming registers
-  (and to the I²C controller), of the direct call graph, and of address constants that could make an
-  indirect call; no writer is reached through a function pointer. Self-modifying code or a computed
-  jump table are not formally excluded; some interrupt routines were read only by scanning their calls
-  and writes.
-- **Six older models**: the `0x40` lists come from a reading of each handler, partly delegated and not
-  all reread; the AF 135's `'X'` `0x34` and its `'P'` `0x38` were reread.
-- **The boot loaders** are not in the images: what they do with an update flag of 1 or 3 is unknown.
-- **Cells marked unknown** were not covered by any analysis read; they are not "none".
+A static finding is tied to its listed firmware version. A successful board simulation only demonstrates the behavior encoded in that model. Neither extends the conclusion to an unexamined lens version.
 
 ### 7.4 Our defence
 
@@ -1084,7 +660,7 @@ Static analysis, not observed.
 - **Its client**: `5_App/tool_station/tool_station.py`, which reads the configuration, asks for a
   confirmation, writes, and reads back.
 - **What a body-side driver should refuse**, from the map: `0x14`, `0x15`, `0x16` (on the V-AF 24),
-  `'X'` `0x34` whatever its data, and every `'F'`, `'I'`, `'J'`, `'K'`, `'P'`, `'Z'` sub-command of § 7.2;
+  `'X'` `0x34` whatever its data, and every unlisted factory service operation;
   and, since unknown cells are not "none", every `0x40` sub-command not shown harmless on the model at
   hand.
 
@@ -1094,46 +670,22 @@ Static analysis, not observed.
 
 ### 8.1 From the AF 135
 
-Static analysis, not observed.
+**Static analysis, not observed.** Differences below are reasons to keep model/version scope, not additional compatibility claims.
 
-**The 14 A, a STM32 read as a complete automaton**, against the AF 135 and against its PIC32 twin,
-the 14 P:
-
-| Subject | AF 135 | 14 A | 14 P |
-|---|---|---|---|
-| UART at power-up | closed until handshake step 3 | **open before the handshake**: a message received with BODY_CS high is served during the handshake | as the AF 135 |
-| no phase, stream switch, `0x0A` echo, layout at every `0x0A`, one `0x05` per `0x03`, one `0x06` per `0x04` | — | the same | the same |
-| `0x0A` | stops the slot timer; 200 ms at most | **does not stop the slot timer**, resets the slot to 0; **100 ticks** at most, about 128 ms | stops it; 100 ticks, about 100 ms |
-| homing, first focus failure | the whole homing again, iris first | **the focus only** | as the AF 135 |
-| homing, second focus failure | `10 00` then `0x17` | `10 00` then `0x17` | **`0x17` only, no `10 00`** |
-| iris-only homing | answers `10 00` | **never answers** | answers |
-| sleep | waits for its input low, 50 ticks, low again | **no 50 ticks**; the microcontroller's Stop mode, woken by an edge on BODY_CS | as the AF 135 |
-| tick | about 1.003 ms | **about 1.285 ms**: the same counts last about 28 % longer (homing step about 1.93 s, `0x0A` about 128 ms) | about 1.003 ms |
-| type 0 | effect not established | consumes 8 bytes, no block | not read |
-| watchdog | disabled | no access by the code; the hardware option bytes are not in the image | disabled |
-| soft limits | 13723-30988, narrowed by the limiter | 3810-4909, fixed | the same as the 14 A |
-| wait per byte in service mode | yes | no | no |
-| `0x3B` table | 7 blocks | 6 blocks | not read |
-
-Everything else in § 2 to § 4 holds for the 14 A: the transmit lock, the deferred replies, the silent
-drop of bad frames, the block on an unknown type, the acknowledgements and their eviction, the
-`0x1D` fields, the `0x34`, the iris, the 1.5 Mbaud switch.
-
-**The other models** (their automaton has not been read; what follows was read on their handlers):
-
-| Model | Departs from the AF 135 |
+| Model or group | Difference relevant to a body |
 |---|---|
-| V-AF 24 | 215 of 300 functions identical, 44 very close; name changed by an anamorphic accessory; preset by configuration, no autonomous return; reads the body identity (`0x08` offsets 4-5); `0x16` writes its EEPROM in the a6000 profile; `'a'` command |
-| AF 35-150 | zoom: bounds and infinity move with the focal length (about 1 400 steps between 35 and 150 mm); **the focus moves on its own when the zoom ring turns**; no distance table (a model per zoom index); offset 62 bit 1 is a physical MF switch; two presets invisible to the body; `'Z'` commands |
-| AF 16 | `'W'` 02/03 only; no preset; `'Z'` sets the AF |
-| 24, 24 A | two hardware revisions of one lens, the same table and logic; preset by the button at the homing |
-| 75 | no button; the service mode does not change the rest position |
-| 85 II | `'W'` 01/02/03 like the AF 135; LensType2 9, absent from ExifTool; no deadline on `'F'` `FB`; on a second homing deadline the `0x10` leaves with the motor running |
-| 35 P | its debug banner names it a Sony lens, its `0x3F` a Samyang; no button, no switch |
-| 14-24 | zoom; **`'V'` sets the service mode**; the focus follows the zoom and moves on its own after the homing reply; homing success and failure indistinguishable |
+| AF 14, STM32 generation (14 A) | Receive is available earlier in the handshake; homing reply/error behavior differs, and timing from the AF 135 cannot be copied. |
+| AF 14, PIC32 generation (14 P) | Some failed homing paths send an error without `10 00`. |
+| V-AF 24 | The name can depend on an accessory; native presets and the body-dependent persistent effect of `0x16` differ. |
+| AF 35–150 | Zoom-dependent limits and focus; turning the zoom ring can move focus autonomously. The MF condition is tied to a physical switch. |
+| AF 16 | Barrel notifications and available preset features differ. |
+| AF 24 / 24 A | Different hardware/firmware generations; native preset behavior is not Basilisk's mark. |
+| AF 75 | No barrel button; service mode does not change the rest position in the studied image. |
+| AF 85 II | Service focus completion may have no deadline; a homing failure path can reply while the motor is still moving. |
+| AF 35 P | No physical button or switch in the studied configuration. |
+| AF 14–24 | A version query can enter service mode; focus can follow zoom and move after a homing reply. |
 
-`0x1D` fields: on the 14 A as on the AF 135 (§ 4.2); the target computation differs and was not
-detailed. Bits 4-5 and 6-7 were not read on the 35 P and the 35-150.
+Do not infer identical motor behavior from a matching wire format. Bits 4–7 of `0x1D` were not fully read on AF 35 P and AF 35–150. Per-model internal timing, calibration constants, firmware similarity counts and factory interfaces are omitted.
 
 ### 8.2 From `protocol.md`
 
@@ -1175,8 +727,8 @@ What the code of this repository does; it moves the AF 135 on the bench.
   `0x03` (§ 5.5); the button from offset 64 bit 3 (`mark.c`, `BTN_BIT`).
 - **The `0x40`**: only `CUSTOM`, to the AF 135 (§ 6.6).
 - **A re-init without a power cut** (loss of link, soft reset) loses the AF 135's switch configuration
-  until it is unplugged (§ 5.2); the board's rails are not cut by default (`session.c`,
-  `bsk_session_params_default()`, `cut_rails`).
+  until it is unplugged (§ 5.2); a recovery never cuts the board's rails, by decision of the human on
+  2026-10-23 (`session.c`, `on_due()`, `S_REC_WAIT`: the wait, then a new start).
 
 ### 9.2 The fake AF 135
 
@@ -1204,25 +756,17 @@ Reported, not corrected; the full list is `protocol.md` § 11.
 
 ## 10. What `protocol.md` points here for
 
-| `protocol.md` line | Subject | Here |
-|---|---|---|
-| 19 | what only one maker does | the whole document |
-| 361 | the `0x40` size, Samyang only | § 6.1 |
-| 472 | why the loop starts with the `0x10` | § 3.1 |
-| 501 | the stream paced by the `0x03`/`0x04` pair | § 2.4 |
-| 552 | the three bytes of the `0x01` the AF 135 reads | § 5.3 |
-| 620 | `0x04` offset 3 bit 1, the soft limits and the stop of a movement | § 4.3, § 2.4 |
-| 661 | the `0x1D` units refused and the constants of bits 6-7 | § 4.2 |
-| 963 | bits 1-2 of the body's `0x08` offset 0 | § 5.3 |
-| 1052 | the `0x0D` rates | § 2.4 |
-| 1086 | what else the `0x16` does | § 2.2, § 7.2 |
-| 1174 | the speed profile after a `0x34` | § 4.6 |
-| 1201 | the Samyang model whose `0x16` writes its memory | § 7.2 (V-AF 24) |
-| 1204 | the service channel | § 6 |
-| 1315 | what each maker does with each common message | § 2 to § 6 |
-| 1361 | the brand file's list: stream, homing in stream, `0x0A`, `0x08` flags, `0x0D`, `0x40`, writes, exceptions | § 2.4, § 3.1, § 2.3, § 5.3, § 2.4, § 6, § 7, § 7.4 |
+| Common-reference topic | Samyang section |
+|---|---|
+| Service envelope and bounded commands | § 6.1–6.3 |
+| Homing while already streaming | § 3.1 |
+| `0x0A` side effects | § 2.3 |
+| Stream pacing and frame-rate selection | § 2.4 |
+| `0x1D` units, arrival and acknowledgement | § 4.2–4.4 |
+| Body profiles and ring behavior | § 5.2–5.5 |
+| Persistent effects and allowlist scope | § 7 |
 
----
+References use sections rather than line numbers because editorial revisions move the prose. Capture citations still use their original line numbers.
 
 ## 11. What stays unknown
 

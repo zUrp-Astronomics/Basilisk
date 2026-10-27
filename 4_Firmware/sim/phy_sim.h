@@ -11,7 +11,10 @@
  *   - un octet dure byte_us du faux objectif (750 000 bauds, lens_sim_byte_us) ;
  *   - la réception est celle de la carte (rx_t de components/phy/phy_common.c) : chaque octet de l'objectif va au flux à
  *     son instant, une trame remonte dès son dernier octet, les octets écartés remontent en E_FRAMING (avant la trame
- *     qui les suit, ou 20 ms après le dernier octet reçu) ; LENS_CS n'est que publiée.
+ *     qui les suit, ou 20 ms après le dernier octet reçu) ; LENS_CS n'est que publiée ;
+ *   - la fenêtre d'écoute de la carte (bsk_phy.h, bsk_phy_lines) : un octet de l'objectif n'entre dans la réception, et
+ *     une E_BUS injectée (phy_sim_bus_error) ne remonte, que lignes pilotées ; les relâcher, ou la coupure de la
+ *     retombée de D2, vide la réception sans rien rapporter (rx_clear). LENS_CS est publiée dans tous les cas.
  *     Seule différence : la carte reçoit les octets par blocs de l'UART, ici un par un. */
 #ifndef PHY_SIM_H
 #define PHY_SIM_H
@@ -34,7 +37,8 @@ void     phy_sim_vd_edge(void);                    /* un front VD à l'instant c
  * la fin de la précédente émission injectée), un octet tous les byte_us du faux objectif, LENS_CS retombée
  * lens_cs_tail_us (du faux objectif) après le dernier. Pour une émission que le faux objectif ne fait pas (malformée,
  * trop longue, plus grande que le tampon) : à jouer faux objectif muet, les deux ne s'entrelacent pas. 8192 sorties en attente au plus
- * (octets et deux fronts par émission), le reste est ignoré. */
+ * (octets et deux fronts par émission), le reste est ignoré. Ses octets ne sont reçus que lignes pilotées (la fenêtre
+ * d'écoute) ; ses fronts de LENS_CS, toujours. */
 void     phy_sim_lens_raw(const uint8_t *b, size_t n);
 
 /* La même, émise comme le Sony FE 24-105 G : LENS_CS retombe avec l'octet n − late, et les `late`
@@ -48,7 +52,7 @@ void     phy_sim_lens_raw_late(const uint8_t *b, size_t n, size_t late);
  * components/phy/phy.c), injectées ici pour que la couche du dessus les rencontre en simulation.
  *   - phy_sim_bus_error : un E_BUS remonte à l'instant courant, et le tampon de réception est vidé, comme sur la
  *     carte (la suite du flux est reçue comme tout octet) ; il porte les octets du tampon (aucun s'il était
- *     vide) ;
+ *     vide). Lignes au repos, rien : la fenêtre d'écoute est fermée ;
  *   - phy_sim_send_bus_error : le prochain bsk_phy_send n'émet rien et rend E_BUS. */
 void     phy_sim_bus_error(void);
 void     phy_sim_send_bus_error(void);
@@ -91,7 +95,8 @@ void     phy_sim_rail_fault(bsk_rail_t rail, bool active);
 
 /* Les lignes émises et les rails, tels que la carte les commande, notés pour les tests. Le faux objectif
  * n'est pas alimenté par les rails (lens_sim_power). Les lignes touchent le fil comme sur la carte : bsk_phy_vd(0)
- * arrête la VD ; relâcher les lignes y pose BODY_CS basse, le tirage bas de la carte ; la retombée de D2 fait les deux ;
+ * arrête la VD ; relâcher les lignes y pose BODY_CS basse, le tirage bas de la carte, et ferme la fenêtre d'écoute ; la
+ * retombée de D2 fait les deux ;
  * lignes relâchées, bsk_phy_body_cs ne change rien à ce que voit l'objectif (BODY_CS reste basse) et
  * bsk_phy_send ne lui fait rien parvenir, rend E_OK (TXD n'est plus routée à l'UART).
  *   - PHY_SIM_REST : haute impédance, tirée bas ; PHY_SIM_LOW, PHY_SIM_HIGH : pilotée à ce niveau ;

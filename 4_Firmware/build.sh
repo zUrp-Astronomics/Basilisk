@@ -75,6 +75,9 @@ open(os.path.join(art, "flash_args"), "w").write("\n".join(sortie) + "\n")
 print(nom)
 PY
 )
+# La garde de la NVS (garde_nvs.py) : aucune entrée de flash_args, que suivent les scripts de flash, n'écrit sur la
+# partition nvs de la table du build, celle de la marque ; sinon le build échoue.
+python "$ICI/garde_nvs.py" "$art/flash_args" "$build/partition_table/partition-table.bin"
 # L'image unique, à écrire en 0x0 : merge_bin remplit de 0xFF les trous entre les morceaux, NVS comprise ; elle
 # remet donc la marque à zéro. Les scripts de flash ne l'écrivent pas : ils passent par flash_args.
 (cd "$art" && python -m esptool --chip "$cible" merge_bin -o "$nom-full.bin" @flash_args)

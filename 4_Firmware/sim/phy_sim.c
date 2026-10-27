@@ -67,11 +67,17 @@ static void drain(uint64_t t)
     }
 }
 
-/* Une sortie de l'objectif, faux objectif ou émission injectée. Un octet va au flux, jugé à son instant ; LENS_CS n'est
- * que publiée. Le tampon a toujours une place après drain (rx_next, phy_common.h). */
+/* La fenêtre d'écoute (bsk_phy.h, bsk_phy_lines) : ouverte tant que les lignes sont pilotées, fermée par
+ * bsk_phy_lines(false) et par la coupure du verrou (cut), qui vident la réception (rx_clear). */
+static bool heard(void) { return g.w.txd != PHY_SIM_REST; }
+
+/* Une sortie de l'objectif, faux objectif ou émission injectée. Un octet va au flux, jugé à son instant, fenêtre
+ * d'écoute ouverte ; fermée, il est perdu, comme sur la carte, où RXD n'est pas routée à l'UART. LENS_CS n'est que
+ * publiée, toujours. Le tampon a toujours une place après drain (rx_next, phy_common.h). */
 static void from_lens(const lens_sim_out_t *o)
 {
     if (o->kind == LENS_SIM_BYTE) {
+        if (!heard()) return;
         g.rx.b[g.rx.n] = o->v;
         rx_got(&g.rx, 1, o->t);
         drain(o->t);
@@ -220,10 +226,11 @@ void phy_sim_vd_edge(void)
 }
 
 /* Comme la carte (bus_error de components/phy/phy.c) : la réception vidée, l'erreur porte ce qu'elle n'avait pas encore
- * rapporté (rx_flush). */
+ * rapporté (rx_flush). Fenêtre d'écoute fermée, rien : la carte n'en rapporte aucune (on_uart). */
 void phy_sim_bus_error(void)
 {
     bsk_phy_event_t e = {.kind = BSK_PHY_ERROR, .t_us = g.now};
+    if (!heard()) return;
     e.u.err = E_BUS;
     rx_flush(&g.rx, &e.u.raw);
     push_event(&e);
@@ -265,13 +272,15 @@ void phy_sim_fault(phy_sim_fault_fn fn) { g.fault = fn; }
 static void body_cs_to_lens(bool high);
 
 /* La coupure du verrou, celle de l'interruption de la carte (cut de components/phy/phy.c) : les rails, puis TXD, BODY_CS et
- * la VD au repos. BODY_CS relâchée retombe pour le faux objectif (le tirage bas), comme bsk_phy_lines(false). */
+ * la VD au repos, la fenêtre d'écoute fermée. BODY_CS relâchée retombe pour le faux objectif (le tirage bas), comme
+ * bsk_phy_lines(false). */
 static void cut(void)
 {
     g.w.rail[BSK_RAIL_LOGIC] = g.w.rail[BSK_RAIL_MOTOR] = false;
     g.vd_period = 0;
     body_cs_to_lens(false);
     g.w.txd = g.w.body_cs = g.w.vd = PHY_SIM_REST;
+    rx_clear(&g.rx);
 }
 
 /* La retombée (un front vers « absent ») est l'interruption de la carte (detect_isr) : objectif présent, l'échéance
@@ -283,19 +292,13 @@ void phy_sim_d2(bool present)
     d2_report();
 }
 
-/* L'interruption de FAULT# de la carte (fault_isr de components/phy/phy.c) : le ou les changements, au même instant. */
+/* L'interruption de FAULT# de la carte (fault_isr de components/phy/phy.c), sur le niveau que le test donne : le ou les
+ * changements, au même instant (fault_events). */
 void phy_sim_rail_fault(bsk_rail_t rail, bool active)
 {
-    bsk_phy_event_t e = {.kind = BSK_PHY_FAULT, .t_us = g.now};
-    fault_ev_t k = fault_edge(&g.rail_fault[rail], active);
-    e.u.fault.rail = rail;
-    e.u.fault.on = g.w.rail[rail];
-    e.u.fault.active = k != FAULT_OFF && k != FAULT_REON;
-    push_event(&e);
-    if (k == FAULT_PULSE || k == FAULT_REON) {
-        e.u.fault.active = !e.u.fault.active;
-        push_event(&e);
-    }
+    bsk_phy_event_t e[2];
+    uint8_t n = fault_events(fault_edge(&g.rail_fault[rail], active), rail, g.w.rail[rail], g.now, e);
+    for (uint8_t i = 0; i < n; i++) push_event(&e[i]);
 }
 
 void phy_sim_mounted(void)
@@ -356,11 +359,15 @@ bool bsk_phy_rail(bsk_rail_t rail, bool on)
     return true;
 }
 
-/* Relâchées, BODY_CS retombe par le tirage bas : le faux objectif la voit basse, comme après bsk_phy_body_cs(false). */
+/* Relâchées, BODY_CS retombe par le tirage bas : le faux objectif la voit basse, comme après bsk_phy_body_cs(false) ; la
+ * fenêtre d'écoute se ferme. Pilotées, elle s'ouvre, vide ; pilotées de nouveau (la reprise), elle reste ouverte. */
 bool bsk_phy_lines(bool drive)
 {
     if (drive && !g.pres.present) return false;    /* le verrou */
-    if (!drive) body_cs_to_lens(false);
+    if (!drive) {
+        body_cs_to_lens(false);
+        rx_clear(&g.rx);
+    }
     g.w.txd = drive ? PHY_SIM_HIGH : PHY_SIM_REST;
     g.w.body_cs = drive ? PHY_SIM_LOW : PHY_SIM_REST;
     return true;

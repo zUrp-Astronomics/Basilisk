@@ -3,7 +3,8 @@
  * DATE: 2026-10-04
  * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte ; ticket #594 : le capteur de la carte (`z`,
  *         `:GT#`, la ligne `* sht40`, stack_sensor de DEBUG) ; ticket #641 : le seuil de condensation dans `z` (point de
- *         rosée ou de givre)
+ *         rosée ou de givre) ; ticket #676 : nvs de DEBUG ; ticket #686 : p1 sans effet sur des alimentations établies ;
+ *         ticket #694 : `x`, la cause du dernier redémarrage de la carte et le temps écoulé depuis, pour un driver
  *
  * La couche HOTE : la table de traduction de la spec, § 4.5.1 à § 4.5.6, lettre par lettre ; PROTOCOL.md donne la
  * forme exacte des lignes. */
@@ -25,9 +26,9 @@
 
 static struct {
     const char  *version;      /* la version du firmware de la carte, rendue par `v` */
-    const char  *reset;
-    uint32_t     seq;          /* le dernier seq alloué (§ 4.1 : strictement croissant) */
-    bool         hold;         /* le maintien de p0, tenu ici : l'instantané ne distingue pas « OFF après p0 » */
+    const char  *reset;        /* la cause du dernier redémarrage de la carte, rendue par `x` et par DEBUG */
+    uint64_t   (*clock)(void); /* le temps écoulé depuis ce redémarrage, en µs : `x` */
+    uint32_t     seq;          /* le dernier seq alloué (§ 4.1 : strictement croissant ; deposit, son rebouclage) */
     uint32_t     pend_seq;     /* la commande qu'on dépose */
     bsk_cmd_op_t pend_op;
     bsk_ack_t    pend_last;    /* le dernier accusé de la commande déposée, rendu pendant son dépôt (q) */
@@ -43,10 +44,11 @@ static struct {
     int32_t      pos;
     uint32_t     pos_product;
     char         pos_name[65];
-    bool         cu_wait;      /* CMD_LENS_CUSTOM acceptée, son accusé final attendu */
-    bool         cu_done;      /* ... reçu (cu_ack), la réponse pas encore rendue (bsk_host_later) */
-    uint32_t     cu_seq;
-    bsk_ack_t    cu_ack;
+    bool         lt_wait;      /* une réponse différée (bsk_host_later) : l'accusé final de lt_seq attendu */
+    bool         lt_done;      /* ... reçu (lt_ack), la réponse pas encore rendue */
+    uint32_t     lt_seq;
+    bsk_cmd_op_t lt_op;        /* CMD_LENS_CUSTOM, ou CMD_FOCUS_STOP (`q`, son 0x1C retenu jusqu'au 0x04) */
+    bsk_ack_t    lt_ack;
     bool         sht_known;    /* la mesure du capteur connue au dernier bsk_host_observe : la ligne `* sht40` à chaque
                                   changement */
 } h;
@@ -56,6 +58,14 @@ const char BSK_HOST_LATER[] = "";   /* comparé par adresse (bsk_host.h), jamais
 static void put(char *out, size_t cap, const char *s) { snprintf(out, cap, "%s", s); }
 
 /* ─────────────────────────── last_op et move_rc (§ 4.5.3) ─────────────────────────── */
+
+/* La réponse à la ligne de la commande `seq` attend son accusé final (BSK_HOST_LATER). */
+static void later(uint32_t seq, bsk_cmd_op_t op)
+{
+    h.lt_wait = true;
+    h.lt_seq = seq;
+    h.lt_op = op;
+}
 
 static void on_ack(const bsk_ack_t *a, const bsk_status_t *st)
 {
@@ -67,15 +77,14 @@ static void on_ack(const bsk_ack_t *a, const bsk_status_t *st)
             h.fly = true;
             h.fly_seq = a->seq;
         } else if (a->seq == h.pend_seq && h.pend_op == CMD_LENS_CUSTOM) {
-            h.cu_wait = true;
-            h.cu_seq = a->seq;
+            later(a->seq, CMD_LENS_CUSTOM);
         }
         return;
     }
-    if (h.cu_wait && a->seq == h.cu_seq) {          /* la réponse de `CUSTOM` est connue */
-        h.cu_wait = false;
-        h.cu_done = true;
-        h.cu_ack = *a;
+    if (h.lt_wait && a->seq == h.lt_seq) {          /* la réponse différée est connue */
+        h.lt_wait = false;
+        h.lt_done = true;
+        h.lt_ack = *a;
         return;
     }
     if (!h.fly || a->seq != h.fly_seq) return;     /* un refus, ou l'accusé d'une autre commande */
@@ -161,16 +170,20 @@ void bsk_host_observe(void)
 
 /* Une lecture ne dépose rien : elle lit l'instantané. Une commande dépose un bsk_cmd_t et rend son premier accusé :
  * ACK_ACCEPTED -> `ok`, ACK_REJECTED -> `er …` d'après la raison (refusal) ; `q` lit aussi son accusé final, rendu
- * pendant le dépôt : ACK_FAILED -> `er …`. Hors READY, une lettre qui a besoin de l'objectif répond d'après le tableau
- * d'état du § 4.5.1, lu dans l'instantané, sans rien déposer (not_ready) : la session refuserait de toute façon ce que
- * ce tableau refuse. */
+ * pendant le dépôt, ou, son 0x1C retenu jusqu'au 0x04, à son départ (bsk_host_later) : ACK_FAILED -> `er …`. Hors
+ * READY, une lettre qui a besoin de l'objectif répond d'après le tableau d'état du § 4.5.1, lu dans l'instantané, sans
+ * rien déposer (not_ready) : la session refuserait de toute façon ce que ce tableau refuse. */
 
 /* Dépose une commande ; rend son premier accusé. La session en dépose un pour chaque commande que HOTE dépose, dans
- * l'appel, et la file est vide avant lui (bsk_host_observe après chaque pas) : il est toujours lu. */
+ * l'appel, et la file est vide avant lui (bsk_host_observe après chaque pas) : il est toujours lu.
+ * Le seq : 1, 2, …, 2^32 − 1, puis 1 de nouveau, jamais BSK_SEQ_BOARD, sous lequel on_ack prendrait la commande pour le
+ * goto du bouton du fût. */
 static bsk_ack_t deposit(bsk_cmd_op_t op, int32_t arg)
 {
-    bsk_cmd_t c = {.seq = ++h.seq, .op = op, .arg = arg};
+    bsk_cmd_t c = {.op = op, .arg = arg};
     bsk_ack_t first = {0};
+    if (++h.seq == BSK_SEQ_BOARD) ++h.seq;
+    c.seq = h.seq;
     h.pend_seq = c.seq;
     h.pend_op = op;
     bsk_session_command(&c);
@@ -186,6 +199,7 @@ static void refusal(char *out, size_t cap, bsk_err_t why)
     case E_LIMIT: put(out, cap, "er range limits"); break;
     case E_NOCAP: put(out, cap, "er nocap"); break;               /* sans jeton : les marques n'en ont pas (PROTOCOL.md § 1) */
     case E_FORBIDDEN: put(out, cap, "er refused"); break;
+    case E_STORE: put(out, cap, "er store"); break;               /* un geste de marque pas rangé (js, jx) */
     default: snprintf(out, cap, "er link %s", bsk_err_token(why)); break;
     }
 }
@@ -197,6 +211,15 @@ static bsk_ack_t command(bsk_cmd_op_t op, int32_t arg, char *out, size_t cap)
     if (a.result == ACK_ACCEPTED) put(out, cap, "ok");
     else refusal(out, cap, a.reason);
     return a;
+}
+
+/* Une commande acceptée qui finit à son accusé final (`q`, `js`, `jx`) : rendu pendant son dépôt, `ok` ou l'échec comme
+ * un refus ; sinon la réponse l'attend (bsk_host_later). */
+static void final(char *out, size_t cap)
+{
+    if (h.pend_last.result == ACK_ACCEPTED) later(h.pend_seq, h.pend_op);
+    else if (h.pend_last.result == ACK_FAILED) refusal(out, cap, h.pend_last.reason);
+    else put(out, cap, "ok");
 }
 
 /* ─────────────────────────── l'état (§ 4.5.1) ─────────────────────────── */
@@ -236,12 +259,6 @@ static void mark(const bsk_status_t *st, char *out, size_t cap)
     else put(out, cap, "-");
 }
 
-static bool moving(const bsk_status_t *st)
-{
-    return st->motion_state == MOTION_PLANNING || st->motion_state == MOTION_COMMANDED || st->motion_state == MOTION_MOVING ||
-           st->motion_state == MOTION_SETTLING;
-}
-
 /* ─────────────────── l'ouverture : la conversion f/ <-> code 256(Av+16) est ici, la session tient les codes ─────────────────── */
 
 /* Le code de f/ x10. Appelée sur une cible jugée dans la plage ± 0,05 (aperture_line), dont le minimum est au moins f/0,5
@@ -253,8 +270,10 @@ static uint16_t ap_code_from_fnum_x10(uint16_t fnum_x10)
 }
 
 /* f/ x10 depuis le code 256(Av+16), arrondi au tiers de diaphragme usuel : Av = 9 donne 22.6 en exact, que
- * tout le monde appelle f/22 ; au-delà d'un demi-tiers d'un cran usuel, la valeur exacte. Un code du domaine seulement
- * (ap_known) : f/0,5 à f/256, 5 à 2560. */
+ * tout le monde appelle f/22 ; au-delà d'un demi-tiers d'un cran usuel, la valeur exacte. Un code publié par la session
+ * seulement, toujours du domaine (bsk_contract.h) : f/0,5 à f/256, 5 à 2560.
+ * La même échelle est en codes dans la bague (ring.c, THIRDS), où la SESSION ne calcule pas en flottant : les deux sont
+ * confrontées cran par cran à une liste écrite à la main (test_session_script, t_thirds). */
 static const uint16_t thirds[] = {10, 11, 12, 14, 16, 18, 20, 22, 25, 28, 32, 35, 40, 45, 50, 56, 63, 71,
                                   80, 90, 100, 110, 130, 140, 160, 180, 200, 220, 250, 290, 320, 360, 400, 450};
 static uint16_t fnum_x10_from_ap_code(uint16_t code)
@@ -270,24 +289,21 @@ static uint16_t fnum_x10_from_ap_code(uint16_t code)
     return bd < 0.06 ? best : (uint16_t)lround(f);
 }
 
-/* Un code du domaine que la carte convertit (bsk_contract.h) ; hors de lui, il n'est jamais converti. */
-static bool ap_known(uint16_t code) { return code >= BSK_AP_CODE_MIN && code <= BSK_AP_CODE_MAX; }
-
-/* La plage en f/ x10. Faux sans plage : pas de 0x08, ou un code hors du domaine. */
+/* La plage en f/ x10. Faux sans plage (CAP_APERTURE) : la session ne la publie que valide (bsk_contract.h). */
 static bool aperture_get(const bsk_status_t *st, uint16_t *mn, uint16_t *mx)
 {
-    if (!(st->capabilities & CAP_APERTURE) || !ap_known(st->aperture_min) || !ap_known(st->aperture_max)) return false;
+    if (!(st->capabilities & CAP_APERTURE)) return false;
     *mn = fnum_x10_from_ap_code(st->aperture_min);
     *mx = fnum_x10_from_ap_code(st->aperture_max);
     return true;
 }
 
 /* L'ouverture courante relue, en f/ x10, bornée à la plage : le Samyang répète la consigne, le Sony borne ; on borne
- * nous-mêmes. Faux si elle est inconnue, hors du domaine (0 : la session sans 0x05, ou son flux arrêté) : jamais une
- * valeur ramenée à la plage. */
+ * nous-mêmes. Faux si elle est inconnue (0 : la session sans 0x05, son flux arrêté, ou un code hors du domaine) : jamais
+ * une valeur ramenée à la plage. */
 static bool aperture_cur(const bsk_status_t *st, uint16_t mn, uint16_t mx, uint16_t *cur)
 {
-    if (!ap_known(st->aperture_current)) return false;
+    if (!st->aperture_current) return false;
     *cur = fnum_x10_from_ap_code(st->aperture_current);
     if (*cur < mn) *cur = mn;
     if (*cur > mx) *cur = mx;
@@ -403,10 +419,10 @@ static void mark_line(const char *l, const bsk_status_t *st, char *out, size_t c
         put(out, cap, "er nocap");                  /* une ligne inconnue, dans tout état */
     } else if (!is_ready(st)) {
         put(out, cap, not_ready(st, false));        /* en FAULT : er fault */
-    } else if (l[1] == 's') {
-        command(CMD_SET_MARK, BSK_MARK_HERE, out, cap);
-    } else if (l[1] == 'x') {
-        command(CMD_CLEAR_MARK, 0, out, cap);
+    } else if (l[1] == 's' || l[1] == 'x') {        /* `ok` une fois rangée, `er store` sinon */
+        bsk_ack_t a = l[1] == 's' ? deposit(CMD_SET_MARK, BSK_MARK_HERE) : deposit(CMD_CLEAR_MARK, 0);
+        if (a.result == ACK_ACCEPTED) final(out, cap);
+        else refusal(out, cap, a.reason);
     } else if (st->mark_valid) {                    /* jg : tel quel, sans recette d'approche */
         command(CMD_FOCUS_GOTO, st->mark_position, out, cap);
     } else {
@@ -418,13 +434,12 @@ static void mark_line(const char *l, const bsk_status_t *st, char *out, size_t c
 static void reboot(const bsk_status_t *st, char *out, size_t cap)
 {
     bsk_ack_t a;
-    if (st->session_state == SESSION_OFF && !h.hold) {   /* OFF sans p0 : D2 absent */
+    if (st->session_state == SESSION_OFF && !st->held) {   /* OFF sans maintien (p0) : D2 absent */
         put(out, cap, "er nolens");
         return;
     }
     a = st->session_state == SESSION_FAULT ? deposit(CMD_CLEAR_FAULT, 0) : deposit(CMD_ATTACH, 0);
     if (a.result == ACK_ACCEPTED) {
-        h.hold = false;
         put(out, cap, "ok");
     } else if (a.reason == E_BUSY) {
         put(out, cap, "er busy move");              /* E_BUSY : un mouvement en vol, en READY seulement */
@@ -436,13 +451,18 @@ static void reboot(const bsk_status_t *st, char *out, size_t cap)
 static void power(const char *l, const bsk_status_t *st, char *out, size_t cap)
 {
     bsk_ack_t a;
-    if (!strcmp(l, "p1")) {                         /* dans tout état, D2 absent compris */
-        a = command(CMD_ATTACH, 0, out, cap);
-        if (a.result == ACK_ACCEPTED) h.hold = false;
+    if (!strcmp(l, "p1")) {                         /* accepté dans tout état, D2 absent compris */
+        /* p1 n'agit qu'en OFF (après p0, ou D2 absent) et en FAULT (le réarmement) : ailleurs les alimentations sont
+         * établies, et CMD_ATTACH relancerait le démarrage (oubli de la session, homing, la marque). Sans effet, `ok`
+         * (ticket #686, décision de l'humain). `b` relance, lui : il dépose CMD_ATTACH dans tout état (reboot). */
+        if (st->session_state != SESSION_OFF && st->session_state != SESSION_FAULT) {
+            put(out, cap, "ok");
+            return;
+        }
+        command(CMD_ATTACH, 0, out, cap);
     } else if (!strcmp(l, "p0")) {
         a = deposit(CMD_DETACH, 0);
         if (a.result == ACK_ACCEPTED) {
-            h.hold = true;
             put(out, cap, "ok");
         } else if (in_sequence(st)) {
             put(out, cap, "er busy boot");          /* pas pendant un démarrage */
@@ -466,7 +486,7 @@ static const char *ring_role(uint8_t r) { return r == RING_APERTURE ? "ap" : r =
 static void line_t(const bsk_status_t *st, char *out, size_t cap)
 {
     snprintf(out, cap, "ext=1 present=%d boot_state=%s busy=%s power_off=%d last_op=%s mf=%s oss=%s ring=%s",
-             st->session_state != SESSION_OFF, bsk_state_name(st->session_state), in_sequence(st) ? "boot" : "-", h.hold,
+             st->session_state != SESSION_OFF, bsk_state_name(st->session_state), in_sequence(st) ? "boot" : "-", st->held,
              h.last_op, tri(st->mf), tri(st->oss), ring_role(st->ring));
 }
 
@@ -547,7 +567,7 @@ static void letter(const char *l, const bsk_status_t *st, char *out, size_t cap)
         return;
     case 'e':
         if (!l[1]) {                                      /* n en FAULT ; y dans les états de séquence */
-            put(out, cap, ready ? (moving(st) ? "y" : "n") : in_sequence(st) ? "y" : "n");
+            put(out, cap, ready ? (st->moving ? "y" : "n") : in_sequence(st) ? "y" : "n");
             return;
         }
         break;
@@ -560,7 +580,7 @@ static void letter(const char *l, const bsk_status_t *st, char *out, size_t cap)
     case 'r':
         if (l[1]) break;
         if (!ready) put(out, cap, not_ready(st, true));
-        else if (!st->position_valid) put(out, cap, "er link limits");   /* aucun 0x06 lu (PROTOCOL.md § 2) */
+        else if (!st->limits_valid) put(out, cap, "er link limits");   /* bornes inconnues (PROTOCOL.md § 2) */
         else snprintf(out, cap, "%ld-%ld", (long)st->focus_min, (long)st->focus_max);
         return;
     case 'd':
@@ -606,9 +626,8 @@ static void letter(const char *l, const bsk_status_t *st, char *out, size_t cap)
     case 'q':                                             /* passe toujours ; pas pendant un homing (HOMING, 0x10 de l'init) */
         if (l[1]) break;
         a = deposit(CMD_FOCUS_STOP, 0);
-        if (a.result == ACK_ACCEPTED && h.pend_last.result == ACK_FAILED)
-            refusal(out, cap, h.pend_last.reason);  /* le 0x1C pas émis : `er link …` */
-        else if (a.result == ACK_ACCEPTED) put(out, cap, "ok");
+        if (a.result == ACK_ACCEPTED) final(out, cap);   /* le 0x1C retenu jusqu'au 0x04 : la réponse à son départ ; pas
+                                                            émis : `er link …` ; la file pleine, `er busy` */
         else put(out, cap, "er busy home");         /* la session ne refuse q que pendant un homing, E_BUSY */
         return;
     case 'p':
@@ -630,6 +649,13 @@ static void letter(const char *l, const bsk_status_t *st, char *out, size_t cap)
         if (l[1]) break;
         climate(out, cap);
         return;
+    case 'x':                                             /* le dernier redémarrage de la carte, dans tout état */
+        /* La cause, puis le temps écoulé depuis, en ms : il repart de 0 à chaque redémarrage, ce qui distingue deux
+         * redémarrages de même cause (PROTOCOL.md § 2). Sur 64 bits : en 32, il reviendrait à 0 au bout de 49,7 jours,
+         * comme un redémarrage. */
+        if (l[1]) break;
+        snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)(h.clock() / 1000));
+        return;
     default:
         break;
     }
@@ -650,10 +676,11 @@ static bool word(const char *w, size_t n, const char *ref)
  * lignes du journal perdues, le résultat du dernier déplacement fini, les trames refusées par bench_core, puis ce que la
  * carte compte du temps réel (bsk_session_debug), dans l'ordre de bsk_session_debug_t, puis les marges de pile des
  * tâches (bsk_host_stacks), dans l'ordre de bsk_host_stacks_t, puis les activations des FAULT des rails
- * (bsk_session_debug), puis la marge de pile de la tâche du capteur (bsk_host_stacks), en fin de ligne : les clés d'avant
- * gardent leur place. */
+ * (bsk_session_debug), puis la marge de pile de la tâche du capteur (bsk_host_stacks), puis l'état de la NVS
+ * (bsk_session_debug, bsk_store_nvs_t), en fin de ligne : les clés d'avant gardent leur place. */
 static void debug(char *out, size_t cap)
 {
+    static const char *const NVS[] = {"ok", "erased", "er"};   /* dans l'ordre de bsk_store_nvs_t */
     bsk_session_debug_t d;
     bsk_host_stacks_t k;
     bsk_session_debug(&d);
@@ -662,13 +689,13 @@ static void debug(char *out, size_t cap)
              "ok reset=%s dropped=%lu move_rc=%s refused=%lu evq_drop=%lu ev_back=%lu ev_back_us=%lu tx_wait_us=%lu "
              "tx_timeout=%lu pair_late=%lu pair_late_us=%lu "
              "stack_session=%lu stack_phy=%lu stack_usb_rx=%lu stack_store=%lu stack_journal=%lu fault_motor=%lu "
-             "fault_logic=%lu stack_sensor=%lu",
+             "fault_logic=%lu stack_sensor=%lu nvs=%s",
              h.reset, (unsigned long)bsk_journal_dropped(), h.move_rc, (unsigned long)bsk_bench_refused(),
              (unsigned long)d.evq_drop, (unsigned long)d.ev_back, (unsigned long)d.ev_back_us, (unsigned long)d.tx_wait_us,
              (unsigned long)d.tx_timeout, (unsigned long)d.pair_late, (unsigned long)d.pair_late_us,
              (unsigned long)k.session, (unsigned long)k.phy, (unsigned long)k.usb_rx, (unsigned long)k.store,
              (unsigned long)k.journal, (unsigned long)d.fault_motor, (unsigned long)d.fault_logic,
-             (unsigned long)k.sensor);
+             (unsigned long)k.sensor, NVS[d.nvs]);
 }
 
 /* `CUSTOM READ`, `CUSTOM WRITE <haut><bas>` (PROTOCOL.md § 3.1) : la configuration du commutateur Custom du
@@ -803,11 +830,12 @@ static const char *moonlite(const char *cmd, char *out, size_t cap)
 
 /* ─────────────────────────── bsk_host.h ─────────────────────────── */
 
-void bsk_host_init(const char *version, const char *reset)
+void bsk_host_init(const char *version, const char *reset, uint64_t (*clock_us)(void))
 {
     memset(&h, 0, sizeof h);
     h.version = version;
     h.reset = reset;
+    h.clock = clock_us;
     put(h.last_op, sizeof h.last_op, "-:ok");       /* avant toute opération */
     h.move_rc = "-";
     h.move_end = "-";
@@ -824,23 +852,25 @@ const char *bsk_host_line(const char *line, char *out, size_t cap)
     } else {
         bsk_session_status(&st);
         letter(line, &st, out, cap);
+        if (h.lt_wait) return BSK_HOST_LATER;       /* `q`, son 0x1C retenu : aucune ligne n'en attendait avant elle */
     }
     return "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
 }
 
-/* La réponse de `CUSTOM`, une fois l'accusé final de CMD_LENS_CUSTOM lu (bsk_host_observe) : `ok` suivi des 16 octets
- * de données que l'objectif a rendus, en hexadécimal (PROTOCOL.md § 3.1), ou l'échec, comme un refus. */
+/* La réponse différée, une fois l'accusé final lu (bsk_host_observe) : l'échec comme un refus ; sinon `ok`, et pour
+ * `CUSTOM` les 16 octets de données que l'objectif a rendus, en hexadécimal (PROTOCOL.md § 3.1). */
 const char *bsk_host_later(char *out, size_t cap)
 {
     uint8_t d[BSK_CUSTOM_DATA];
-    if (!h.cu_done) return BSK_HOST_LATER;
-    h.cu_done = false;
-    if (h.cu_ack.result != ACK_COMPLETED) {
-        refusal(out, cap, h.cu_ack.reason);
+    if (!h.lt_done) return BSK_HOST_LATER;
+    h.lt_done = false;
+    if (h.lt_ack.result != ACK_COMPLETED) {
+        refusal(out, cap, h.lt_ack.reason);
         return "\n";
     }
-    bsk_session_custom_data(d);
     put(out, cap, "ok");
+    if (h.lt_op != CMD_LENS_CUSTOM) return "\n";  /* `q` : le 0x1C est parti */
+    bsk_session_custom_data(d);
     for (size_t i = 0; i < sizeof d; i++) snprintf(out + 2 + 3 * i, cap - 2 - 3 * i, " %02X", (unsigned)d[i]);
     return "\n";
 }

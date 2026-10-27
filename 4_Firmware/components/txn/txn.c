@@ -11,15 +11,18 @@
 #include "bsk_bench_core.h"
 #include "bsk_journal.h"
 
-/* Un seul appelant, sur une seule tâche : ni verrou, ni quarantaine des réponses tardives. Une réponse tardive de
- * l'objectif précédent, au type de la première requête de la session suivante, la terminerait. Aucune attente que
- * LENS_CS retombe avant d'émettre.
+/* Un seul appelant, sur une seule tâche : ni verrou, ni quarantaine des réponses tardives (aucune borne ne limite leur
+ * retard). Une trame ne termine la requête que si elle en est la réponse (answers) : la réponse en retard à une autre
+ * requête du même type n'est écartée que là où son contenu la distingue. Aucune attente que LENS_CS retombe avant
+ * d'émettre.
  *
  * La paire est une unité (bsk_txn.h) : ce qui est émis entre son 0x03 et son 0x04 est retenu (held) et part derrière le
  * 0x04, dans l'ordre, avant le compte rendu ; derrière la place du 0x04 aussi quand il est jeté, hors de sa fenêtre ; la
- * boucle arrêtée n'en émet rien. Elle ne s'arrête qu'à l'oubli de la
- * session et à la mise au repos des lignes (session.c) : ce qui était retenu, une écriture CUSTOM comprise, ne part pas
- * vers un objectif qu'on abandonne.
+ * boucle arrêtée n'en émet rien. L'ordre d'émission est celui du dépôt : un message accroché alors qu'une émission
+ * attend déjà le 0x04 (att_late) ne part pas dans ce 0x04, devant elle, mais avec la paire suivante, derrière elle ;
+ * sinon un goto déposé après un q partait avant son 0x1C, et l'arrêt l'interrompait (ticket #680). La boucle ne
+ * s'arrête qu'à l'oubli de la session et à la mise au repos des lignes (session.c) : ce qui était retenu, une écriture
+ * CUSTOM comprise, ne part pas vers un objectif qu'on abandonne.
  *
  * Les réponses du 135 et du Tamron partent seules dans leur trame (classe 2) : le pavage des messages de l'objectif,
  * dont les tailles dépendent de la mise en page du flux (0x05, 0x06), n'est pas nécessaire pour les reconnaître. */
@@ -28,7 +31,6 @@
  * Ici et nulle part ailleurs. */
 #define PAIR03_US 8600u
 #define PAIR04_US 10100u
-#define HELD_MAX  4u   /* émissions retenues entre le 0x03 et le 0x04 : au-delà, refusées (E_BUSY) */
 /* La fenêtre d'une trame de la paire : elle n'est émise que si le pas qui la sert a commencé au plus 2 ms après son
  * échéance (décision de l'humain du 2026-10-07 : pas de rattrapage). Deux tours de la boucle de la carte, qui rend la main
  * un tick (1 ms) entre deux pas (main.c) : un pas qui commence jusqu'à environ 1 ms après l'échéance est la marche
@@ -47,7 +49,8 @@
  * 0x03 : bench_core le refuse. */
 static struct {
     bsk_txn_state_t state;
-    uint8_t         type;       /* type attendu en WAIT */
+    uint8_t         q[BSK_MSG_MAX];            /* la requête en WAIT, telle que demandée : sa réponse s'y juge */
+    uint16_t        q_len;
     uint64_t        deadline;
     bsk_err_t       err;
     bsk_frame_t     reply;
@@ -57,21 +60,25 @@ static struct {
     uint8_t         m03[BSK_TXN_LOOP03_LEN];   /* le 0x03, avec les champs que l'étage du dessus y a posés */
     uint8_t         m04[BSK_MSG_MAX];          /* le 0x04 (BSK_TXN_LOOP04_LEN), puis le message accroché */
     uint16_t        att_len;                   /* 0 : rien d'accroché */
+    bool            att_late;                  /* accroché après une émission retenue : pas dans le 0x04 qu'elle attend */
     bool            att_failed;                /* un 0x04 qui le portait tenté et raté (bsk_txn_attach_failed) */
     bsk_txn_pair_fn observer;
     uint64_t        at03, at04;                /* les échéances de la paire, UINT64_MAX sans paire */
+    uint32_t        n03;                       /* les 0x03 de la boucle échus, partis ou non (bsk_txn_n03) */
     struct {
         uint8_t  cls;                          /* 1 : bsk_txn_send ; 2 : la requête, son échéance comptée au départ */
         uint16_t len;
         uint32_t timeout_ms;
         uint8_t  msg[BSK_MSG_MAX];
-    } held[HELD_MAX];                          /* ce qui attend le 0x04, dans l'ordre */
+        bsk_err_t out;                         /* classe 1 : l'issue de son émission, une fois relâchée (bsk_txn_held_end) */
+    } held[BSK_TXN_HELD_MAX];                  /* ce qui attend le 0x04, dans l'ordre */
     uint8_t         n_held;
+    uint8_t         last;                      /* la place du dernier bsk_txn_send retenu, BSK_TXN_SENT sinon */
     bool            req_held;                  /* la requête en WAIT n'est pas encore partie */
     uint64_t        now;                       /* le dernier instant reçu (tick, événement, requête) */
     uint64_t        real;                      /* l'instant réel du pas de l'appelant (bsk_txn_real) */
     bsk_txn_late_t  late;                      /* DEBUG : les paires jetées, hors de leur fenêtre sur `real` */
-} x = {.at03 = UINT64_MAX, .at04 = UINT64_MAX,
+} x = {.at03 = UINT64_MAX, .at04 = UINT64_MAX, .last = BSK_TXN_SENT,
        .m03 = {   /* le 0x03 de repos, puis le 0x04 */
                    0x03, 0xC2, 0x2E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1C, 0x00, 0x00,
                    0x06, 0x00, 0x00, 0x02, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00},
@@ -103,7 +110,6 @@ static void request_out(const uint8_t *msg, uint16_t len, uint32_t timeout_ms, u
         return;
     }
     seq_advance();
-    x.type = msg[0];
     x.deadline = now_us + (uint64_t)timeout_ms * 1000u;
     x.state = TXN_WAIT;
 }
@@ -118,7 +124,7 @@ static bool hold(uint8_t cls, const uint8_t *msg, uint16_t len, uint32_t timeout
     if (cls == 2)
         for (uint8_t k = 0; k < x.n_held; k++)
             if (x.held[k].cls == 2) i = k;
-    if (i == HELD_MAX) return false;
+    if (i == BSK_TXN_HELD_MAX) return false;
     x.held[i].cls = cls;
     x.held[i].len = len;
     x.held[i].timeout_ms = timeout_ms;
@@ -127,13 +133,17 @@ static bool hold(uint8_t cls, const uint8_t *msg, uint16_t len, uint32_t timeout
     return true;
 }
 
-/* Ce qui attendait le 0x04 part, dans l'ordre. Une émission retenue ratée n'est pas reprise ; celle d'une requête la met
- * en FAILED, à lire au pas suivant comme une échéance. */
+/* Ce qui attendait le 0x04 part, dans l'ordre. Une émission retenue ratée n'est pas reprise : celle d'un message seul est
+ * gardée à sa place (bsk_txn_held_end) ; celle d'une requête la met en FAILED, à lire au pas suivant comme une échéance. */
 static void release(uint64_t now_us)
 {
     for (uint8_t k = 0; k < x.n_held; k++) {
-        if (x.held[k].cls == 2) request_out(x.held[k].msg, x.held[k].len, x.held[k].timeout_ms, now_us);
-        else if (emit(1, x.held[k].msg, x.held[k].len) == E_OK) seq_advance();
+        if (x.held[k].cls == 2) {
+            request_out(x.held[k].msg, x.held[k].len, x.held[k].timeout_ms, now_us);
+            continue;
+        }
+        x.held[k].out = emit(1, x.held[k].msg, x.held[k].len);
+        if (x.held[k].out == E_OK) seq_advance();
     }
     x.n_held = 0;
 }
@@ -146,6 +156,8 @@ static void at(uint64_t now_us)
 bsk_txn_state_t bsk_txn_request(const uint8_t *msg, uint16_t len, uint32_t timeout_ms, uint64_t now_us)
 {
     at(now_us);
+    memcpy(x.q, msg, len);              /* retenue, elle part telle quelle (hold, release) */
+    x.q_len = len;
     if (between()) {                    /* elle part derrière le 0x04 */
         if (!hold(2, msg, len, timeout_ms)) {
             x.state = TXN_FAILED;
@@ -153,7 +165,6 @@ bsk_txn_state_t bsk_txn_request(const uint8_t *msg, uint16_t len, uint32_t timeo
             return x.state;
         }
         x.req_held = true;
-        x.type = msg[0];
         x.state = TXN_WAIT;
         return x.state;
     }
@@ -164,7 +175,12 @@ bsk_txn_state_t bsk_txn_request(const uint8_t *msg, uint16_t len, uint32_t timeo
 bsk_err_t bsk_txn_send(const uint8_t *msg, uint16_t len)
 {
     bsk_err_t e;
-    if (between()) return hold(1, msg, len, 0) ? E_OK : E_BUSY;   /* il part derrière le 0x04 */
+    x.last = BSK_TXN_SENT;
+    if (between()) {                    /* il part derrière le 0x04, à la dernière place */
+        if (!hold(1, msg, len, 0)) return E_BUSY;
+        x.last = (uint8_t)(x.n_held - 1);
+        return E_OK;
+    }
     e = emit(1, msg, len);
     if (e == E_OK) seq_advance();
     return e;
@@ -185,20 +201,34 @@ void bsk_txn_attach(const uint8_t *msg, uint16_t len)
     if (len) memcpy(x.m04 + BSK_TXN_LOOP04_LEN, msg, len);   /* len 0 : rien d'accroché, msg peut être NULL */
     x.att_len = len;
     x.att_failed = false;
+    x.att_late = x.n_held > 0;   /* une émission attend déjà le 0x04 : rien n'est retenu hors de l'intervalle */
 }
 
 bool bsk_txn_attach_failed(void) { return x.att_failed; }
 
+uint8_t bsk_txn_held_place(void) { return x.last; }
+
+/* Une place relâchée ou abandonnée est au-delà de la file : n_held repart de zéro à chaque fin de paire. */
+bool bsk_txn_held_end(uint8_t place, bsk_err_t *e)
+{
+    if (place < x.n_held) return false;
+    *e = x.held[place].out;
+    return true;
+}
+
 void bsk_txn_loop_observer(bsk_txn_pair_fn fn) { x.observer = fn; }
 
-/* Boucle arrêtée : la paire en attente ne part pas, ni rien de ce qui attendait son 0x04 ; une requête retenue finit en
- * FAILED, E_ABORTED, sans avoir été émise. Le message accroché reste à l'étage du dessus (drive_forget). */
+/* Boucle arrêtée : la paire en attente ne part pas, ni rien de ce qui attendait son 0x04 ; un message seul retenu finit
+ * E_ABORTED à sa place (bsk_txn_held_end), une requête retenue en FAILED, E_ABORTED, sans avoir été émis. Le message
+ * accroché reste à l'étage du dessus (drive_forget). */
 void bsk_txn_loop(bool on)
 {
     x.loop = on;
     if (on) return;
     x.at03 = x.at04 = UINT64_MAX;
+    for (uint8_t k = 0; k < x.n_held; k++) x.held[k].out = E_ABORTED;
     x.n_held = 0;
+    x.att_late = false;
     if (x.req_held) {
         x.req_held = false;
         x.state = TXN_FAILED;
@@ -206,10 +236,12 @@ void bsk_txn_loop(bool on)
     }
 }
 
-/* La paire finie, partie ou non : ce qui attendait le 0x04 émis, puis le compte rendu si elle est partie. */
+/* La paire finie, partie ou non : ce qui attendait le 0x04 émis, puis le compte rendu si elle est partie. Un message
+ * accroché après ce qui attendait le 0x04 (att_late) part avec la paire suivante, derrière lui. */
 static void pair_end(bool sent, uint64_t now_us)
 {
     x.at03 = x.at04 = UINT64_MAX;
+    x.att_late = false;
     release(now_us);
     if (sent && x.observer) x.observer();
 }
@@ -231,27 +263,59 @@ static bool on_time(uint64_t due)
  * hors de sa fenêtre : jeté, le 0x03 parti seul. Une émission ratée n'est pas reprise. Le message accroché n'est retiré que
  * par un 0x04 parti : sinon, la paire suivante le porte. Un 0x04 qui le portait, tenté et raté, a pu partir quand même
  * (E_BUS de PHY : l'attente de fin d'émission dépassée, phy.c ; toute émission ratée est tenue pour telle) : c'est noté
- * (bsk_txn_attach_failed) ; un 0x04 jeté hors de sa fenêtre, ou jamais tenté derrière un 0x03 raté, ne l'est pas. */
+ * (bsk_txn_attach_failed) ; un 0x04 jeté hors de sa fenêtre, ou jamais tenté derrière un 0x03 raté, ne l'est pas. Un
+ * message accroché derrière une émission retenue (att_late) n'est pas dans ce 0x04 : ni retiré, ni noté. */
 static void pair_due(uint64_t now_us)
 {
     if (x.at03 <= now_us) {
         bool out = on_time(x.at03) && emit(1, x.m03, sizeof x.m03) == E_OK;
+        x.n03++;
         x.at03 = UINT64_MAX;
         if (!out) pair_end(false, now_us);
     }
     if (x.at04 <= now_us) {
+        uint16_t att = x.att_late ? 0 : x.att_len;
         bool tried = on_time(x.at04);
-        bool sent = tried && emit(1, x.m04, (uint16_t)(BSK_TXN_LOOP04_LEN + x.att_len)) == E_OK;
+        bool sent = tried && emit(1, x.m04, (uint16_t)(BSK_TXN_LOOP04_LEN + att)) == E_OK;
         if (sent) {
             seq_advance();
-            x.att_len = 0;
-        } else if (tried && x.att_len) {
+            if (att) x.att_len = 0;
+        } else if (tried && att) {
             x.att_failed = true;
         }
         pair_end(sent, now_us);
     }
 }
 bool bsk_txn_loop_on(void) { return x.loop; }
+
+/* La trame `f` est-elle la réponse à la requête en WAIT ? Son premier message est du type de la requête et, pour trois
+ * types, son contenu est celui de la réponse à cette requête-là (bsk_txn.h), quel que soit l'objectif :
+ *   - 0x40, le canal de service : la MainCmd et la sous-commande de la requête (samyang.md § 6.1, l'écho des deux) ;
+ *     une notification ('W', 'H', 'L', § 6.4) ou la réponse à une autre sous-commande ne l'est pas ;
+ *   - 0x0B : l'écho exact (0B 60 00 du Sony et du 135 ; chez Tamron, 0B, l'offset 0 de la requête, 00) ;
+ *   - 0x0A : aucun bit hors de la requête, aucun octet au-delà : l'écho (le Sony, le 135), ou la requête masquée par
+ *     les capacités de l'objectif (le Tamron, tamron.md § 1.2).
+ * Les autres types : le type seul. Deux requêtes identiques ont la même réponse : rien ne distingue la réponse en
+ * retard à la première (bsk_txn.h). */
+static bool answers(const bsk_frame_t *f)
+{
+    const uint8_t *r = f->msg;
+    if (r[0] != x.q[0]) return false;
+    switch (r[0]) {
+    case 0x40:
+        return f->len >= 3 && r[1] == x.q[1] && r[2] == x.q[2];
+    case 0x0B:
+        return f->len == x.q_len && !memcmp(r, x.q, x.q_len);
+    case 0x0A:
+        if (f->len > x.q_len) return false;
+        for (uint16_t i = 1; i < f->len; i++)
+            if (r[i] & ~x.q[i]) return false;
+        return true;
+    default:
+        return true;
+    }
+}
+uint32_t bsk_txn_n03(void) { return x.n03; }
 
 void bsk_txn_on_event(const bsk_phy_event_t *e)
 {
@@ -264,7 +328,7 @@ void bsk_txn_on_event(const bsk_phy_event_t *e)
         }
         break;
     case BSK_PHY_FRAME:
-        if (x.state == TXN_WAIT && !x.req_held && e->u.frame.msg[0] == x.type) {
+        if (x.state == TXN_WAIT && !x.req_held && answers(&e->u.frame)) {
             x.reply = e->u.frame;
             x.state = TXN_DONE;
         }

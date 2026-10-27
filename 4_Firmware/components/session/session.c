@@ -1,7 +1,10 @@
 /* SOURCE: spec de l'atelier § 3.1 et § 8 — SESSION
  * AUTHOR: engineer
  * DATE: 2026-10-04
- * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte
+ * STATUS: actif — C pur, sans ESP-IDF : compilé aussi par les tests hôte ; ticket #674 : la position de reprise (restore.h) ;
+ *         ticket #685 : la reprise ne coupe jamais les rails (son paramètre de coupure retiré) ; ticket #689 : un délai qui
+ *         suit une action de la carte se compte depuis l'instant réel de l'action (settle) ; ticket #691 : les fenêtres de la
+ *         poignée de main aussi, et une commande agit à son instant réel (bsk_session_real)
  *
  * Le superviseur de la session (bsk_session.h), en machine à états explicite : une variable d'état publiée
  * (bsk_session_state_t), une étape dans l'état (step_t, interne), des transitions nommées (to_off, to_powering,
@@ -68,18 +71,19 @@ typedef enum {
     S_WATCH,        /* détecteur de perte armé */
     /* RECOVERING */
     S_REC_WAIT,     /* attente entre deux essais */
-    S_REC_CUT,      /* rails coupés */
 } step_t;
 
 static struct {
     bsk_session_params_t p;
     bsk_session_state_t  state;
     step_t               step;
-    uint64_t             now;
+    uint64_t             now;         /* l'heure historique : celle de l'événement ou de l'échéance traités (run) */
+    uint64_t             real;        /* l'instant réel du pas, `now_us` de bsk_session_step, ou d'une commande entre deux
+                                         pas (bsk_session_real) */
     uint64_t             due;         /* échéance de l'étape, UINT64_MAX sinon */
     bool                 vd_on;
     bool                 lens_cs;     /* lue au POWERING, puis suivie par BSK_PHY_LENS_CS */
-    uint64_t             hs_body_up;  /* poignée de main : BODY_CS levée, pour le journal */
+    uint64_t             hs_body_up;  /* poignée de main : BODY_CS levée, à l'instant réel (acted), pour le journal */
     uint64_t             hs_up_us;    /* LENS_CS vue haute, après BODY_CS levée */
     int                  fails;       /* échecs comptés consécutifs */
     bsk_err_t            last_error;
@@ -158,10 +162,34 @@ const bsk_ack_t *session_ack_last(void) { return &s.acks[(s.ack_head + s.ack_n -
 
 /* ─────────────────────────── transitions ─────────────────────────── */
 
+/* Une échéance qui borne une attente (de l'objectif : un flux, l'immobilité ; du magasin), ou l'attente entre deux
+ * essais : comptée sur l'heure historique, si bien qu'un événement daté avant elle est à l'heure, même lu par un pas en
+ * retard (run, bsk_session_step). Les fenêtres de la poignée de main se comptent depuis BODY_CS (settle). */
 static void wait_for(step_t st, uint32_t ms)
 {
     s.step = st;
     s.due = s.now + (uint64_t)ms * MS;
+}
+
+/* L'instant réel d'une action de la carte sur l'objectif : le début du pas qui l'exécute, ou l'heure historique si elle est
+ * plus tardive (un événement daté après le début du pas, que l'action suit). Le temps passé dans le pas avant l'action
+ * n'est pas compté, comme pour la fenêtre de la paire (txn.c, on_time). Une commande déposée entre deux pas agit à son
+ * instant réel (bsk_session_real), pas à celui du dernier pas : un CMD_ATTACH allume le rail logique quand il arrive. */
+static uint64_t acted(void) { return s.now > s.real ? s.now : s.real; }
+
+/* Un délai minimal du matériel ou du protocole qui suit une action de la carte (RAIL_MS après un rail, HS_LOW_MS après
+ * BODY_CS basse, HS_HOLD_MS de BODY_CS haute tenue, AF_STOP_MS après le 0x1C) : compté depuis l'instant réel de l'action,
+ * jamais depuis l'heure historique. Un pas en retard rattrape ses échéances une à une (run) : un délai posé depuis une
+ * échéance passée échoirait aussitôt, et l'action suivante partirait dans le même pas (audit du 2026-10-23, R-02 : 150 ms
+ * sans pas après le rail logique, et rail moteur, lignes, BODY_CS basse puis haute partaient au même instant).
+ * Les deux fenêtres de la poignée de main (handshake_ms, après BODY_CS levée puis rabaissée) aussi : l'objectif ne voit
+ * le signal qu'à son mouvement réel. Comptées depuis l'heure historique, un pas en retard de plus de 500 ms levait BODY_CS
+ * et la rabaissait dans le même pas, `never_high` sans que l'objectif ait eu le moindre délai (ticket #691). Elles restent
+ * des fenêtres : un front de LENS_CS daté avant leur échéance est à l'heure, même lu par un pas en retard (run). */
+static void settle(step_t st, uint32_t ms)
+{
+    s.step = st;
+    s.due = acted() + (uint64_t)ms * MS;
 }
 
 /* TXD, BODY_CS et VD au repos (haute impédance, tirées bas), avant que les rails ne soient coupés : une ligne haute vers
@@ -169,16 +197,18 @@ static void wait_for(step_t st, uint32_t ms)
  * haute. Les lignes ne sont pilotées de nouveau qu'une fois les deux rails établis (S_RAIL_MOTOR). */
 static void lines_rest(void)
 {
-    bsk_txn_loop(false);              /* la paire en attente ne part pas vers des lignes au repos */
     bsk_phy_lines(false);
     bsk_phy_vd(0);
     s.vd_on = false;
 }
 
-/* D2 absent : lignes au repos, rails coupés, session oubliée, compteur à zéro. */
+/* D2 absent : lignes au repos, rails coupés, session oubliée, compteur à zéro, la position de reprise effacée
+ * (l'objectif retiré, ou un geste de l'hôte : le prochain démarrage n'est pas une reprise), CMD_LENS_CUSTOM
+ * désynchronisée levée. */
 static void to_off(void)
 {
     motion_leave(E_ABORTED);          /* la retombée de D2, ou CMD_CLEAR_FAULT et CMD_DETACH (rien en vol) */
+    restore_drop();
     enter(SESSION_OFF);
     s.step = S_NONE;
     s.due = UINT64_MAX;
@@ -186,6 +216,7 @@ static void to_off(void)
     lines_rest();
     bsk_phy_rail(BSK_RAIL_MOTOR, false);
     bsk_phy_rail(BSK_RAIL_LOGIC, false);
+    cmd_rails_cut();                  /* CMD_LENS_CUSTOM désynchronisée levée (cmd.h) */
     s.fails = 0;
     s.last_error = E_OK;
 }
@@ -200,7 +231,7 @@ static void to_powering(void)
     forget();
     s.lens_cs = bsk_phy_lens_cs();    /* déjà haute, aucun front ne le dira */
     bsk_phy_rail(BSK_RAIL_LOGIC, true);
-    wait_for(S_RAIL_LOGIC, RAIL_MS);
+    settle(S_RAIL_LOGIC, RAIL_MS);
 }
 
 /* Le 0x01, dans la milliseconde qui suit la poignée de main ; l'init (init.h) en vol. */
@@ -217,7 +248,7 @@ static void to_homing(void)
 {
     enter(SESSION_HOMING);
     (void)drive_stop();
-    wait_for(S_HOME_PAUSE, AF_STOP_MS);
+    settle(S_HOME_PAUSE, AF_STOP_MS);
 }
 
 /* Un flux est arrêté à son dernier message plus lost_ms, plus 1 µs : constaté après lost_ms passés sans lui. */
@@ -279,9 +310,9 @@ static void fail_counted(void)
  * dans l'état où elle est ; à l'échéance, pas de marque. */
 static void boot_end(void) { wait_for(S_MARK, MARK_WAIT_MS); }
 
-/* La lecture de la marque rendue ou échue : READY, ou RESTORING sur le trajet que trace restore.h, où une perte est un
- * échec compté comme en READY. `nomark` : le jeton du journal s'il n'y a pas de marque (`nomark`, ou `timeout` à
- * l'échéance de la lecture). */
+/* La lecture de la marque rendue ou échue : READY, ou RESTORING vers la position de reprise ou la marque, sur le trajet
+ * que trace restore.h, où une perte est un échec compté comme en READY. `nomark` : le jeton du journal s'il n'y a ni
+ * l'une ni l'autre (`nomark`, `storeer` la lecture en erreur, ou `timeout` à l'échéance de la lecture). */
 static void boot_decide(const char *nomark)
 {
     if (!restore_plan()) {
@@ -364,7 +395,7 @@ static void on_due(void)
     switch (s.step) {
     case S_RAIL_LOGIC:
         bsk_phy_rail(BSK_RAIL_MOTOR, true);
-        wait_for(S_RAIL_MOTOR, RAIL_MS);
+        settle(S_RAIL_MOTOR, RAIL_MS);
         break;
     case S_RAIL_MOTOR:
         if (!s.vd_on) {
@@ -373,12 +404,12 @@ static void on_due(void)
         }
         bsk_phy_lines(true);                        /* rails établis ; TXD routée avant le 0x01 */
         bsk_phy_body_cs(false);
-        wait_for(S_HS_LOW, HS_LOW_MS);
+        settle(S_HS_LOW, HS_LOW_MS);
         break;
     case S_HS_LOW:
         bsk_phy_body_cs(true);
-        s.hs_body_up = s.now;
-        wait_for(S_HS_UP, s.p.handshake_ms);
+        s.hs_body_up = acted();
+        settle(S_HS_UP, s.p.handshake_ms);
         break;
     case S_HS_UP:                                   /* LENS_CS jamais haute : le 0x01 tranchera */
         bsk_journal_handshake(BSK_HS_NEVER_HIGH, 0);
@@ -387,7 +418,7 @@ static void on_due(void)
         break;
     case S_HS_HOLD:
         bsk_phy_body_cs(false);
-        wait_for(S_HS_DOWN, s.p.handshake_ms);
+        settle(S_HS_DOWN, s.p.handshake_ms);
         break;
     case S_HS_DOWN:                                 /* LENS_CS restée haute : le 0x01 aussi */
         bsk_journal_handshake(BSK_HS_STUCK_HIGH, s.hs_up_us);
@@ -427,21 +458,10 @@ static void on_due(void)
         forget();
         fail_counted();
         break;
-    /* La reprise ne coupe les rails que si cut_rails est vrai, faux par défaut (décision de l'humain, jusqu'à la carte à
-     * rails commutés) : sinon elle repart de POWERING, qui repose les lignes au même niveau. Quand elle coupe, la VD est
-     * arrêtée avec les lignes et relancée au POWERING suivant, après les rails : une VD haute pendant la coupure
-     * alimenterait l'objectif par ses diodes de protection et annulerait la coupure. */
-    case S_REC_WAIT:                                /* les rails : sans effet s'ils ne sont pas commutés */
-        if (!s.p.cut_rails) {                       /* la coupure désactivée, POWERING tout de suite */
-            to_powering();
-            break;
-        }
-        lines_rest();                               /* VD comprise, relancée au POWERING suivant */
-        bsk_phy_rail(BSK_RAIL_MOTOR, false);
-        bsk_phy_rail(BSK_RAIL_LOGIC, false);
-        wait_for(S_REC_CUT, s.p.cut_ms);
-        break;
-    case S_REC_CUT:
+    /* La reprise ne coupe jamais les rails (décision de l'humain du 2026-10-23 : le rail allumé et le flux 0x04 sont le
+     * dernier vivant, la bague continue à piloter le focus ; une perte de télémétrie n'est pas une sécurité) : elle repart
+     * de POWERING, qui repose les lignes au même niveau. */
+    case S_REC_WAIT:
         to_powering();
         break;
     default:                                        /* S_NONE, S_INIT, S_HOME10 : sans échéance, jamais échus */
@@ -457,11 +477,12 @@ static bool advance(void)
         return true;
     }
     bsk_txn_tick(s.now);
+    motion_q_end(s.now);                            /* le 0x1C d'un q retenu jusqu'au 0x04 : parti, ou pas */
     switch (s.step) {
     case S_HS_UP:
-        if (s.lens_cs) {
-            s.hs_up_us = s.now - s.hs_body_up;      /* 0 : déjà haute */
-            wait_for(S_HS_HOLD, HS_HOLD_MS);
+        if (s.lens_cs) {                            /* 0 : déjà haute, vue avant BODY_CS levée */
+            s.hs_up_us = s.now > s.hs_body_up ? s.now - s.hs_body_up : 0;
+            settle(S_HS_HOLD, HS_HOLD_MS);
             return true;
         }
         break;
@@ -487,7 +508,7 @@ static bool advance(void)
     case S_MARK:                                    /* la lecture de la marque rendue, et un 0x06 : */
         mark_poll();                                /* le premier 0x05 après l'init arrive avant le 0x06 de sa paire */
         if (!mark_loading() && lens_rx()->have06) {
-            boot_decide("nomark");
+            boot_decide(mark_failed() ? "storeer" : "nomark");
             return true;
         }
         break;
@@ -598,9 +619,9 @@ void bsk_session_params_default(bsk_session_params_t *p)
     p->first05_ms = 500;
     p->probe05_ms = 300;
     p->retry_wait_ms = 3000;
-    p->cut_ms = 500;
-    p->cut_rails = false;      /* décision de l'humain, jusqu'à la carte à rails commutés */
     p->lost_ms = 2000;
+    p->keep = NULL;
+    p->warm = false;
 }
 
 void bsk_session_init(const bsk_session_params_t *p)
@@ -609,9 +630,11 @@ void bsk_session_init(const bsk_session_params_t *p)
     s.p = *p;
     s.state = SESSION_OFF;   /* rien n'est émis, lignes au repos, VD arrêtée (bsk_phy_init les a laissées ainsi) */
     s.due = UINT64_MAX;
+    restore_init(p->keep, p->warm);
     motion_init();
     ring_init();
     mark_init();
+    cmd_init();
     init_params(p);
     forget();
     bsk_txn_late_clear();
@@ -633,11 +656,16 @@ static void ev_order(uint64_t t)
  * d'un Sony sous LOG ALL) ne retient pas le pas, qui rend la main à HOTE et à la LED. Le reste attend le pas suivant, une
  * milliseconde plus tard sur la carte, et ce qui est échu après le dernier événement traité aussi : une échéance n'est
  * jamais jugée avant un événement plus ancien (une réponse resterait derrière l'échéance de sa requête). La file de la
- * carte en tient 32 : un pas la vide, sauf si la PHY la remplit pendant qu'il la lit. */
+ * carte en tient 32 : un pas la vide, sauf si la PHY la remplit pendant qu'il la lit. La position de reprise est tenue
+ * d'abord, en READY : ce que le pas précédent a lu (un 0x06, le goto du bouton) et une commande de mouvement déposée
+ * depuis y sont avant tout ce que ce pas peut constater ; une perte ne l'est que 2 s (lost_ms) après la dernière trame
+ * lue, jamais dans le pas qui la suit. */
 void bsk_session_step(uint64_t now_us)
 {
     bsk_phy_event_t e;
     unsigned n = 0;
+    s.real = now_us;         /* les délais qui suivent une action de la carte se comptent depuis lui (settle) */
+    if (s.state == SESSION_READY) restore_note();
     bsk_txn_real(now_us);    /* la fenêtre de la paire se juge contre lui (bsk_txn.h) */
     while (n < STEP_EVENTS && bsk_phy_poll(&e)) {
         n++;
@@ -649,30 +677,38 @@ void bsk_session_step(uint64_t now_us)
     }
     if (n < STEP_EVENTS) run(now_us);
     mark_poll();             /* ce que le magasin a rendu */
+    cmd_mark_poll(s.now);    /* le geste de marque en vol : rangé, raté, ou à son échéance */
 }
+
+void bsk_session_real(uint64_t now_us) { s.real = now_us; }
 
 uint64_t bsk_session_next(void)
 {
     uint64_t d = s.state == SESSION_OFF && s.present && !s.held ? s.now : next_due();   /* après une commande */
+    if (cmd_mark_due() < d) d = cmd_mark_due();     /* jugée en fin de pas (bsk_session_step), hors de run */
     return d < s.now ? s.now : d;
 }
 
 /* L'instantané. La marque : celle de l'objectif et de la focale courants, une fois relue. L'ouverture, en unités
- * objectif : le code relu au 0x05, la plage de la réponse au 0x08 ; sans 0x08, pas d'ouverture. CAP_LIMITS_REPORTED : les
- * bornes sont celles que l'objectif annonce dans son 0x06, jamais mesurées ; posé dès qu'un 0x06 est lu dans la session,
- * retiré quand leur flux s'arrête (lens_rx_stale). */
+ * objectif : le code relu au 0x05, la plage de la réponse au 0x08 ; sans 0x08, pas d'ouverture ; lens_rx ne publie que
+ * des codes du domaine, 0 sinon (lens_rx.h). CAP_LIMITS_REPORTED : les bornes sont celles que l'objectif annonce dans son
+ * 0x06, jamais mesurées ; posé dès qu'un 0x06 est lu dans la session, retiré quand leur flux s'arrête (lens_rx_stale) ;
+ * il dit un 0x06 lu, la position mesurée (led.c), pas des bornes connues, que dit limits_valid. */
 void bsk_session_status(bsk_status_t *st)
 {
     const lens_rx_t *l = lens_rx();
     memset(st, 0, sizeof *st);
     st->session_state = (uint8_t)s.state;
     st->motion_state = (uint8_t)motion_state();
+    st->moving = motion_moving();
+    st->held = s.held;
     st->position_valid = s.state == SESSION_READY && l->have06;
     st->focus_position = l->pos;                      /* 0 sans 0x06 */
-    st->focus_min = l->fmin;                          /* valides comme la position (bsk_contract.h) ; 0 sans 0x06 */
+    st->limits_valid = l->lim;                        /* bornes connues : un 0x06 lu, un intervalle valide */
+    st->focus_min = l->fmin;                          /* valides avec limits_valid (bsk_contract.h) ; 0 sans elles */
     st->focus_max = l->fmax;
     st->lens_id_product = l->lens_type2;              /* le LensType2 du 0x07 ; 0 sans lui */
-    st->aperture_current = l->ap;                     /* 0 sans 0x05 */
+    st->aperture_current = l->ap;                     /* 0 sans 0x05, ou hors du domaine */
     st->aperture_min = l->ap_min;                     /* 0 sans 0x08 */
     st->aperture_max = l->ap_max;
     st->capabilities = l->have08 ? CAP_APERTURE | CAP_APERTURE_READBACK : 0;
@@ -708,6 +744,7 @@ void bsk_session_debug(bsk_session_debug_t *d)
     d->pair_late_us = l.max_us;
     d->fault_motor = p.fault_motor;
     d->fault_logic = p.fault_logic;
+    d->nvs = bsk_store_nvs();
 }
 
 /* ─────────────────────────── cmd.h : ce que la boîte de commandes lit et demande ─────────────────────────── */
@@ -720,6 +757,7 @@ void session_attach(void)
 {
     s.held = false;
     s.fails = 0;                                /* à tout démarrage demandé */
+    restore_drop();                             /* un démarrage demandé n'est pas une reprise : la marque */
     if (s.present) to_powering();               /* D2 absent : OFF, le démarrage part avec D2 (advance) */
 }
 

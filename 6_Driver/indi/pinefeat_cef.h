@@ -68,6 +68,7 @@ class PinefeatCEF : public INDI::Focuser
         void applyLimits(int32_t min, int32_t max);
         void resetLimits();
         void readExtended();
+        void readRestart();
         void showExtText(INDI::PropertyText &property, const char * res);
         void readClimate();
         void climateProperties(bool define);
@@ -112,6 +113,7 @@ class PinefeatCEF : public INDI::Focuser
         INDI::PropertyNumber TemperatureNP {1}; // `z`: FOCUS_TEMPERATURE, the convention Ekos reads
         INDI::PropertyNumber HumidityNP {1};    // `z`
         INDI::PropertyNumber DewPointNP {1};    // `z`: the threshold the board computes
+        INDI::PropertyText RestartTP {1};       // `x`: the cause of the board's last restart
 
         // CEF Buffer Size
         static const uint8_t CEF_BUF { 16 };
@@ -148,6 +150,13 @@ class PinefeatCEF : public INDI::Focuser
         // reports its threshold (readClimate)
         bool climateDefined {false};
         bool dewPointDefined {false};
+
+        // `x`: the last restart read in this connection, its cause, the time since it (ms) and when that reply came;
+        // none yet if not restartKnown
+        bool restartKnown {false};
+        std::string restartCause;
+        unsigned long long restartTime {0};
+        std::chrono::steady_clock::time_point restartRead;
 
         // After `stall` or `aborted`, `g` is read again until stopWatchEnd: the stop may turn `unconfirmed`
         bool stopWatch {false};

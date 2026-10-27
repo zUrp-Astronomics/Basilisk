@@ -78,12 +78,35 @@ jobs:
     # 15 min couvre deux exécutions d'une suite ordinaire avec une marge large. Si ta suite en
     # demande plus, monte ce chiffre dans le même geste que l'image du job.
     #
-    # ICI, 20 : la limite d'attente du rail, au-delà de laquelle un verdict n'est plus lu. La suite
-    # de `4_Firmware/` est bornée par le CPU (mutants en parallèle, `nproc`). Mesuré le 2026-10-02 :
-    # une passe des deux suites : 2 min 24 s sur 12 cœurs, 7 min 33 s sur 2 cœurs,
-    # 16 min 37 s pour `4_Firmware/run.sh` seul sur 1 cœur ; la préparation : 1 min 12 s (Chromium
-    # téléchargé, apt non joué). Sur 2 cœurs, préparation et deux passes font environ 16 min 20 s,
-    # au-delà de 15. Sur 1 cœur, même 20 ne suffit pas : le run est tué, sans verdict.
+    # ICI, 20 : la limite d'attente du rail, au-delà de laquelle un verdict n'est plus lu. On ne le
+    # monte pas : le budget se tient par ce que la sonde joue. `4_Firmware/run.sh` ne joue pas ses
+    # mutants (son étape 6) sous `LCARS_PROBE=1`, posé par `run_suite` (7_Docs/SUITES.md, « Ce que
+    # joue la sonde de pertinence ») : ~1550 mutants joués deux fois, bornés par le CPU, menaient la
+    # sonde au plafond (2026-10-24 : 19 min 45 s pour l'une, l'autre tuée à 20 min 02 s, sans verdict,
+    # deux sondes jouées en même temps).
+    #
+    # Mesuré le 2026-10-24 sur le runner, 12 cœurs vus (essai `trial-775-sonde`, run 2934 : cette sonde,
+    # deux couples en matrice, jobs superposés 5 min 22 s), sur la suite de `main` après #771 et #773 :
+    #   - couple aveugle (tout est joué deux fois) : 9 min 27 s. Préparation 1 min 23 s ; témoin
+    #     4 min 08 s ; mesure 3 min 52 s. Par passe : `test_app.js` 2 min 23 s (des attentes de la page,
+    #     pas du CPU), `4_Firmware/run.sh` environ 1 min 28 s, dont l'étape ASan et UBSan 1 min 04 s (15
+    #     programmes à la suite, un cœur), le reste quelques secondes ;
+    #   - couple pertinent (la mesure s'arrête au premier rouge) : 7 min 01 s, superposé au premier.
+    # Le temps n'est plus borné par le CPU : deux sondes à la fois ne s'allongent presque pas.
+    #
+    # Les deux couples sont des commits d'essai posés sur la suite qui porte ce changement : le harnais
+    # est pris dans la tête, et le couple réel du run 2840 (#773, la première version de PR #774, a246e74)
+    # porte l'ancien `run.sh`, qui rejoue les mutants ; la sonde y joue comme avant (2840 : verdict=blind).
+    #   - aveugle, le changement de #773 tel que fusionné (a964024 : les 6 mêmes fichiers, +381 -7),
+    #     retiré puis remis : base 0967f51dda344cecd15bffa2447f5e26706e3521, tête
+    #     129ccf464f143a46491de081ee151b165a90b8aa. Émis :
+    #       LCARS-PROBE reverted_exit=0
+    #       LCARS-PROBE verdict=blind harness=5_App/test/,5_App/run.sh,5_App/tool_station/test_tool_station.py,5_App/tool_station/run.sh,4_Firmware/traces/,4_Firmware/sim/test/,4_Firmware/run.sh
+    #   - pertinent, le code de #783 (E_DESYNC) retiré puis remis : base
+    #     3db78bc46068d1ca44fb711a35ab3a1d18f68720, tête aab9af10b17a044deeeebb5f90f9d54e85aafd8a ; sur la
+    #     base, `test_journal.c` ne compile plus (`'E_DESYNC' undeclared`). Émis :
+    #       LCARS-PROBE reverted_exit=1
+    #       LCARS-PROBE verdict=relevant harness=5_App/test/,5_App/run.sh,5_App/tool_station/test_tool_station.py,5_App/tool_station/run.sh,4_Firmware/traces/,4_Firmware/sim/test/,4_Firmware/run.sh
     timeout-minutes: 20
     # Le script de la sonde est POSIX ; la commande de test, elle, est jouée en bash (`run_suite`).
     defaults:
@@ -113,6 +136,8 @@ jobs:
           # PAS de `set -e` ici, et c'est délibéré : ce script FAIT ÉCHOUER des commandes exprès —
           # l'échec de la suite EST la mesure. Un `set -e` avorterait au moment précis où le fait
           # apparaît, et la sonde rendrait une panne à la place de son résultat.
+          # Or le runner joue ce `run:` en `sh -e {0}` : `set +e` lui retire ce `-e` imposé.
+          set +e
           #
           # ⚠ `set -f` : GLOB DÉSACTIVÉE POUR TOUT LE SCRIPT. `$harness` est délibérément NON quoté
           # là où il est développé — c'est ainsi qu'on obtient plusieurs chemins — mais sans `-f`,
@@ -215,7 +240,7 @@ jobs:
           #
           # La sonde n'a plus besoin du réseau : tout ce qui suit est du `checkout` LOCAL. On coupe
           # donc les deux vecteurs ici, à l'endroit exact où le besoin s'arrête.
-          git remote remove origin
+          git remote remove origin || { fact "verdict=inapplicable reason=token-not-removed"; exit 0; }
           unset FORGE_TOKEN
 
           # ── ET LA SUITE JUGÉE NE VOIT PLUS RIEN DU TOUT : LISTE BLANCHE, PAS LISTE NOIRE ──

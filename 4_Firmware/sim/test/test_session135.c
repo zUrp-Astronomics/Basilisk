@@ -44,7 +44,7 @@ static int checks, fails;
 /* Une machine qui ne rend plus la main est un échec, pas un plantage : la garde de durée le dit comme
  * une vérification (sortie 1), et mutants.sh le compte tué. */
 /* La garde de durée, en secondes : 10 ; la passe sous sanitizers de 4_Firmware/run.sh, qui ralentissent le programme
- * (16 s sous ASan, audit R6), la relève (-DGARDE_S). */
+ * (16 s sous ASan, audit R6), et les mutants en -O0 (sim/test/mutants.sh) la relèvent (-DGARDE_S). */
 #ifndef GARDE_S
 #define GARDE_S 10
 #endif
@@ -96,8 +96,8 @@ static void note(act_t a)
 
 /* La règle des lignes : une ligne émise vers l'objectif (TXD, BODY_CS, VD) n'est pilotée, à aucun
  * niveau, que les deux rails établis — rail logique allumé depuis 100 ms, rail moteur depuis 50 ms (S_RAIL_LOGIC,
- * S_RAIL_MOTOR) ; hors de là, elle est au repos (haute impédance, tirée bas) : au démarrage, en OFF, pendant la
- * coupure de RECOVERING, chaque fois que les rails sont coupés. Et une trame n'est émise que TXD routée. Vérifiée
+ * S_RAIL_MOTOR) ; hors de là, elle est au repos (haute impédance, tirée bas) : au démarrage, en OFF, chaque fois que
+ * les rails sont coupés. Et une trame n'est émise que TXD routée. Vérifiée
  * après chaque commande de la session à la PHY, dans chaque test ; une faute est un échec. */
 #define LOGIC_UP_US (100u * MS)
 #define MOTOR_UP_US (50u * MS)
@@ -176,13 +176,15 @@ bool __wrap_bsk_phy_lines(bool drive)
     return ok;
 }
 
-/* Les fronts de VD remontés par la PHY : aucun pendant la coupure de RECOVERING. */
+/* Les fronts de VD remontés par la PHY. */
 static uint64_t VD_EDGES[65536];
 static size_t n_vd;
+static size_t n_rx_ev;      /* les événements de réception (trames, erreurs) remontés à la SESSION */
 
 bool __wrap_bsk_phy_poll(bsk_phy_event_t *ev)
 {
     bool got = __real_bsk_phy_poll(ev);
+    if (got && (ev->kind == BSK_PHY_FRAME || ev->kind == BSK_PHY_ERROR)) n_rx_ev++;
     if (got && ev->kind == BSK_PHY_FRAME) note((act_t){.kind = A_RX, .t = ev->t_us, .frame = ev->u.frame});
     if (got && ev->kind == BSK_PHY_VD && n_vd < sizeof VD_EDGES / sizeof VD_EDGES[0]) VD_EDGES[n_vd++] = ev->t_us;
     return got;
@@ -758,13 +760,13 @@ static void t_lines_off(void)
     CHECK(rest_all() && rails_off() && vd_edges(toff, phy_sim_now()) == 0, "5 s plus tard, D2 présent : toujours au repos");
 }
 
-/* Décision de l'humain : la coupure désactivée par défaut. La reprise attend 3 s puis repart de
- * POWERING : ni rail coupé, ni ligne au repos, ni VD arrêtée, à aucun instant. */
+/* La reprise ne coupe jamais les rails (décision de l'humain du 2026-10-23) : elle attend 3 s puis repart de POWERING ;
+ * ni rail coupé, ni ligne au repos, ni VD arrêtée, à aucun instant. */
 static void t_lines_recovering(void)
 {
     uint64_t tr, tp;
     size_t from;
-    printf("RECOVERING, coupure désactivée (défaut) : lignes pilotées, VD en marche, rails jamais coupés, POWERING 3 s après\n");
+    printf("RECOVERING, sans coupure : lignes pilotées, VD en marche, rails jamais coupés, POWERING 3 s après\n");
     bench();
     L.f.silent = true;
     mount();
@@ -779,40 +781,6 @@ static void t_lines_recovering(void)
         CHECK(LOG[i].hz == 60, "la VD jamais arrêtée");
     CHECK(vd_edges(tr, tp + LOGIC_UP_US) > 0 && !rest_all() && rails_up() && phy_sim_wires()->vd == PHY_SIM_HIGH,
           "la VD tourne pendant la reprise, lignes pilotées, rails établis");
-}
-
-/* La coupure activée (cut_rails) : la VD est arrêtée pendant la coupure, et
- * relancée au POWERING suivant, après les rails. La coupure commence 3 s après l'entrée en RECOVERING (retry_wait_ms) et
- * dure 500 ms (cut_ms). */
-static void t_lines_recovering_cut(void)
-{
-    uint64_t tr, tcut, tp;
-    long iv, il;
-    printf("RECOVERING, coupure activée : lignes et VD au repos pendant la coupure, pilotées et VD relancée au POWERING suivant\n");
-    bench();
-    P.cut_rails = true;
-    bsk_session_init(&P);
-    L.f.silent = true;
-    mount();
-    while (status().session_state != SESSION_RECOVERING && phy_sim_now() < T0 + 5000 * MS) run_for(1 * MS);
-    tr = entered(SESSION_RECOVERING, 0);
-    CHECK(tr != 0 && !rest_all(), "objectif muet : RECOVERING, lignes encore pilotées pendant l'attente");
-    tcut = tr + P.retry_wait_ms * MS;
-    run_to(tcut);
-    CHECK(rest_all() && rails_off() && phy_sim_wires()->vd == PHY_SIM_REST,
-          "début de la coupure : rails coupés, TXD, BODY_CS au repos, VD arrêtée (au repos)");
-    run_to(tcut + P.cut_ms * MS / 2);
-    CHECK(rest_all() && rails_off(), "au milieu de la coupure : toujours au repos");
-    run_to(tcut + P.cut_ms * MS + 200 * MS);
-    tp = entered(SESSION_POWERING, tr);
-    CHECK(tp == tcut + P.cut_ms * MS, "POWERING à la fin de la coupure");
-    iv = act_from(0, A_VD, tp, -1);
-    il = act_from(0, A_LINES, tp, 1);
-    CHECK(iv >= 0 && LOG[iv].hz == 60 && LOG[iv].t == tp + LOGIC_UP_US && il > iv && LOG[il].t == LOG[iv].t,
-          "VD relancée et lignes pilotées 100 ms après POWERING, rails établis");
-    CHECK(vd_edges(tcut, tp + LOGIC_UP_US) == 0 && vd_edges(tp + LOGIC_UP_US, phy_sim_now()) > 0,
-          "aucun front de VD de la coupure aux rails établis, puis la VD tourne");
-    CHECK(!rest_all() && phy_sim_wires()->vd == PHY_SIM_HIGH, "lignes pilotées, VD en marche");
 }
 
 /* ─────────────────────────── MOUVEMENT et la boîte de commandes ─────────────────────────── */
@@ -1335,7 +1303,9 @@ static void t_xdetect_recovery(void)
     CHECK(status().session_state == SESSION_OFF && rail_on_refused(from) == 1 && rails_off(), "5 s après : toujours OFF");
 }
 
-/* La file des événements de PHY pleine derrière la retombée : l'absence est vue quand même. */
+/* La file des événements de PHY pleine derrière la retombée : l'absence est vue quand même. La file est remplie de
+ * changements du FAULT d'un rail, qui passent par elle à toute heure : derrière la coupure, la réception est fermée
+ * (bsk_phy.h, bsk_phy_lines), et une E_BUS n'y entre plus. */
 static void t_xdetect_full(void)
 {
     uint64_t td;
@@ -1344,7 +1314,7 @@ static void t_xdetect_full(void)
     td = phy_sim_now() + DROP;
     phy_sim_d2(false);
     phy_sim_run(td);                                 /* la coupure, 2 ms après */
-    for (int i = 0; i < 1100; i++) phy_sim_bus_error();   /* EV_CAP = 1024 : le plus ancien est jeté */
+    for (int i = 0; i < 1100; i++) phy_sim_rail_fault(BSK_RAIL_MOTOR, i % 2 == 0);   /* EV_CAP = 1024 : le plus ancien est jeté */
     run_to(td);
     CHECK(status().session_state == SESSION_OFF && entered(SESSION_OFF, td) == td, "OFF, à l'instant de la coupure");
 }
@@ -1358,7 +1328,7 @@ static size_t n_jl;
 static size_t jdrain(void)
 {
     char b[sizeof JL[0]];
-    uint8_t g;
+    uint32_t g;
     size_t n;
     n_jl = 0;
     while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
@@ -1458,9 +1428,11 @@ static void t_journal(void)
 }
 
 /* Une émission malformée injectée dans la PHY simulée (phy_sim_lens_raw), le faux 135 hors tension et la session en
- * OFF ; SESSION donne l'erreur au journal avec ses octets. Les lignes attendues sont écrites à la main : un octet tous
- * les 13 µs (byte_us du faux 135) ; des octets écartés remontent avant la trame qui les suit, ou 20,001 ms après le
- * dernier octet reçu (RX_STALE_US, plus de 20 ms), ou par 4096. */
+ * OFF, les lignes pilotées par le test (phy_sim_mounted, bsk_phy_lines) : la réception n'est ouverte que lignes
+ * pilotées (bsk_phy.h ; fermée, rien ne remonte, t_rx_window) ; SESSION donne l'erreur au journal avec ses octets. Les
+ * lignes attendues sont écrites à la main : un octet tous les 13 µs (byte_us du faux 135) ; des octets écartés
+ * remontent avant la trame qui les suit, ou 20,001 ms après le dernier octet reçu (RX_STALE_US, plus de 20 ms), ou par
+ * 4096. */
 static const char R07[] = "F0 2B 00 02 00 07 01 03 70 01 00 01 05 00 00 08 00 00 00 00 00 60 92 86 5E 00 00 00 "
                           "00 00 00 00 00 00 00 00 00 00 00 00 8D 02 55";   /* full:12 */
 
@@ -1658,7 +1630,7 @@ static pos_seen_t pos_seen(bool m2)
 }
 
 /* Une reprise sans coupure de l'objectif, par la perte de liaison : le 135 se tait en READY, la carte passe en RECOVERING
- * (sans couper ses rails, cut_rails faux d'office), il parle de nouveau, la carte refait son init jusqu'à READY. */
+ * (sans couper ses rails : la reprise ne les coupe jamais), il parle de nouveau, la carte refait son init jusqu'à READY. */
 static bool resume_no_cut(void)
 {
     uint64_t ts = phy_sim_now(), tr;
@@ -1911,6 +1883,8 @@ static void t_journal_rejected(void)
     size_t n, sent = 0;
     printf("journal : les octets qu'une erreur de réception a rejetés, de la PHY simulée au journal par SESSION\n");
     bench();
+    phy_sim_mounted();                              /* sans lui, le verrou de XDETECT refuse les lignes */
+    CHECK(__real_bsk_phy_lines(true), "les lignes pilotées par le test, la session en OFF : la réception ouverte");
     bsk_journal_init(phy_sim_now);
     bsk_journal_set(true, false);
     jdrain();
@@ -2018,6 +1992,99 @@ static size_t chg_at(size_t from, uint8_t state)
 {
     while (from < n_chg && chg[from].state != state) from++;
     return from;
+}
+
+/* ─────────────────────────── la réception hors des lignes pilotées ─────────────────────────── */
+
+/* Les compteurs de DEBUG (PROTOCOL.md § 3) : les lignes perdues du journal, les trames refusées par bench_core, et ceux
+ * que la SESSION remonte (bsk_session_debug). */
+typedef struct { uint32_t dropped, refused; bsk_session_debug_t d; } dbg_t;
+
+static dbg_t dbg(void)
+{
+    dbg_t r = {bsk_journal_dropped(), bsk_bench_refused(), {0}};
+    bsk_session_debug(&r.d);
+    return r;
+}
+
+static bool dbg_same(dbg_t a, dbg_t b)
+{
+    return a.dropped == b.dropped && a.refused == b.refused && a.d.evq_drop == b.d.evq_drop && a.d.ev_back == b.d.ev_back &&
+           a.d.ev_back_us == b.d.ev_back_us && a.d.tx_wait_us == b.d.tx_wait_us && a.d.tx_timeout == b.d.tx_timeout &&
+           a.d.pair_late == b.d.pair_late && a.d.pair_late_us == b.d.pair_late_us && a.d.fault_motor == b.d.fault_motor &&
+           a.d.fault_logic == b.d.fault_logic;
+}
+
+/* Ce qui arrive sur RXD d'un objectif dont les lignes ne sont pas pilotées (la première trace de la carte v1.0 : après
+ * chaque p0, une rafale de `* rx <t> err=bus` et d'octets au hasard), injecté à l'instant courant sous LOG ON : une trame
+ * valide (R07), des octets de cette trace suivis d'un début de trame sans suite, trois erreurs du pilote UART ; puis
+ * 60 ms, le début de trame périmé 20 ms après son dernier octet. Les lignes restent au repos, et rien de la réception
+ * n'atteint la SESSION : aucun événement, aucune ligne `* rx` au journal, aucun changement d'état, aucun compteur de
+ * DEBUG qui bouge. */
+static void deaf(const char *when)
+{
+    static const uint8_t junk[] = {0xBF, 0xFF, 0xD0, 0xBF, 0xFF, 0x3C, 0x7B, 0xA5, 0xF0, 0x2B, 0x00};
+    uint8_t b[64];
+    size_t n = fr_hex(R07, b, sizeof b), rx0 = n_rx_ev, chg0 = n_chg, mchg0 = n_mchg;
+    bool rest = rest_all();
+    dbg_t d0;
+    long i;
+    bsk_journal_set(true, false);
+    jdrain();
+    d0 = dbg();
+    phy_sim_lens_raw(b, n);
+    phy_sim_lens_raw(junk, sizeof junk);
+    for (int k = 0; k < 3; k++) phy_sim_bus_error();
+    run_for(60 * MS);
+    jdrain();
+    i = jfind(0, "* rx ", NULL);
+    CHECK(rest && rest_all(), "%s : les lignes au repos", when);
+    CHECK(n_rx_ev == rx0, "%s : aucun événement de réception remonté à la SESSION (%zu)", when, n_rx_ev - rx0);
+    CHECK(i < 0, "%s : aucune ligne * rx au journal (« %s »)", when, i >= 0 ? JL[i] : "");
+    CHECK(n_chg == chg0 && n_mchg == mchg0, "%s : aucun changement d'état, ni de SESSION ni de MOUVEMENT", when);
+    CHECK(dbg_same(dbg(), d0), "%s : aucun compteur de DEBUG ne bouge", when);
+}
+
+/* Puis les lignes pilotées par la session elle-même : la réception rouverte, l'init lue, READY. */
+static void hears(const char *when)
+{
+    size_t rx0 = n_rx_ev;
+    run_for(4000 * MS);
+    jdrain();
+    CHECK(status().session_state == SESSION_READY && n_rx_ev > rx0 && jfind(0, "* rx ", NULL) >= 0,
+          "%s : la réception rouverte avec les lignes, l'init lue, READY", when);
+    bsk_journal_set(false, false);
+}
+
+/* La réception n'est ouverte que lignes pilotées (bsk_phy.h, bsk_phy_lines) : en OFF après p0, en OFF après le retrait de
+ * l'objectif, et les rails en cours d'établissement, rien de ce qui arrive sur RXD n'atteint la SESSION. */
+static void t_rx_window(void)
+{
+    printf("réception fermée hors des lignes pilotées : OFF après p0, OFF après un retrait, rails en cours d'établissement\n");
+    ready();
+    bsk_journal_init(phy_sim_now);
+    CHECK(accepted_then(cmd(CMD_DETACH, 0), ACK_COMPLETED, E_OK, NULL) && status().session_state == SESSION_OFF, "p0 : OFF");
+    deaf("OFF après p0");
+    CHECK(accepted_then(cmd(CMD_ATTACH, 0), ACK_COMPLETED, E_OK, NULL), "p1");
+    hears("p1");
+
+    ready();
+    bsk_journal_init(phy_sim_now);
+    d2(false);
+    run_for(400 * MS);
+    CHECK(status().session_state == SESSION_OFF, "l'objectif retiré, D2 retombé : OFF");
+    deaf("OFF après un retrait");
+    d2(true);
+    hears("l'objectif remonté");
+
+    bench();
+    bsk_journal_init(phy_sim_now);
+    mount();
+    while (status().session_state != SESSION_POWERING && phy_sim_now() < T0 + 1000 * MS) run_for(1 * MS);
+    CHECK(status().session_state == SESSION_POWERING && phy_sim_wires()->rail[BSK_RAIL_LOGIC],
+          "POWERING, le rail logique allumé, les lignes pas encore pilotées");
+    deaf("les rails en cours d'établissement");
+    hears("les rails établis");
 }
 
 /* Chaque trajet, ses cibles calculées à la main depuis 16384, X = 200, bornes 13878 / 30733. Le faux 135 décide la fin de
@@ -2186,36 +2253,60 @@ static void t_restore_loss(void)
           (long long)(tlast + 2000 * MS + 1 - te));
 }
 
-/* RESTORING après une reprise : READY sur la marque 20000 (croissante, un goto depuis 16384), puis le faux 135 muet 3 s : la
- * perte, RECOVERING ; il reparle : POWERING 3 s après, l'init (son homing le ramène en 16384), et de nouveau RESTORING, un
- * goto à 20000, READY sur la marque. */
+/* Le faux 135 muet en READY : la perte, RECOVERING ; il reparle : POWERING 3 s après, l'init (son homing le ramène en
+ * 16384), puis la fin du démarrage ; 15 s. Rend l'entrée du journal où la reprise commence. */
+static size_t silent_resume(void)
+{
+    uint64_t t0 = phy_sim_now();
+    size_t from;
+    L.f.silent = true;
+    while (status().session_state != SESSION_RECOVERING && phy_sim_now() < t0 + 5000 * MS) run_for(1 * MS);
+    from = n_log;
+    L.f.silent = false;
+    run_for(15000 * MS);
+    return from;
+}
+
+/* Une reprise vise la dernière position lue, pas la marque (ticket #674, critère 1), l'init du 135 rentrant son moteur en
+ * 16384 : READY sur la marque 20000 (croissante, un goto depuis 16384), un goto à 25000 arrivé, la perte, la reprise :
+ * RESTORING vers 25000, son sens celui du dernier déplacement (de 20000 à 25000, croissant) : depuis 16384 dessous, un
+ * seul goto ; READY en 25000, la marque intacte. Puis le côté de l'arrivée (critère 5) : 14000, puis 15000, atteint en
+ * croissant ; depuis 16384 au-dessus, le trajet direct arriverait en décroissant : 14800 (15000 - X, X = 200) puis 15000. */
 static void t_restore_recovery(void)
 {
     uint16_t t[4] = {0};
     size_t from, n, k;
-    uint64_t tr;
-    printf("RESTORING, faux 135 : de nouveau après une reprise réussie\n");
+    uint32_t g;
+    printf("RESTORING, faux 135 : après une perte, la dernière position (pas la marque), arrivée du côté de son sens\n");
     restore_boot(20000 | INC, 8000);
     CHECK(status().session_state == SESSION_READY && status().focus_position == 20000, "READY sur la marque, 20000");
-    L.f.silent = true;
-    while (status().session_state != SESSION_RECOVERING && phy_sim_now() < T0 + 20000 * MS) run_for(1 * MS);
-    tr = phy_sim_now();
-    from = n_log;
-    L.f.silent = false;
-    run_for(15000 * MS);
+    g = cmd(CMD_FOCUS_GOTO, 25000);
+    run_for(3000 * MS);
+    CHECK(accepted_then(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 25000, "un goto à 25000, arrivé");
+    from = silent_resume();
     n = targets_1d(from, t, 4);
-    for (k = 0; k < n_chg && !(chg[k].t >= tr && chg[k].state == SESSION_RESTORING); k++) {}
+    for (k = 0; k < n_chg && !(chg[k].t >= LOG[from].t && chg[k].state == SESSION_RESTORING); k++) {}
     CHECK(k < n_chg && k > 0 && chg[k - 1].state == SESSION_IDENTIFYING && k + 1 < n_chg && chg[k + 1].state == SESSION_READY,
           "RECOVERING, POWERING, IDENTIFYING, puis RESTORING et READY");
-    CHECK(n == 1 && t[0] == 20000 && status().session_state == SESSION_READY && status().focus_position == 20000 &&
-              l135_position(&L) == 20000,
-          "un 0x1D, 20000 ; READY sur la marque (%zu : %u, position %ld)", n, t[0], (long)status().focus_position);
+    CHECK(n == 1 && t[0] == 25000 && status().session_state == SESSION_READY && status().focus_position == 25000 &&
+              l135_position(&L) == 25000 && status().mark_position == 20000,
+          "un 0x1D, 25000 ; READY en 25000, la marque intacte (%zu : %u, position %ld)", n, t[0], (long)status().focus_position);
     {
         bool home = false;
         for (long i = find(from, A_RX, 0, 0x06); i >= 0 && !home; i = find((size_t)i + 1, A_RX, 0, 0x06))
             home = (LOG[i].frame.msg[3] | LOG[i].frame.msg[4] << 8) == 16384;
         CHECK(home, "l'init de la reprise l'a ramené en 16384 : le goto l'a bien déplacé");
     }
+    g = cmd(CMD_FOCUS_GOTO, 14000);
+    run_for(3000 * MS);
+    g = cmd(CMD_FOCUS_GOTO, 15000);
+    run_for(3000 * MS);
+    CHECK(accepted_then(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 15000, "14000, puis 15000 en croissant");
+    from = silent_resume();
+    n = targets_1d(from, t, 4);
+    CHECK(n == 2 && t[0] == 14800 && t[1] == 15000 && status().session_state == SESSION_READY &&
+              status().focus_position == 15000 && l135_position(&L) == 15000,
+          "depuis 16384 au-dessus : 14800 puis 15000 ; READY en 15000 (%zu : %u, %u)", n, t[0], t[1]);
     CHECK(g_store_sim.writes == 0, "rien d'écrit dans le magasin (la marque ne s'écrit que sur un geste)");
 }
 
@@ -2340,6 +2431,145 @@ static void t_restore_journal(void)
     a = jfind(0, "* session ", " ready");
     CHECK(a >= 0 && jfind(0, "* restore ", " skip=nomark") == a + 1, "sans marque : « * session <t> ready » puis « * restore <t> "
           "skip=nomark »");
+    CHECK(jfind(0, "* mark ", NULL) < 0, "sans marque : une absence, aucune ligne `* mark` (ni load=er)");
+}
+
+/* Les transitions sorties du journal depuis le dernier appel, sans leur instant (« * session powering »), à la suite ;
+ * les autres lignes comptées par leur début. */
+static char TR[64][96];
+static size_t n_tr, n_rail, n_bounce;
+
+static void tr_take(void)
+{
+    char b[400];
+    uint32_t g;
+    size_t n;
+    while ((n = bsk_journal_take(b, sizeof b - 1, &g)) > 0) {
+        const char *t, *rest;
+        b[n] = 0;
+        n_rail += !strncmp(b, "* rail ", 7);
+        n_bounce += !strncmp(b, "* xdetect ", 10) && strstr(b, " bounce");
+        if (strncmp(b, "* session ", 10) && strncmp(b, "* motion ", 9) && strncmp(b, "* restore ", 10)) continue;
+        t = strchr(b + 2, ' ');                      /* l'espace avant l'instant */
+        rest = strchr(t + 1, ' ');                   /* celle qui le suit */
+        if (n_tr < sizeof TR / sizeof TR[0]) snprintf(TR[n_tr], sizeof TR[0], "%.*s%s", (int)(t - b), b, rest ? rest : "");
+        n_tr++;
+    }
+}
+
+/* Ticket #714 : le démarrage du 135 sous LOG ON, sous une charge plus lourde que celle de la carte réelle dans sa première
+ * seconde (la première trace, 2026-10-19 : des `* rx <t> err=bus`, `* xdetect <t> bounce`, `* rx <t> err=framing` en
+ * plus des 29 lignes du démarrage) : un front de FAULT du rail moteur toutes les 5 ms (`* rail`, sous le plafond, 200 par
+ * seconde ; le journal seul, la session n'en change pas) et, l'insertion confirmée, un rebond de XDETECT toutes les
+ * 100 ms (`* xdetect <t> bounce`, sous le plafond ; rien de coupé). La marque 20000 rangée, sens inconnu : RESTORING par
+ * le dépassement, 20200 puis 20000 (t_restore_journal). Chaque transition du démarrage est au journal, dans l'ordre,
+ * écrite à la main ; les lignes de charge, elles, restent plafonnées. */
+static void t_boot_load(void)
+{
+    static const char *const want[] = {
+        "* session powering", "* session identifying", "* session restoring",
+        "* restore mark=20000 dir=unknown x=200 path=overshoot via=20200",
+        "* motion commanded", "* motion moving", "* motion settling", "* motion arrived",
+        "* motion commanded", "* motion moving", "* motion settling", "* motion arrived",
+        "* session ready", "* restore end=arrived",
+    };
+    const size_t n_want = sizeof want / sizeof want[0];
+    uint64_t t0, tr = 0;
+    unsigned edges = 0, bounces = 0, lost = 0;
+    uint32_t d0;
+    bool active = false;
+    printf("journal : le démarrage du 135 sous charge (FAULT de rail, rebonds de XDETECT) : aucune transition tue\n");
+    bench();
+    store_sim_poke(KEY135, 20000);
+    bsk_journal_init(phy_sim_now);
+    bsk_journal_set(true, false);
+    tr_take();
+    n_tr = n_rail = n_bounce = 0;
+    d0 = bsk_journal_dropped();
+    t0 = phy_sim_now();
+    mount();
+    for (unsigned i = 0; phy_sim_now() < t0 + 10000 * MS && (!tr || phy_sim_now() < tr + 1000 * MS); i++) {
+        phy_sim_rail_fault(BSK_RAIL_MOTOR, active = !active);
+        edges++;
+        if (phy_sim_now() >= t0 + 400 * MS && i % 20 == 0) {
+            phy_sim_d2(false);
+            run_for(1 * MS);
+            phy_sim_d2(true);
+            bounces++;
+        }
+        run_for(5 * MS);
+        tr_take();
+        if (!tr && status().session_state == SESSION_READY) tr = phy_sim_now();
+    }
+    for (size_t k = 0; k < n_want; k++) lost += k >= n_tr || strcmp(TR[k], want[k]);
+    CHECK(tr && n_tr == n_want && lost == 0, "chaque transition du démarrage, dans l'ordre : %zu sur %zu, %u manquante(s) ou autre(s)",
+          n_tr, n_want, lost);
+    for (size_t k = 0; lost && k < n_tr && k < sizeof TR / sizeof TR[0]; k++) printf("    reçue : « %s »\n", TR[k]);
+    CHECK(n_rail < edges && n_bounce < bounces && bsk_journal_dropped() - d0 >= edges - n_rail + bounces - n_bounce,
+          "la charge plafonnée : %zu `* rail` sur %u, %zu rebonds sur %u, %lu lignes tues", n_rail, edges, n_bounce, bounces,
+          (unsigned long)(bsk_journal_dropped() - d0));
+    CHECK(wire_faults == 0 && status().focus_position == 20000, "READY sur la marque, la charge sans effet sur le fil");
+    bsk_journal_set(false, false);
+}
+
+/* Ticket #714 : un hôte qui relance le démarrage en boucle (`b`, CMD_ATTACH dans tout état) écrit une ligne
+ * `* session <t> powering` par commande, sans que l'automate la retienne : le journal la borne, 30 transitions dans la
+ * seconde, le reste perdu et compté. Cent CMD_ATTACH au même instant, en READY. */
+static void t_attach_loop(void)
+{
+    uint32_t d0;
+    unsigned powering = 0;
+    printf("journal : CMD_ATTACH en boucle, cent dans la seconde : 30 transitions écrites, le reste compté\n");
+    ready();
+    bsk_journal_init(phy_sim_now);
+    bsk_journal_set(true, false);
+    jdrain();
+    d0 = bsk_journal_dropped();
+    for (int i = 0; i < 100; i++) cmd(CMD_ATTACH, 0);
+    jdrain();
+    for (size_t i = 0; i < n_jl; i++) powering += !strncmp(JL[i], "* session ", 10) && strstr(JL[i], " powering");
+    CHECK(powering == 30 && bsk_journal_dropped() - d0 == 70, "30 lignes `* session <t> powering`, 70 perdues (%u, %lu)",
+          powering, (unsigned long)(bsk_journal_dropped() - d0));
+    run_for(4000 * MS);
+    CHECK(status().session_state == SESSION_READY, "la carte redémarre la session, READY");
+    bsk_journal_set(false, false);
+}
+
+/* La lecture de la marque en erreur au démarrage (le magasin la rend en erreur, g_store_sim.fail_get, la NVS en panne
+ * sur la carte), la marque 20000 rangée : le démarrage finit sans marque, comme sans elle — READY en 16384, ni RESTORING
+ * ni 0x1D —, mais le journal le dit : « * mark <t> load=er key=01030800bf087 » (la clé du 135, calculée à la main), puis
+ * « * session <t> ready » suivie de « * restore <t> skip=storeer », ni `nomark` ni `timeout`. La carte continue : un
+ * goto arrive, rien n'est écrit dans le magasin. */
+static void t_restore_store_error(void)
+{
+    long a, m;
+    uint32_t g;
+    printf("RESTORING, faux 135 : la lecture de la marque en erreur, READY sans retour, * mark load=er, skip=storeer\n");
+    bench();
+    store_sim_poke(KEY135, 20000);
+    g_store_sim.fail_get = true;
+    bsk_journal_init(phy_sim_now);
+    mount();
+    while (find(0, A_SEND, 2, 0x0A) < 0 && phy_sim_now() < T0 + 3000 * MS) run_for(1 * MS);
+    bsk_journal_set(true, false);
+    jdrain();
+    run_for(3000 * MS);
+    jdrain();
+    bsk_journal_set(false, false);
+    CHECK(status().session_state == SESSION_READY && status().last_error == E_OK && entered(SESSION_RESTORING, 0) == 0 &&
+              count_1d(0, NULL) == 0 && status().focus_position == 16384 && !status().mark_valid,
+          "READY en 16384, sans erreur, ni RESTORING ni 0x1D, pas de marque publiée");
+    m = jfind(0, "* mark ", " load=er key=01030800bf087");
+    a = jfind(0, "* session ", " ready");
+    CHECK(m >= 0 && a > m, "« * mark <t> load=er key=01030800bf087 », avant READY (%ld, %ld)", m, a);
+    CHECK(a >= 0 && jfind(0, "* restore ", " skip=storeer") == a + 1 && jfind(0, "* restore ", NULL) == a + 1,
+          "« * session <t> ready » puis « * restore <t> skip=storeer », une seule ligne `* restore`");
+    CHECK(jfind(0, "* restore ", " skip=nomark") < 0 && jfind(0, "* restore ", " skip=timeout") < 0, "ni nomark ni timeout");
+    g = cmd(CMD_FOCUS_GOTO, 20000);
+    run_for(3000 * MS);
+    CHECK(accepted_then(g, ACK_COMPLETED, E_OK, NULL) && status().focus_position == 20000, "la carte continue : le goto arrive");
+    CHECK(g_store_sim.writes == 0, "rien d'écrit dans le magasin");
+    g_store_sim.fail_get = false;
 }
 
 /* ─────────────────────────── les renvois de l'init ─────────────────────────── */
@@ -2706,8 +2936,10 @@ static void t_resend_stop(void)
  * perte 2 s après sa dernière télémétrie (plus 1 µs, on_frame), le goto en vol fini ACK_FAILED E_LOST à cet instant ;
  * l'alimentation revient 1 s après (un choix du test : une coupure brève, l'objectif rallumé pendant l'attente de la reprise) ;
  * POWERING 3 s après la perte, la poignée de main, l'init d'un objectif froid (son homing le ramène en 16384), puis RESTORING :
- * la marque relue sous la clé du 135, croissante, au-dessus de 16384 : du bon côté, un seul goto, 20000 ; READY sur la marque.
- * Rien d'autre n'est écrit dans le magasin que la marque posée. L'essai au banc reste à faire par l'humain. */
+ * une reprise vise la cible du goto qui était en vol, 28000, pas la marque (décision de l'humain du 2026-10-22, ticket
+ * #674) ; arrivée en croissant (de 20000 vers 28000), au-dessus de 16384 : du bon côté, un seul goto, 28000 ; READY en
+ * 28000, la marque intacte. Rien d'autre n'est écrit dans le magasin que la marque posée. L'essai au banc reste à faire par
+ * l'humain. */
 static void t_power_loss_restore(void)
 {
     uint16_t t[4] = {0};
@@ -2715,7 +2947,7 @@ static void t_power_loss_restore(void)
     uint64_t toff, tl, tr, tf = 0, ton;
     size_t from, n, k;
     bool home = false;
-    printf("perte d'alimentation en plein goto, une marque rangée : perte, reprise, init, RESTORING, la marque (§ 13)\n");
+    printf("perte d'alimentation en plein goto, une marque rangée : perte, reprise, init, RESTORING, la cible du goto (§ 13)\n");
     ready();
     g = cmd(CMD_FOCUS_GOTO, 20000);
     run_for(3000 * MS);
@@ -2755,11 +2987,11 @@ static void t_power_loss_restore(void)
         home = (LOG[i].frame.msg[3] | LOG[i].frame.msg[4] << 8) == 16384;
     CHECK(home, "l'init de la reprise l'a ramené en 16384");
     n = targets_1d(from, t, 4);
-    CHECK(n == 1 && t[0] == 20000, "RESTORING : un 0x1D, 20000, du bon côté (%zu : %u)", n, t[0]);
+    CHECK(n == 1 && t[0] == 28000, "RESTORING : un 0x1D, 28000, la cible du goto perdu, du bon côté (%zu : %u)", n, t[0]);
     CHECK(status().session_state == SESSION_READY && status().motion_state == MOTION_ARRIVED && status().position_valid &&
-              status().focus_position == 20000 && l135_position(&L) == 20000 && status().mark_valid &&
+              status().focus_position == 28000 && l135_position(&L) == 28000 && status().mark_valid &&
               status().mark_position == 20000 && status().last_error == E_OK,
-          "READY sur la marque, ARRIVED en 20000 (%ld)", (long)status().focus_position);
+          "READY en 28000, ARRIVED (%ld), la marque intacte en 20000", (long)status().focus_position);
     CHECK(g_store_sim.writes == 1 && n_acks == 6, "rien d'écrit de plus dans le magasin (la marque ne s'écrit que sur un geste), aucun accusé de plus (%zu)", n_acks);
     CHECK(!any_40() && lens_clean() && bsk_bench_refused() == refused0, "ni 0x40, ni refus, ni hors modèle");
 }
@@ -2973,7 +3205,6 @@ int main(int argc, char **argv)
     t_lines_boot();
     t_lines_off();
     t_lines_recovering();
-    t_lines_recovering_cut();
     t_goto();
     t_pair_phase();
     t_goto_twice();
@@ -3001,12 +3232,16 @@ int main(int argc, char **argv)
     t_ring_af();
     t_log_all_minute();
     t_sony_late_55();
+    t_rx_window();
     t_restore_paths();
     t_restore_none();
     t_restore_stop();
     t_restore_loss();
     t_restore_recovery();
     t_restore_journal();
+    t_boot_load();
+    t_attach_loop();
+    t_restore_store_error();
     t_xdetect_journal();
     t_xdetect_bounce();
     t_resend_init();

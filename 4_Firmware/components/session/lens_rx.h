@@ -19,20 +19,25 @@ typedef struct {
                                          have06 : depuis le lancement de sa boucle (lens_rx_loop), et oubliés quand leur
                                          flux s'arrête (lens_rx_stale) */
     bool     have08;                  /* une réponse au 0x08 assez longue pour la plage d'ouverture, ses deux codes dans
-                                         le domaine que la carte convertit (BSK_AP_CODE_MIN..MAX) */
+                                         le domaine que la carte convertit (BSK_AP_CODE_MIN..MAX), le min au plus le max */
     uint8_t  move;                    /* 0x05, offset 60 ; 0 sans 0x05 */
     bool     have62, have64, have66;  /* un 0x05 assez long pour cet offset, reçu dans la session (have62 et have64
                                          oubliés avec have05, lens_rx_stale) */
     uint8_t  o62, o64, o66;           /* 0x05, offsets 62 (commutateur), 64 et 66 (commandes du fût), bruts,
                                          ceux du dernier 0x05 qui les porte ; 0 avant */
+    /* Un code d'ouverture publié est dans BSK_AP_CODE_MIN..MAX, ou vaut 0, inconnu : le code reçu hors du domaine est
+     * inconnu, jamais corrigé ni borné. Ses lecteurs ne refont pas ce jugement. */
     uint16_t ap_ring;                 /* 0x05, offsets 17-18, l'ouverture que l'objectif publie quand le bit 0
                                          de l'offset 19 le dit (bague configurée en ouverture) ; 0 sinon */
     uint16_t ap;                      /* 0x05, offsets 0-1 : l'ouverture courante, un code 256(Av+16) */
     uint16_t ap_min, ap_max;          /* réponse au 0x08, offsets 0-1 et 2-3 : la plage, en codes ; 0 sans have08 */
-    uint16_t pos;                     /* 0x06, offsets 2-3 ; 0 sans 0x06 */
+    uint16_t pos;                     /* 0x06, offsets 2-3 ; 0 sans 0x06. Publiée avec have06, sans être soumise aux
+                                         bornes : l'objectif peut être sur une butée exclue des commandes */
+    bool     lim;                     /* les bornes du dernier 0x06 lu, resserrées, forment un intervalle non vide dans
+                                         0..65535 ; faux sans 0x06 (have06) ; lim implique have06 */
     int32_t  fmin, fmax;              /* 0x06, offsets 7-8 et 9-10 : les bornes, resserrées de LIMIT_MARGIN
                                          pas chacune à la lecture (lens_rx.c) ; 32 bits : une borne publiée
-                                         près de 0 ou de 65535 ne déborde pas */
+                                         près de 0 ou de 65535 ne déborde pas ; 0 sans lim */
     uint32_t rx06;                    /* 0x06 lus */
     bool     ack1d;                   /* la dernière trame reçue portait un accusé 1D derrière son 0x06 */
     bool     ack1c;                   /* ... un accusé 1C, de toute valeur */
@@ -65,14 +70,14 @@ void lens_rx_loop(void);
  * comprises). Celui-là n'est pas reçu : il ne réarme pas la perte et ne fait rien rejouer de ce que la SESSION en lit. */
 uint8_t lens_rx_frame(const bsk_frame_t *f);
 
-/* Le flux de ce type (0x05 ou 0x06) s'est arrêté : ce que la SESSION en lit avant le prochain qui est lu devient inconnu,
- * comme jamais reçu dans la session. Pour le 0x06, have06 faux, la position et les bornes à 0. Pour le 0x05, have05,
- * have62 et have64 faux (la clé de la marque, le rôle de la bague, oss), l'ouverture, les offsets 60 et 62 à 0 (lus sans
- * drapeau : l'instantané, still.c). Le reste n'est pas touché, et ce n'est pas un oubli : o64 n'est lu que derrière
- * have64 ; l'offset 66 n'est lu que par le journal de la bague, qui ne dit qu'un changement ; l'ouverture de la bague et
- * la focale ne sont lues que sur un 0x05 lu (la focale derrière have05), qui les réécrit. Les remettre à 0 ne changerait
- * rien d'observable. L'ouverture de la bague reste aussi celle que ring.c retient : au retour du 0x05, une ouverture
- * publiée différente est un changement, pris (PROTOCOL.md § 7). */
+/* Le flux de ce type (0x05 ou 0x06) s'est arrêté : ce que la SESSION en lit avant le prochain qui est lu devient
+ * inconnu, comme jamais reçu dans la session. Pour le 0x06, have06 et lim faux, la position et les bornes à 0. Pour le
+ * 0x05, have05, have62 et have64 faux (la clé de la marque, le rôle de la bague, oss), l'ouverture, les offsets 60 et
+ * 62 à 0 (lus sans drapeau : l'instantané, still.c). Le reste n'est pas touché, et ce n'est pas un oubli : o64 n'est lu
+ * que derrière have64 ; l'offset 66 n'est lu que par le journal de la bague, qui ne dit qu'un changement ; l'ouverture
+ * de la bague et la focale ne sont lues que sur un 0x05 lu (la focale derrière have05), qui les réécrit. Les remettre à
+ * 0 ne changerait rien d'observable. L'ouverture de la bague reste aussi celle que ring.c retient : au retour du 0x05,
+ * une ouverture publiée différente est un changement, pris (PROTOCOL.md § 7). */
 void lens_rx_stale(uint8_t type);
 
 /* Une réponse porte ce que la séquence en lit : un 0x07 son identité, 4 octets ; un 0x08 sa plage, 6 octets ;

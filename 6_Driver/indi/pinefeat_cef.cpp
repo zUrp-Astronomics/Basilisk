@@ -129,6 +129,9 @@ bool PinefeatCEF::initProperties()
     DewPointNP[0].fill("DEW_POINT", "Celsius (frost point below 0)", "%6.2f", -65, 60, 0, 0);
     DewPointNP.fill(getDeviceName(), "FOCUS_DEW_POINT", "Dew or frost point", MAIN_CONTROL_TAB, IP_RO, 0, IPS_OK);
 
+    RestartTP[0].fill("CAUSE", "Cause", nullptr);
+    RestartTP.fill(getDeviceName(), "BOARD_RESTART", "Board restart", INFO_TAB, IP_RO, 0, IPS_IDLE);
+
     serialConnection->setDefaultBaudRate(Connection::Serial::B_115200);
 
     setDefaultPollingPeriod(50);
@@ -171,6 +174,7 @@ bool PinefeatCEF::updateProperties()
             defineProperty(RebootSP);
             defineProperty(LensTP);
             defineProperty(LedNP);
+            defineProperty(RestartTP);
 
             // The board keeps no LED level (100 at each start): the saved one is sent again
             loadConfig(true, LedNP.getName());
@@ -195,6 +199,7 @@ bool PinefeatCEF::updateProperties()
             deleteProperty(RebootSP);
             deleteProperty(LensTP);
             deleteProperty(LedNP);
+            deleteProperty(RestartTP);
             climateProperties(false);
         }
     }
@@ -265,6 +270,9 @@ bool PinefeatCEF::Handshake()
                 LOG_INFO("Extended set enabled (ext=1).");
                 // A move's end state stays until the next one (updateProperties): none from a past connection
                 FocusAbsPosNP.setState(IPS_OK);
+                // Nor a restart: the first `x` of this connection is one (readRestart), even of the cause and the
+                // time the last connection read
+                restartKnown = false;
             }
 
             return true;
@@ -520,10 +528,13 @@ bool PinefeatCEF::calibrate()
     return true;
 }
 
-// Extended set: `o`, `j`, `i` and `z`, at the connection, after a mark command, and at each refresh while still
+// Extended set: `x`, `o`, `j`, `i` and `z`, at the connection, after a mark command, and at each refresh while still
+// (`x` and `z` while it moves too: TimerHit)
 void PinefeatCEF::readExtended()
 {
     char res[EXT_BUF] = {0};
+
+    readRestart();
 
     if (!sendCommand("o\n", res, EXT_BUF))
         return;
@@ -546,6 +557,61 @@ void PinefeatCEF::readExtended()
     showExtText(LensTP, res);
 
     readClimate();
+}
+
+// Extended set, `x`: the board's last restart, `<cause> <ms since it>`, shown as its cause. The board can restart
+// while the port stays open, and it resumes its lens after a crash or a watchdog: the focus moves. A restart is the
+// first reply of a connection, then a reply whose cause differs from the last one or whose time is less than it can
+// be without a restart (it starts from 0 at each one: two restarts of the same cause differ, however close). One that
+// is not normal (a crash, a watchdog, the supply, a cause the board doesn't know) is logged as a warning, once per
+// restart; `poweron`, `sw` (the board's own restart), `usb` (opening the port can restart it) and `jtag` are not. A
+// reply that can't be read changes nothing.
+void PinefeatCEF::readRestart()
+{
+    char res[EXT_BUF] = {0};
+    char cause[EXT_BUF] = {0};
+    unsigned long long ms;
+    auto sent = std::chrono::steady_clock::now();
+    if (!sendCommand("x\n", res, EXT_BUF) || sscanf(res, "%255s %llu", cause, &ms) != 2)
+        return;
+    auto received = std::chrono::steady_clock::now();
+
+    // Without a restart, the board's time has grown since the last reply by at least the time from that reply's
+    // arrival to this command's sending, however late either reply came: the board reads its clock after it gets the
+    // command and before its reply arrives. Less 10 ms and 0.1 % of that time: the board's time is truncated to the
+    // ms, and its clock and the host's don't run at quite the same rate.
+    bool same = false;
+    if (restartKnown && restartCause == cause)
+    {
+        unsigned long long gap = std::chrono::duration_cast<std::chrono::milliseconds>(sent - restartRead).count();
+        same = ms + 10 + gap / 1000 >= restartTime + gap;
+    }
+    restartKnown = true;
+    restartCause = cause;
+    restartTime = ms;
+    restartRead = received;
+    if (same)
+        return;
+
+    const char * why = nullptr;
+    if (restartCause == "panic")
+        why = "its firmware crashed";
+    else if (restartCause == "int_wdt")
+        why = "its interrupt watchdog fired";
+    else if (restartCause == "task_wdt")
+        why = "its task watchdog fired";
+    else if (restartCause == "wdt")
+        why = "a hardware watchdog fired";
+    else if (restartCause == "brownout")
+        why = "its supply voltage dropped";
+    else if (restartCause != "poweron" && restartCause != "sw" && restartCause != "usb" && restartCause != "jtag")
+        why = "its cause is unknown";
+
+    RestartTP[0].setText(restartCause);
+    RestartTP.setState(why == nullptr ? IPS_OK : IPS_ALERT);
+    RestartTP.apply();
+    if (why != nullptr)
+        LOGF_WARN("The board restarted: %s (%s).", why, cause);
 }
 
 // Extended set: a reply as a text field. An `er …` is never shown as a value: the field is empty. The state: Ok with a
@@ -1013,8 +1079,27 @@ void PinefeatCEF::TimerHit()
         if (ext)
             readExtended();
     }
+    // Extended set: `x` and `z` while it moves too (`e` at y, or no reply): a board that restarted resumes its lens,
+    // and the warning comes while the focus moves; the board's sensor goes on, and a value it no longer knows is not
+    // kept published through a long move
+    else if (ext && elapsed >= 1)
+    {
+        readRestart();
+        readClimate();
+    }
 
     SetTimer(getCurrentPollingPeriod());
+}
+
+// One byte from fd, waited for until deadline at most: TTY_TIME_OUT once it has passed
+static int readByte(int fd, char * c, std::chrono::steady_clock::time_point deadline)
+{
+    auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count();
+    if (left <= 0)
+        return TTY_TIME_OUT;
+
+    int nbytes_read = 0;
+    return tty_read_expanded(fd, c, 1, left / 1000000, left % 1000000, &nbytes_read);
 }
 
 bool PinefeatCEF::sendCommand(const char * cmd, char * res, int size, bool version)
@@ -1023,15 +1108,18 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res, int size, bool versi
 
     // The input still pending is stale (a reply that came after its command's timeout): it is read and discarded,
     // as tcflush did, and if it ends inside a line, the rest of that line, still to come, is not this command's
-    // reply either
+    // reply either. Only what is already received is read: a controller that keeps sending can't hold the driver here.
     bool midLine = false;
     int pending = 0;
-    while (ioctl(PortFD, FIONREAD, &pending) == 0 && pending > 0)
+    if (ioctl(PortFD, FIONREAD, &pending) != 0)
+        pending = 0;
+    while (pending > 0)
     {
         char stale[CEF_BUF];
         ssize_t n = read(PortFD, stale, std::min(pending, int(sizeof(stale))));
         if (n <= 0)
             break;
+        pending -= n;
         midLine = stale[n - 1] != CEF_DEL;
     }
     tcflush(PortFD, TCOFLUSH);
@@ -1052,17 +1140,21 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res, int size, bool versi
         return true;
     }
 
-    // Extended set: a line of the Basilisk board's log (`* …`, after a LOG ON left by its bench page) is never the
-    // reply, nor, when version is set, a line that is not a version: each is skipped up to its delimiter, until
-    // CEF_TIMEOUT after the command. A Pinefeat controller sends neither: no reply of its starts with '*', and its reply
-    // to `v` is its version.
+    // The reply has CEF_TIMEOUT in all, from the command, up to its delimiter and at most size bytes, as before:
+    // each byte is waited for only until the deadline, so that a controller that sends without a delimiter, however
+    // slowly, can't hold the driver longer
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(int(CEF_TIMEOUT));
+    // Extended set: a line of the Basilisk board's log (`* …`, after a LOG ON left by its bench page) is never the
+    // reply, nor, when version is set, a line that is not a version: each is skipped up to its delimiter, within the
+    // same deadline. A Pinefeat controller sends neither: no reply of its starts with '*', and its reply to `v` is its
+    // version.
     char c = 0;
     for (;;)
     {
+        // The rest of a stale line, or of a line of the log, first
         while (midLine)
         {
-            if ((rc = tty_read(PortFD, &c, 1, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
+            if ((rc = readByte(PortFD, &c, deadline)) != TTY_OK)
             {
                 char errstr[MAXRBUF] = {0};
                 tty_error_msg(rc, errstr, MAXRBUF);
@@ -1072,40 +1164,26 @@ bool PinefeatCEF::sendCommand(const char * cmd, char * res, int size, bool versi
             midLine = c != CEF_DEL;
         }
 
-        if (std::chrono::steady_clock::now() > deadline)
+        nbytes_read = 0;
+        do
         {
-            LOG_ERROR("Serial read error: no reply among the lines received.");
-            return false;
+            if ((rc = nbytes_read < size ? readByte(PortFD, res + nbytes_read, deadline) : int(TTY_OVERFLOW)) != TTY_OK)
+            {
+                char errstr[MAXRBUF] = {0};
+                tty_error_msg(rc, errstr, MAXRBUF);
+                LOGF_ERROR("Serial read error: %s.", errstr);
+                return false;
+            }
         }
+        while (res[0] != '*' && res[nbytes_read++] != CEF_DEL);
 
-        if ((rc = tty_read(PortFD, &c, 1, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
-        {
-            char errstr[MAXRBUF] = {0};
-            tty_error_msg(rc, errstr, MAXRBUF);
-            LOGF_ERROR("Serial read error: %s.", errstr);
-            return false;
-        }
-        if (c == '*')
+        if (res[0] == '*')
         {
             midLine = true;
             continue;
         }
 
-        // The rest of the line, after its first byte: at most size bytes in all, as before
-        res[0] = c;
-        nbytes_read = 0;
-        if (c != CEF_DEL
-                && (rc = tty_nread_section(PortFD, res + 1, size - 1, CEF_DEL, CEF_TIMEOUT, &nbytes_read)) != TTY_OK)
-        {
-            char errstr[MAXRBUF] = {0};
-            tty_error_msg(rc, errstr, MAXRBUF);
-            LOGF_ERROR("Serial read error: %s.", errstr);
-            return false;
-        }
-        nbytes_read++;
-
-        // The reply as a string, without its line end: tty_nread_section keeps the delimiter, and writes no
-        // terminating zero when the reply fills size
+        // The reply as a string, without its line end
         while (nbytes_read > 0 && (res[nbytes_read - 1] == CEF_DEL || res[nbytes_read - 1] == '\r'))
             res[--nbytes_read] = '\0';
 

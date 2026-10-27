@@ -1,0 +1,2133 @@
+RAPPORT DE LA CAMPAGNE F1 — le banc de fuzzing du firmware (4_Firmware/sim/fuzz/, ticket #797)
+=================================================================================================
+
+Campagne du 2026-10-25. L'index des cas est au § 4 ; les commandes sont dans README.md, à côté.
+Les propriétés P1 à P11 et les cibles sont celles du plan de l'atelier, plans/fuzzing.md (§ 2 et § 3).
+La campagne F2 (#799), la SESSION face à l'objectif fou, suit le § 9, sous le titre « RAPPORT DE LA CAMPAGNE F2 » ; la
+campagne F3 (#801), l'hôte fou et le harnais secondaire de bsk_session_command, suit F2, sous le titre « RAPPORT DE LA
+CAMPAGNE F3 » ; la campagne F4 (#804), les cibles d'octets sous libFuzzer et la ligne de l'hôte en harnais d'octets, suit
+F3, sous le titre « RAPPORT DE LA CAMPAGNE F4 ».
+
+
+1. Où, avec quoi
+----------------
+
+Face code jugée     components/, include/ et main/ au commit ba4a5b1 (main, merge de #796) : cette livraison n'y
+                    touche pas (le banc, sim/test/programmes.sh, 7_Docs/SUITES.md et deux essais du runner seulement).
+Où                  la campagne : le pod de l'engineer (WSL2, 12 processeurs Intel Core Ultra 7 265H) ;
+                    le runner : la mesure d'outillage (§ 6) et le rejeu final (§ 5).
+Compilateur         pod : gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0 ; runner : gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0.
+Options             celles de la suite, -std=c11 -Wall -Wextra -Wpedantic -Werror -O2, puis la ligne SAN de run.sh :
+                    -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer. Toute la
+                    campagne tourne sous ASan et UBSan.
+Graines             1 à 12, une par processus ; douze processus à la fois par cible.
+
+
+2. Bilan par cible
+------------------
+
+Débit : cas par seconde de temps processeur, douze processus à la fois (un processus seul va 1,3 à 2 fois plus
+vite). Temps : processeur (la somme des douze), puis mural.
+
+cible    propriétés           cas joués      débit     temps proc.  mural  trouvailles
+rx       P1 P2 P9             1 080 000      1 863/s    579 s        63 s   aucune
+lens_rx  P1 P4                1 440 000      8 362/s    172 s        19 s   une : P4 avant_boucle (13 545 cas, un rangé)
+bench    P1 P5 (a)           18 000 000    138 568/s    130 s        14 s   aucune
+journal  P1 P6                  960 000     11 469/s     84 s        11 s   aucune
+         + l'énumération : 22 fonctions, 13 758 appels (§ 3)
+rtc      P1 P2 P3 P4 P8         144 000        244/s    588 s       113 s   aucune
+sht40    P1 P2 P11            6 000 000     58 536/s    103 s        17 s   aucune
+         + l'énumération : les 131 072 mots (65 536 S_T, 65 536 S_RH) contre la formule de la DS
+climat   P1 P10 P11           1 200 000     14 371/s     84 s        10 s   aucune
+         + l'énumération : les 175 027 501 couples atteignables et les cinq issues inconnues (§ 3)
+énumérations (sht40 mots, journal enum, climat couples en 12 tranches)  306 s  42 s
+
+Ce que les cas de rtc ont exercé (600 cas de la graine 1, rejoués) : 324 mémoires effacées (froides, ou somme ou sens
+faux), 105 relues d'une autre clé, 171 relues de la clé du 135 (49 avec une position dans les bornes, ailleurs que là
+où l'objectif est déjà) ; 261 démarrages passés par RESTORING (la position de reprise ou la marque).
+
+
+3. Les énumérations
+-------------------
+
+3.1 Le SHT40 (fuzz_sht40 mots) : chaque S_T de 0 à 65535 (S_RH fixé), puis chaque S_RH (S_T fixé), mesurés par le vrai
+    sht40.c contre le faux capteur et comparés à la formule de la DS (§ 4.5) calculée par le harnais : 131 072 mesures,
+    0 écart, 131 072 commandes reçues, toutes 0xFD.
+
+3.2 z et :GT# (fuzz_climat couples) : t_c de -4500 à 13000 et rh_c de 0 à 10000, soit 17 501 × 10 001 =
+    175 027 501 couples (chaque valeur que sht40.c peut rendre), plus NONE, NACK, CRC, BUS et STALE dans chacun des
+    douze processus : 175 027 561 mesures, chacune lue par `z` et par `:GT#`, 0 écart. Le seuil est comparé au point
+    de rosée ou de givre de l'OMM calculé par le harnais en long double (écart admis : un demi-centième plus 1e-6) ;
+    :GT# admet les deux voisins d'une demi-unité exacte (PROTOCOL.md ne dit pas son arrondi ; le code arrondit
+    loin de zéro).
+
+3.3 Les formats du journal (fuzz_journal enum) : chaque fonction publique bsk_journal_* qui écrit une ligne, chaque
+    champ à sa borne (instants 0, 999 et 2^64 − 1 ; INT32_MIN, -1, 0, INT32_MAX ; 0 et 2^32 − 1 ; 0 et 255 ; chaque
+    valeur de chaque énumération ; chaque chaîne que son producteur réel peut donner, la plus longue comprise ; la clé
+    de la marque aussi à 15 caractères, au-delà de key_of, comme marge), sous LOG ON et LOG ALL, ASan et UBSan :
+
+    fonction                       appels  lignes plus_long   tampon
+    bsk_journal_rx                   1920    5940       228      320
+    bsk_journal_tx                   1920    6396       228      320
+    bsk_journal_refused               120     288       233      320
+    bsk_journal_error                 960    2688       266      320
+    bsk_journal_session               768     768        45      320
+    bsk_journal_handshake              54      54        99      320
+    bsk_journal_motion                 48      48        36      320
+    bsk_journal_lens                   24      24        37      320
+    bsk_journal_ring                   12      12        50      320
+    bsk_journal_gesture               192     192       105      112
+    bsk_journal_body08                 24      24        57       80
+    bsk_journal_btn                  1404    1404        65      320
+    bsk_journal_mark                 2304    2304        81      320
+    bsk_journal_restore              2880    2880       100      320
+    bsk_journal_restore_skip          384     384        57      320
+    bsk_journal_restore_end            72      72        43      320
+    bsk_journal_xdetect                12      12        35       48
+    bsk_journal_xdetect_bounce          6       6        34      320
+    bsk_journal_rail_fault             48      48        44      320
+    bsk_journal_sht40                  30      30        40      320
+    bsk_journal_resend                384     384        55      320
+    bsk_journal_giveup                192     192        56      320
+    bsk_journal_lost                    4       2        15       24
+
+    « plus_long » : la plus longue ligne prise par bsk_journal_take ; « tampon » : celui où elle est formée (LINE_MAX,
+    320, pour vline et pour les morceaux d'octets ; le tampon propre de gesture, body08 et xdetect ; m[24] de lost_line
+    pour `* lost <n>`).
+
+    bsk_journal_lost (ajouté par F2, #799, mesuré comme les autres) : une écriture ratée, puis 2^24, sous LOG ON et sous
+    LOG ALL ; la ligne `* lost <n>` n'est rendue que sous LOG ALL (bsk_journal.h), son compte sature à 2^24 − 1
+    (LOST_N, journal.c) : `* lost 16777215`, 15 octets pour un tampon de 24.
+
+    Les fonctions publiques bsk_journal_* que le tableau écarte, parce qu'aucune n'écrit de ligne : bsk_journal_init (pose
+    l'horloge), bsk_journal_set (LOG OFF, ON, ALL : la génération, la fenêtre, rien d'écrit), bsk_journal_take (le
+    consommateur : c'est par elle que chaque ligne ci-dessus est prise et mesurée), bsk_journal_gen, bsk_journal_dropped,
+    bsk_journal_on et bsk_journal_all (des lectures d'état).
+
+    Conclusion sur le contrat de vline (journal.c:251-256, vsnprintf puis put) : la troncature est INATTEIGNABLE avec
+    les producteurs d'aujourd'hui. La plus longue ligne de vline fait 100 octets (bsk_journal_restore, `* restore …
+    path=overshoot via=`, les quatre nombres à leur extrême), pour un tampon de 320 ; le commentaire de journal.c
+    (« moins de 130 octets ») tient. C'est le premier des « Trois contrats internes sans garde » du backlog : il reste
+    sans garde et n'est pas atteint. La marge la plus faible est celle de bsk_journal_gesture : 105 octets pour un
+    tampon de 112 (journal.c le dit : « 106 caractères au plus »). Aucune ligne n'approche les 600 du transport (P6).
+    Les deux autres contrats du backlog (txn.c, bsk_txn_held_end ; session.c, session_ack_last) ne sont pas des cibles
+    de F1 : non joués.
+
+
+4. Index des cas
+----------------
+
+Un cas par ligne : la cible ; la propriété et sa source ; le chemin ; la commande de rejeu (après `fuzz.sh construit
+<sortie>`) ; la classe ; ce que fait la carte.
+
+lens_rx | P4 avant_boucle — lens_rx.h : un 0x05 ou un 0x06 qui n'est pas lu (avant lens_rx_loop, ou trop court :
+    moins de 29 octets, de 12) « ne change aucun champ publié » ([D89]) ; ack1d, ack1c : « la dernière trame reçue
+    portait un accusé » | 4_Firmware/sim/fuzz/cas/lens_rx/P4-avant_boucle-g6-69.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/lens_rx/P4-avant_boucle-g6-69.bin |
+    NOUVEAU : absent de T1 à T12 (plans/survie.md § 4), de constats_std.txt et des quatre entrées du backlog listées par
+    le brief | lens_rx_frame remet ack1d et ack1c à faux avant de savoir si la trame est lue (lens_rx.c, sa première
+    instruction) : la boucle lancée, un 0x06 de 129 octets qui porte des accusés 1D et 1C, puis un 0x06 d'un octet, non
+    lu (rendu 0), efface les deux accusés publiés ; contre l'en-tête, pas dans les faits : leurs seuls lecteurs
+    (motion.c, motion_frame et stopped) ne les lisent qu'après un 0x05 ou un 0x06 lu, qui les a d'abord réécrits, si
+    bien que la carte ne fait rien d'autre. À trancher : l'en-tête de lens_rx.h ou le code ; aucune garde ajoutée.
+
+Aucune autre trouvaille : rx, bench, journal, rtc, sht40 et climat n'ont échoué sur aucune propriété (les comptes du
+§ 2). Aucun défaut de l'audit de Codex n'est revenu (les réponses périmées et CUSTOM, #783 et #789, le goto après un
+arrêt, #787, ne sont pas dans les cibles de F1 ; F2 et F3 les rejouent).
+
+
+5. Le rejeu
+-----------
+
+Deux rejeux de chaque cas rangé donnent la même sortie, octet pour octet (`fuzz.sh rejoue-tout`, dans le pod : 416
+octets, deux fois, le même verdict). Sur le runner, sous l'image du job `firmware` (ubuntu:24.04, gcc 13.3.0), les
+harnais compilés avec les options de la suite et SAN, chaque cas rejoué deux fois, puis 1000 cas de chaque harnais :
+run 3046 (essai trial-797-rejeu.yml, sur le commit e597da8) : gcc 13.3.0 compile les sept harnais sans
+avertissement ; le cas rangé, rejoué deux fois, donne deux sorties identiques de 416 octets et le même verdict ; 1000
+cas de chaque harnais (graine 1) n'échouent que sur l'écart connu de lens_rx (P4 avant_boucle, 13 cas), aucun ailleurs.
+Après e597da8, la livraison ne change que des commentaires, la table des déclarations du générateur de fuzz_bench (les
+mêmes cas, vérifié sur dix cas de la graine 5), fautes.txt (la faute 15) et la forme des diffs de `fuzz.sh mord`.
+
+
+6. La mesure d'outillage (F4)
+-----------------------------
+
+Runner (essai trial-797-outillage.yml, image ubuntu:24.04, Ubuntu 24.04.5 LTS, 12 processeurs Intel Core Ultra 7 265H) :
+  - run 3038 : avant toute installation, `command -v gcc clang afl-fuzz` ne trouve rien (rc=1). gcc 13.3.0 s'installe.
+    `apt-get install clang afl++` (300 s au plus) : fait en 34 s ; clang 18.1.3 (1ubuntu1), afl-fuzz et
+    afl-clang-fast présents. Le harnais jouet ne se lie pas avec -fsanitize=fuzzer,address,undefined :
+    « cannot find …/libclang_rt.fuzzer-x86_64.a », de même asan et asan_static — compiler-rt n'est pas tiré par
+    clang sous --no-install-recommends ;
+  - run 3042 : le même, plus libclang-rt-18-dev : fait en 14 s ; le harnais jouet se lie et tourne 31 s :
+    21 732 525 exécutions, 701 049 par seconde, rc=0.
+Pod de l'engineer : gcc 15.2.0, libasan (.so.8) et libubsan (.so.1) présents, la passe ASan et UBSan de run.sh y tourne ;
+  `command -v clang afl-fuzz afl-clang-fast honggfuzz` ne trouve rien ; gcc refuse -fsanitize=fuzzer (« unrecognized
+  argument to -fsanitize= option: fuzzer ») ; aucun apt dans le pod (pas root, l'egress refuse les dépôts) : non mesuré
+  par apt, et un outil ne s'y installe que par une demande d'outillage approuvée par l'humain.
+
+Conclusion : F4 POSSIBLE, sur le runner, sous ubuntu:24.04, avec clang 18 et libFuzzer installés par apt (clang,
+libclang-rt-18-dev ; une quinzaine de secondes), dans un essai `trial-*.yml` : la même fz_run sous
+LLVMFuzzerTestOneInput, ses cas rejoués par le pilote gcc. AFL++ (afl-fuzz, afl-clang-fast) s'installe aussi, sans
+avoir été joué. F4 est IMPOSSIBLE dans le pod tel qu'il est (ni clang ni AFL++).
+
+
+7. Les oracles mordent
+----------------------
+
+`fuzz.sh mord` injecte chaque faute de fautes.txt dans une copie temporaire de 4_Firmware/ (jamais livrée), recompile
+le harnais visé (garde de durée à 2 s) et le joue : 52 fautes, 52 morsures. Chaque propriété jouée a mordu au moins une
+fois : P1 (UBSan sur chaque cible, ASan sur le journal, le contre-oracle de lens_rx), P2 (garde, boucle, durée, START,
+temps), P3 (transition, durée, FAULT, cible), P4 (ouverture, plage, bornes, position, drapeaux, identité, nom, rendu,
+mémoire, instantané), P5 (a) (refusée, admise, émise, issue, compte), P6 (journal, transport et ligne sous SESSION), P8,
+P9 (trame, nature, écart, relevé, bus, fin, découpage), P10 (forme, fin), P11 (commandes, issue, valeur, jugement,
+mesure, seuil, :GT#).
+
+Les vérifications qui n'ont jamais vu d'échec, et ne comptent donc pas comme couverture :
+  - rx, P2 place (la place libre jamais nulle après un rx_next qui rend faux) ;
+  - rtc, P3 etat (l'état dans l'énumération), P3 fin (READY en 12 s), P2 poll (au plus 64 bsk_phy_poll par pas) ;
+  - journal, les comparaisons de longueur explicites (vline, tampon) : chaque faute qui les viserait est arrêtée avant
+    par ASan (la lecture au-delà du tampon), qui mord, lui ;
+  - lens_rx, P4 avant_boucle n'a pas de faute injectée : elle a mordu sur le code réel (§ 4).
+
+La faute 15 (UBSan dans bench_core.c) a été déplacée après la passe finale, pour qu'aucun fichier du banc ne nomme les
+fonctions static de bench_core.c (critère 4 du ticket) ; elle a été rejouée seule et mord.
+
+La passe finale (le code livré), faute par faute : le diff de la faute (sans contexte), puis la première ligne de
+sortie qui la voit (les adresses d'ASan abrégées) :
+
+== faute 1 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P9 trame »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -42 +42 @@
+   -    if (len != n || b[3] < 1 || b[3] > 3 || b[n - 1] != 0x55) return E_FRAMING;
+   +    if (len != n || b[3] < 1 || b[3] > 4 || b[n - 1] != 0x55) return E_FRAMING;
+   MORD : ECHEC P9 trame : cas 5 de la graine 1 : jeu A : la trame rendue (classe 4, séquence 130, 45 octets de message) n'est pas une trame valide faite des octets 6192 à 6244 du flux
+== faute 2 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P9 decoupe »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -103 +103 @@
+   -        if (st == FR_SHORT && !stale) break;           /* rien n'est jeté : la suite est attendue */
+   +        if (st == FR_SHORT && !stale && r->n - pos < 3) break;           /* rien n'est jeté : la suite est attendue */
+   MORD : ECHEC P9 decoupe : cas 0 de la graine 1 : événement 9 : A (nature 1, t=1020292, 26, 26) et B (nature 1, t=1020292, 280, 256)
+== faute 3 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P9 bus »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -127 +127 @@
+   -    raw_add(raw, r->b, r->n);
+   +    (void)0;
+   MORD : ECHEC P9 bus : cas 8 de la graine 1 : jeu A : après rx_flush, 2 octets reçus jamais rapportés
+== faute 4 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P2 garde »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -104 +104 @@
+   -        pos++;                                          /* écarté, ou périmé */
+   +        if (st != FR_SHORT) pos++;
+   MORD : ECHEC P2 garde : le cas ne rend pas la main en 2 s
+== faute 5 : fuzz_rx, components/phy/phy_common.c, attendu « runtime error »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -57 +57 @@
+   -    l = (size_t)b[1] | (size_t)b[2] << 8;
+   +    l = (size_t)b[1] | (size_t)(b[2] << 24) >> 16;
+   MORD : 4_Firmware/components/phy/phy_common.c:57:38: runtime error: left shift of 194 by 24 places cannot be represented in type 'int'
+== faute 6 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P4 ouverture »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -47 +47 @@
+   -    return ap_known(code) ? code : 0;
+   +    return ap_known(code) || code ? code : 0;
+   MORD : ECHEC P4 ouverture : cas 2 de la graine 1 : op 7 : ap=9200 ap_ring=0000 ap_min=0000 ap_max=0000
+== faute 7 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P4 bornes »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -84 +84 @@
+   -        pub.lim = pub.fmin <= pub.fmax;
+   +        pub.lim = pub.fmin <= pub.fmax + 1;
+   MORD : ECHEC P4 bornes : cas 103 de la graine 1 : op 2 : lim=1 have06=1 fmin=59345 fmax=59344
+== faute 8 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P4 identite »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -92 +92 @@
+   -    } else if (type == 0x08 && f->len >= 3) {
+   +    } else if (type == 0x07 && f->len >= 4) { lens_rx_id(f); } else if (type == 0x08 && f->len >= 3) {
+   MORD : ECHEC P4 identite : cas 1 de la graine 1 : op 1 : un 0x07 de 5 octets hors de l'init change l'identité
+== faute 9 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P4 nom »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -152 +152 @@
+   -        if (msg[i] < 0x20 || msg[i] > 0x7E || msg[i] == '"') return false;
+   +        if (msg[i] < 0x20 || msg[i] > 0x7E) return false;
+   MORD : ECHEC P4 nom : cas 59 de la graine 1 : op 23 : octet 22 à la place 1 du nom
+== faute 10 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P1 au_dela »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -63 +63 @@
+   -        if (f->len > 63) {
+   +        if (f->len > 62) {
+   MORD : ECHEC P1 au_dela : cas 75 de la graine 1 : op 39 : octets au-delà de len à 0xFF : publication ou valeur rendue différente (5, 5)
+== faute 11 : fuzz_bench, components/bench_core/bench_core.c, attendu « ECHEC P5 refusee »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -35 +35 @@
+   -    case 'V': return sub == 0x00;                              /* version */
+   +    case 'V': return sub == 0x00 || sub == 0x01;                              /* version */
+   MORD : ECHEC P5 refusee : cas 1995 de la graine 1 : trame 12 (déclaration 2, len 66, type 40) : émise ou non refusée (rendu 4), le modèle la refuse
+== faute 12 : fuzz_bench, components/bench_core/bench_core.c, attendu « ECHEC P5 refusee »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -63 +63 @@
+   -    return sub == 0x38 && (v >> 4) < 3 && (v & 0x0F) < 3;
+   +    return sub == 0x38 && (v >> 4) < 4 && (v & 0x0F) < 3;
+   MORD : ECHEC P5 refusee : cas 132 de la graine 1 : trame 3 (déclaration 2, len 19, type 40) : émise ou non refusée (rendu 0), le modèle la refuse
+== faute 13 : fuzz_bench, components/bench_core/bench_core.c, attendu « ECHEC P5 admise »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -85 +85 @@
+   -    case 0x0D: return 2;  case 0x10: return 2;  case 0x1C: return 1;  case 0x1D: return 5;
+   +    case 0x0D: return 2;  case 0x10: return 2;  case 0x1C: return 1;  case 0x1D: return 6;
+   MORD : ECHEC P5 admise : cas 2 de la graine 1 : trame 5 (déclaration 255, len 21, type 0D) : refusée, le modèle l'admet
+== faute 14 : fuzz_bench, components/bench_core/bench_core.c, attendu « ECHEC P5 compte »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -108 +108 @@
+   -        refused++;
+   +        refused += 2;
+   MORD : ECHEC P5 compte : cas 0 de la graine 1 : trame 0 : le compteur de refus passe de 0 à 2
+== faute 15 : fuzz_bench, components/bench_core/bench_core.c, attendu « runtime error »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -60 +60 @@
+   -    uint8_t v = (uint8_t)(data - 0x30);
+   +    uint8_t v = (uint8_t)(((data << 24) >> 24) - 0x30);
+   MORD : 4_Firmware/components/bench_core/bench_core.c:60:34: runtime error: left shift of 163 by 24 places cannot be represented in type 'int'
+== faute 16 : fuzz_sht40, components/sensor/sht40.c, attendu « ECHEC P11 commandes »
+   --- a/4_Firmware/components/sensor/sht40.c
+   +++ b/4_Firmware/components/sensor/sht40.c
+   @@ -14 +14 @@
+   -#define CMD_RESET   0x94u   /* remise à zéro (DS table 7, § 4.7) */
+   +#define CMD_RESET   0x39u   /* remise à zéro (DS table 7, § 4.7) */
+   MORD : ECHEC P11 commandes : cas 0 de la graine 1 : lecture 0 : la commande 39 reçue par le capteur
+== faute 17 : fuzz_sht40, components/sensor/sht40.c, attendu « ECHEC P11 valeur »
+   --- a/4_Firmware/components/sensor/sht40.c
+   +++ b/4_Firmware/components/sensor/sht40.c
+   @@ -126 +126 @@
+   -    *rh_c = rh < 0 ? 0 : rh > 10000 ? 10000 : rh;
+   +    *rh_c = rh < 0 ? 0 : rh > 10000 ? 10001 : rh;
+   MORD : ECHEC P11 valeur : S_T=26214 S_RH=55577 -> st=1 t=2500 rh=10001 ; attendu 2500, 10000
+== faute 18 : fuzz_sht40, components/sensor/sht40.c, attendu « ECHEC P11 issue »
+   --- a/4_Firmware/components/sensor/sht40.c
+   +++ b/4_Firmware/components/sensor/sht40.c
+   @@ -134 +134 @@
+   -    if (r != BSK_SENSOR_OK) {
+   +    if (r != BSK_SENSOR_OK && r != BSK_SENSOR_BUS) {
+   MORD : ECHEC P11 issue : cas 0 de la graine 1 : lecture 0 : issue 4, attendue 1
+== faute 19 : fuzz_sht40, components/sensor/sht40.c, attendu « ECHEC P11 jugement »
+   --- a/4_Firmware/components/sensor/sht40.c
+   +++ b/4_Firmware/components/sensor/sht40.c
+   @@ -151 +151 @@
+   -    if (now_us > s->at_us && now_us - s->at_us > BSK_SENSOR_STALE_US) {
+   +    if (now_us > s->at_us && now_us - s->at_us > BSK_SENSOR_STALE_US + 1000000u) {
+   MORD : ECHEC P11 jugement : cas 3 de la graine 1 : lecture 2 : jugée 3793 ms après, st=1 t=13000 rh=10000 (lecture st=1)
+== faute 20 : fuzz_sht40, components/sensor/sht40.c, attendu « ECHEC P2 starts »
+   --- a/4_Firmware/components/sensor/sht40.c
+   +++ b/4_Firmware/components/sensor/sht40.c
+   @@ -137 +137 @@
+   -        if (r != BSK_SENSOR_OK) sht_recover();
+   +        if (r != BSK_SENSOR_OK) { sht_recover(); sht_recover(); }
+   MORD : ECHEC P2 starts : cas 3 de la graine 1 : lecture 0 : 7 conditions START
+== faute 21 : fuzz_sht40, components/sensor/sht40.c, attendu « ECHEC P2 duree »
+   --- a/4_Firmware/components/sensor/sht40.c
+   +++ b/4_Firmware/components/sensor/sht40.c
+   @@ -15 +15 @@
+   -#define MEASURE_MS  9u      /* la mesure : 8,2 ms au plus (DS table 4, à -40 °C et 1,08 V) ; sht_wait_ms attend au moins */
+   +#define MEASURE_MS  19u      /* la mesure : 8,2 ms au plus (DS table 4, à -40 °C et 1,08 V) ; sht_wait_ms attend au moins */
+   MORD : ECHEC P2 duree : cas 3 de la graine 1 : lecture 0 : 40000 µs de temps virtuel
+== faute 22 : fuzz_sht40, components/sensor/sht40.c, attendu « runtime error »
+   --- a/4_Firmware/components/sensor/sht40.c
+   +++ b/4_Firmware/components/sensor/sht40.c
+   @@ -78 +78 @@
+   -            c = (uint8_t)(c << 1);
+   +            c = (uint8_t)((c << 24) >> 23);
+   MORD : 4_Firmware/components/sensor/sht40.c:78:30: runtime error: left shift of 192 by 24 places cannot be represented in type 'int'
+== faute 23 : fuzz_climat, components/host/host.c, attendu « ECHEC P10 z_forme »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -539 +539 @@
+   -        put(out, cap, "-");
+   +        put(out, cap, "0.00 0.00 -");
+   MORD : ECHEC P10 z_forme : cas 0 de la graine 1 : z : issue 3, réponse « 0.00 0.00 - »
+== faute 24 : fuzz_climat, components/host/host.c, attendu « ECHEC P11 z_seuil »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -523 +523 @@
+   -    if (x < -65.0) return false;
+   +    if (x < -66.0) return false;
+   MORD : ECHEC P11 z_seuil : z : t=-4500 rh=420, seuil -6599 centièmes, non défini
+== faute 25 : fuzz_climat, components/host/host.c, attendu « ECHEC P11 gt »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -785 +785 @@
+   -    return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 25) / 50;
+   +    return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 26) / 50;
+   MORD : ECHEC P11 gt : cas 0 de la graine 1 : :GT# : t=24, réponse « 0001# » (1), attendu 0
+== faute 26 : fuzz_climat, components/host/host.c, attendu « ECHEC P11 z_mesure »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -543 +543 @@
+   -    snprintf(out, cap, "%s%ld.%02ld %ld.%02ld", v.t_c < 0 ? "-" : "", t / 100, t % 100, (long)v.rh_c / 100,
+   +    snprintf(out, cap, "%s%ld.%02ld %ld.%02ld", v.t_c <= 0 ? "-" : "", t / 100, t % 100, (long)v.rh_c / 100,
+   MORD : ECHEC P11 z_mesure : cas 0 de la graine 1 : z : t=0 rh=1182, réponse « -0.00 11.82 -23.67 », attendu « 0.00 11.82 … »
+== faute 27 : fuzz_climat, components/host/host.c, attendu « ECHEC P10 fin »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -857 +857 @@
+   -    return "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
+   +    return "\r\n";
+   MORD : ECHEC P10 fin : cas 0 de la graine 1 : z : fin de ligne « 
+== faute 28 : fuzz_climat, components/host/host.c, attendu « runtime error »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -785 +785 @@
+   -    return v.t_c < 0 ? -((-v.t_c + 25) / 50) : (v.t_c + 25) / 50;
+   +    return v.t_c < 0 ? -((-v.t_c + 25) / 50) : ((v.t_c + 25) << 19) / (50 << 19);
+   MORD : 4_Firmware/components/host/host.c:785:62: runtime error: left shift of 6043 by 19 places cannot be represented in type 'int'
+== faute 29 : fuzz_journal, components/journal/journal.c, attendu « AddressSanitizer »
+   --- a/4_Firmware/components/journal/journal.c
+   +++ b/4_Firmware/components/journal/journal.c
+   @@ -254 +254 @@
+   -    char b[LINE_MAX];
+   +    char b[64];
+   MORD : ==…==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x… at pc 0x… bp 0x… sp 0x…
+== faute 30 : fuzz_journal, components/journal/journal.c, attendu « AddressSanitizer »
+   --- a/4_Firmware/components/journal/journal.c
+   +++ b/4_Firmware/components/journal/journal.c
+   @@ -539 +539 @@
+   -    char b[112];
+   +    char b[96];
+   MORD : ==…==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x… at pc 0x… bp 0x… sp 0x…
+== faute 31 : fuzz_journal, components/journal/journal.c, attendu « ECHEC P6 transport »
+   --- a/4_Firmware/components/journal/journal.c
+   +++ b/4_Firmware/components/journal/journal.c
+   @@ -158 +158 @@
+   -    return n > cap ? cap : n;
+   +    return (n > cap ? cap : n) * 3;
+   MORD : ECHEC P6 transport : bsk_journal_rx : une ligne de 618 octets
+== faute 32 : fuzz_rtc, components/session/restore.c, attendu « ECHEC P4 memoire »
+   --- a/4_Firmware/components/session/restore.c
+   +++ b/4_Firmware/components/session/restore.c
+   @@ -65 +65 @@
+   -    if (warm && s.keep->sum == sum_of(s.keep) && s.keep->dir <= BSK_APPROACH_DECREASING) return;
+   +    if (warm && s.keep->sum == sum_of(s.keep) && s.keep->dir <= BSK_APPROACH_DECREASING + 1) return;
+   MORD : ECHEC P4 memoire : cas 146 de la graine 1 : au bsk_session_init : effacée attendue, pas à zéro
+== faute 33 : fuzz_rtc, components/session/restore.c, attendu « ECHEC P3 cible »
+   --- a/4_Firmware/components/session/restore.c
+   +++ b/4_Firmware/components/session/restore.c
+   @@ -96 +96 @@
+   -    if (!k[0] || strcmp(k, s.keep->key)) return false;
+   +    if (!k[0] || strncmp(k, s.keep->key, 12)) return false;
+   MORD : ECHEC P3 cible : cas 20 de la graine 1 : READY en 13879 (le moteur en 13879), attendu 14623 (sans mouvement)
+== faute 34 : fuzz_rtc, components/session/session.c, attendu « ECHEC P3 transition »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -240 +240 @@
+   -    enter(SESSION_IDENTIFYING);
+   +    enter(SESSION_HOMING);
+   MORD : ECHEC P3 transition : cas 0 de la graine 1 : t=1120200 : powering -> homing
+== faute 35 : fuzz_rtc, components/session/session.c, attendu « ECHEC P3 duree »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -281 +281 @@
+   -    enter(SESSION_READY);
+   +    enter(SESSION_RECOVERING);
+   MORD : ECHEC P3 duree : cas 0 de la graine 1 : t=5766480 : recovering tenu 3003446 µs
+== faute 36 : fuzz_rtc, components/session/session.c, attendu « ECHEC P4 instantane »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -705 +705 @@
+   -    st->position_valid = s.state == SESSION_READY && l->have06;
+   +    st->position_valid = l->have06;
+   MORD : ECHEC P4 instantane : cas 1 de la graine 1 : t=2763034 : état restoring ouverture 11B2 plage 11BF..1900 cap B bornes 1 13878..30733 position 1
+== faute 37 : fuzz_rtc, components/session/session.c, attendu « ECHEC P8 nvs »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -281 +281 @@
+   -    enter(SESSION_READY);
+   +    enter(SESSION_READY); (void)mark_set(BSK_MARK_HERE);
+   MORD : ECHEC P8 nvs : cas 0 de la graine 1 : 1 écriture(s) déposée(s) sans geste
+== faute 38 : fuzz_rtc, components/session/session.c, attendu « ECHEC P2 temps »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -689 +689 @@
+   -    return d < s.now ? s.now : d;
+   +    return 0;
+   MORD : ECHEC P2 temps : cas 0 de la graine 1 : le temps n'avance plus à 0 µs
+== faute 39 : fuzz_rtc, components/session/restore.c, attendu « runtime error »
+   --- a/4_Firmware/components/session/restore.c
+   +++ b/4_Firmware/components/session/restore.c
+   @@ -50 +50 @@
+   -    b[sizeof k->key] = (uint8_t)k->pos;
+   +    b[sizeof k->key] = (uint8_t)(k->pos << 16 >> 16);
+   MORD : 4_Firmware/components/session/restore.c:50:41: runtime error: left shift of 39756 by 16 places cannot be represented in type 'int'
+== faute 40 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P9 nature »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -111 +111 @@
+   -        e->u.err = E_FRAMING;
+   +        e->u.err = E_BUS;
+   MORD : ECHEC P9 nature : cas 0 de la graine 1 : jeu A : un événement de nature 1 (erreur 4)
+== faute 41 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P9 ecart »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -71 +71 @@
+   -    r->n = (uint16_t)(r->n + k);
+   +    r->n = (uint16_t)(r->n + k + (k > 3));
+   MORD : ECHEC P9 ecart : cas 118 de la graine 1 : jeu A : E_FRAMING de 4096 octets, pas les octets 0 à 4095 du flux (4095 reçus)
+== faute 42 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P9 releve »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -67 +67 @@
+   -    size_t c = BSK_PHY_RAW_MAX - r->len;
+   +    size_t c = BSK_PHY_RAW_MAX - 1 - r->len;
+   MORD : ECHEC P9 releve : cas 0 de la graine 1 : jeu A : E_FRAMING n=4096 len=255
+== faute 43 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P2 boucle »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -109 +109 @@
+   -    if (r->junk.n && (frame || stale || r->junk.n == RX_CAP)) {
+   +    if (r->junk.n && (frame || r->junk.n == RX_CAP)) {
+   MORD : ECHEC P2 boucle : cas 0 de la graine 1 : jeu A : l'échéance 1020291 reste due après 5 jugements
+== faute 44 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P4 plage »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -100 +100 @@
+   -            if (!pub.ap_min || pub.ap_min > pub.ap_max) {
+   +            if (!pub.ap_min || pub.ap_min > pub.ap_max + 1) {
+   MORD : ECHEC P4 plage : cas 351 de la graine 1 : op 7 : have08=1 ap_min=0E01 ap_max=0E00
+== faute 45 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P4 position »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -113 +113 @@
+   -        pub.pos = 0;
+   +        (void)0;
+   MORD : ECHEC P4 position : cas 4 de la graine 1 : op 12 : sans have06, pos=45913 lim=0
+== faute 46 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P4 drapeaux05 »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -118 +118 @@
+   -    pub.have05 = pub.have62 = pub.have64 = false;
+   +    pub.have05 = pub.have62 = false;
+   MORD : ECHEC P4 drapeaux05 : cas 3 de la graine 1 : op 28 : have05=0 have62=0 have64=1 ap=0000 move=0 o62=0 have07=1 have_id=1 type2=47082
+== faute 47 : fuzz_lens_rx, components/session/lens_rx.c, attendu « ECHEC P4 rendu »
+   --- a/4_Firmware/components/session/lens_rx.c
+   +++ b/4_Firmware/components/session/lens_rx.c
+   @@ -106 +106 @@
+   -    return type;
+   +    return type == 0x08 ? 0 : type;
+   MORD : ECHEC P4 rendu : cas 0 de la graine 1 : op 5 : une trame de type 08 rend 0
+== faute 48 : fuzz_bench, components/bench_core/bench_core.c, attendu « ECHEC P5 emise »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -111 +111 @@
+   -    return bsk_phy_send(f);
+   +    (void)bsk_phy_send(f); return bsk_phy_send(f);
+   MORD : ECHEC P5 emise : cas 0 de la graine 1 : trame 1 : 2 émission(s), ou une autre trame que celle donnée
+== faute 49 : fuzz_bench, components/bench_core/bench_core.c, attendu « ECHEC P5 issue »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -111 +111 @@
+   -    return bsk_phy_send(f);
+   +    return bsk_phy_send(f) == E_BUS ? E_OK : E_OK;
+   MORD : ECHEC P5 issue : cas 1 de la graine 1 : trame 3 : rendu 0, PHY a rendu 4
+== faute 50 : fuzz_rtc, components/session/session.c, attendu « ECHEC P3 fault »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -281 +281 @@
+   -    enter(SESSION_READY);
+   +    enter(SESSION_FAULT);
+   MORD : ECHEC P3 fault : cas 0 de la graine 1 : t=2763034 : FAULT sur ok
+== faute 51 : fuzz_rtc, components/journal/journal.c, attendu « ECHEC P6 ligne »
+   --- a/4_Firmware/components/journal/journal.c
+   +++ b/4_Firmware/components/journal/journal.c
+   @@ -158 +158 @@
+   -    return n > cap ? cap : n;
+   +    return (n > cap ? cap : n) * 3;
+   MORD : ECHEC P6 ligne : cas 0 de la graine 1 : t=2035200 : une ligne du journal de 630 octets
+== faute 52 : fuzz_rx, components/phy/phy_common.c, attendu « ECHEC P9 fin »
+   --- a/4_Firmware/components/phy/phy_common.c
+   +++ b/4_Firmware/components/phy/phy_common.c
+   @@ -122 +122 @@
+   -uint64_t rx_deadline(const rx_t *r) { return r->n || r->junk.n ? r->last + RX_STALE_US + 1 : UINT64_MAX; }
+   +uint64_t rx_deadline(const rx_t *r) { return r->junk.n ? r->last + RX_STALE_US + 1 : UINT64_MAX; }
+   MORD : ECHEC P9 fin : cas 22 de la graine 1 : jeu A : 42 octets reçus jamais rapportés (rapportés jusqu'à 1419 sur 1461)
+
+
+8. Le budget
+------------
+
+Campagne (les sept cibles et les trois énumérations, § 2) : 2 213 s de temps processeur (36,9 min), 309 s murales
+(5,2 min), dans le pod. Le plafond de 60 min est compté ici en temps processeur, le plus strict : douze processus
+pendant une minute comptent douze minutes.
+En plus, hors campagne : les morsures (§ 7), quatre passes pendant la mise au point puis la passe finale, environ
+1 150 s de processeur (19 min ; la première passe, non mesurée, estimée à la deuxième) ; les essais de mise au point
+des harnais, environ 200 s (3 min) ; sur le runner, le rejeu final (§ 5) et deux essais d'outillage (§ 6). Tout compris,
+environ 60 min de processeur, dont 36,9 de campagne ; un seul essai du runner à la fois (runs 3038, 3042, 3046).
+Rien n'a été retranché faute de budget : chaque cible du brief a été jouée.
+
+
+9. Limites, et ce qui n'est pas joué
+------------------------------------
+
+  - P9 est jugée sur un découpage « aux mêmes instants » : les blocs d'une rafale sont lus au même instant (sur la carte,
+    un bloc de l'UART est lu en une fois, deux symboles de silence le ferment). Un découpage qui ferait lire en un bloc
+    des octets séparés par plus de RX_STALE_US changerait les instants du flux, pas son découpage : il n'est pas
+    comparé. Aucun contre-exemple à P9 n'a été trouvé ; elle n'est pas « à revoir ».
+  - Le contre-oracle de P1 (les octets au-delà de len) n'est joué que sur lens_rx, comme le plan le demande ;
+    cmd_custom_poll, l'autre lecteur d'octets de trame, est la SESSION (F2).
+  - rtc juge la mémoire sous un objectif nominal (le 135 des traces, un moteur scripté) ; la marque, quand elle est
+    rangée, est une valeur valide (20000, croissante) : la NVS arbitraire est la cible 5 (F2). P3 n'y juge que les
+    lignes de la table sans HOTE, puisqu'aucune ligne de l'hôte n'y passe.
+  - Le seuil de condensation est comparé à un calcul en long double du même guide de l'OMM : un écart de méthode
+    commun aux deux (une formule mal recopiée de l'OMM des deux côtés) ne se verrait pas.
+  - Non couvert, parce que static ou non compilé sur l'hôte : decode de mark.c, rx_task de host_usb.c, phy.c,
+    sensor_board.c, main.c (SUITES.md, « Ce qu'aucun test hôte ne joue »). Hors de F1 : l'objectif fou, les scénarios de
+    SESSION, les lignes de l'hôte, la NVS relue par la SESSION, le FAULT comme événement logique (F2, F3).
+
+
+=================================================================================================
+RAPPORT DE LA CAMPAGNE F2 — la SESSION face à l'objectif fou (4_Firmware/sim/fuzz/, ticket #799)
+=================================================================================================
+
+Campagne du 2026-10-25. Le harnais est fuzz_session.c, l'objectif fou lens_fou.c ; les commandes sont dans README.md.
+Les propriétés P1 à P8 et les cibles 2, 3 et 5 sont celles du plan de l'atelier (plans/fuzzing.md, § 2 et § 3) ; les
+propriétés ajoutées par le brief de #799 sont nommées PRESENCE (aucun rail levé sans présence), DELAI (les délais
+physiques sous retard), ACCUSE (un seul accusé final par commande) et CONTRAT (les deux contrats internes) ; ORDRE
+(la réponse d'une requête, le CUSTOM désynchronisé) porte les régressions de l'audit de Codex (#783, #789). Chaque
+vérification, sa source et son oracle écrit à la main sont dans FZ_CHECKS et en tête de fuzz_session.c.
+
+
+F2.1 Où, avec quoi
+------------------
+
+Face code jugée     components/, include/ et main/ au commit 4afa0b1 (main, merge de #798) : cette livraison n'y
+                    touche pas (le banc, sim/test/programmes.sh et trois essais du runner seulement).
+Où                  la campagne : le pod de l'engineer (WSL2, 12 processeurs, partagé avec d'autres pods : une charge
+                    de 40 à 50 pendant la campagne) ; le runner : le rejeu final seulement (F2.6).
+Compilateur         pod : gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0 ; runner : gcc 13.3.0 (ubuntu:24.04, le job `firmware`).
+Options             celles de la suite, -std=c11 -Wall -Wextra -Wpedantic -Werror -O2, puis la ligne SAN de run.sh :
+                    -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer. Toute la
+                    campagne tourne sous ASan et UBSan.
+Graines             101 à 108, une par processus, 850 cas chacune, huit processus à la fois.
+Le banc             la vraie SESSION, TRANSACTION, bench_core, le journal et le magasin en mémoire, sur la PHY simulée
+                    (sim/phy_sim.c : le verrou de D2, la fenêtre d'écoute) ; l'objectif fou enveloppe le faux 135 (trois
+                    cas sur quatre) ou le faux standard, par sim/lens_sim.h, sans que leur code change (git diff contre
+                    4afa0b1 : ni sim/lens135.c, ni sim/lens_std.c, ni sim/lens_sim_135.c, ni sim/lens_sim_std.c) ; un pas
+                    par tic de 1 ms (main/main.c), les tics vides sautés.
+
+Les dimensions jouées (plan § 4, et le retard du pas) : le moment (règles FOU_RETARD, FOU_TARDIF, et le retard du pas,
+O_LATE), l'ordre (FOU_PERTE, FOU_DOUBLE, FOU_ECHANGE, FOU_RANGE puis l'injection d'une émission rangée, d'une session
+d'avant comprise), le contenu (FOU_CHAMP, FOU_LONGUEUR, FOU_CLASSE, somme recalculée ; les gabarits), le type annoncé
+(le faux standard, le LensType2 et le nom 0x3F mutés ou injectés, l'objectif resté alimenté), LENS_CS (tenue haute,
+basse) et D2 (rebonds sous 2 ms, retombées, autour des 300 ms de l'insertion, l'objectif coupé avec ou non), le bus
+(E_BUS en réception et en émission, trames perdues ou fausses dans les deux sens par phy_sim_fault, octets bruts sans
+somme recalculée, débuts de trame sans suite), les FAULT des rails comme événements logiques, la NVS relue (cible 5), le
+bouton du fût, et les commandes qu'une ligne de l'hôte produit. Le retard du pas : dans [0, 10 s[, borné par le chien de
+garde (plans/survie.md § 2 ; main/main.c), avec 1 ms (le tic), 2 ms (la fenêtre de la paire), 100 ms (l'attente de fin
+d'émission, bsk_session.h) et 9,999999 s parmi ses valeurs.
+Rien n'a été retiré faute de débit (brief § 8) : chaque dimension a été jouée.
+
+
+F2.2 Le débit, mesuré en premier, et le bilan
+---------------------------------------------
+
+Le débit a été mesuré avant toute campagne, graine 1, 20 cas, un processus (pod chargé : charge 51 sur 12 coeurs) :
+  - le banc au premier jet, un pas à chaque événement de la PHY (comme la suite) : 20 cas en 10,1 s de processeur
+    (29,8 s murales), 2 cas par seconde de processeur ; trop lent pour couvrir les dimensions dans le budget ;
+  - le banc au rythme de la carte, un pas par tic de 1 ms, les tics vides sautés (main/main.c) : 20 cas en 3,96 s de
+    processeur (20,7 s murales), 5 cas par seconde. C'est le banc de la campagne.
+Un cas joue de quelques secondes à quelques minutes de temps virtuel : le préfixe (jusqu'à 12 s), le chaos (1 à 40
+événements, jusqu'à 5 s entre deux, des pas jusqu'à 10 s en retard), puis la fin jugée (jusqu'à 120 s, et 15 s pour les
+accusés).
+
+La campagne : deux vagues de huit processus, sous ASan et UBSan. Débit : cas par seconde de temps processeur, réductions
+comprises. Temps : processeur (la somme des huit), puis mural.
+
+vague  graines   cas      débit    temps proc.  mural   échecs
+1      101-108   6 800    4,4/s    1 556 s      283 s   80 : P8 have64 75, P8 appui 4, P7 rail 1 (à revoir, F2.5)
+2      109-116   4 800    4,8/s    1 004 s      142 s   59 : P8 have64 58, P8 appui 1
+total            11 600   4,5/s    2 560 s      425 s   139
+
+Trouvailles : aucune NOUVELLE. Les 138 échecs de P8 sont une seule entrée connue du backlog, « mark_button lit o64 sans
+have64 », que le brief demande d'éprouver : elle est atteignable, et elle écrit la NVS plus qu'un doigt (F2.4, F2.5).
+Le premier échec de chaque vérification, par processus, est réduit et rangé : 20 cas sous cas/session/. Le P7 rail de
+la vague 1 est un oracle trop strict pour P7, corrigé avant la vague 2 et consigné « à revoir » (F2.5), sans cas rangé.
+Aucun défaut de l'audit de Codex n'est revenu : ni une réponse qui termine une requête dont elle n'est pas la réponse
+(ORDRE reponse), ni un CUSTOM servi après une échéance ou un abandon sans réponse (ORDRE custom), ni un goto accepté
+après un arrêt fini ACK_COMPLETED hors de sa cible sous un 135 nominal (P3 cible, 1 982 cas où seul le moment est
+fou).
+
+
+F2.3 La couverture des états profonds (critère 3)
+-------------------------------------------------
+
+Les cas qui ont atteint, au moins une fois (fz_bilan ; les deux vagues, 11 600 cas) :
+
+  READY            10 738      RESTORING        4 071      FAULT            1 343      CUSTOM en vol    1 720
+  un goto en vol    3 932      RECOVERING       4 487      une marque rangée 2 460
+
+Un goto en vol : un f<n>, un f±n, un jg ou le goto du bouton accepté (ACK_ACCEPTED). Une marque rangée : un js fini
+ACK_COMPLETED, ou une marque de plus comptée par l'instantané (mark_sets). Un CUSTOM en vol : accepté.
+
+Les cas par préfixe (tirés des suites : le boot de test_stop_goto135, les marques et la perte de test_session135, l'arrêt
+suivi d'un goto de test_stop_goto135, la faute E_HOME_FAILED et le homing du pilote de test_session_script ; les
+événements du préfixe sont dans le cas, avant le chaos) :
+
+  froid  1 142   (le chaos dès le montage : l'init sous le chaos)       perte   1 141   (READY, l'objectif coupé, 1 s)
+  ready  1 136   (READY, 4 s)                                          custom  1 218   (READY, une lecture CUSTOM en vol)
+  goto   1 217   (READY, un goto loin de la position en vol)           retour  1 148   (js, ailleurs, b : RESTORING)
+  marque 1 186   (READY, js, 50 ms)                                    arret   1 151   (un goto, q, un goto : #787)
+  faute  1 169   (10 01 au 0x10 de l'init : FAULT)                     homing  1 092   (le 135 resté alimenté en flux, le
+                                                                                       0x0B perdu : HOMING)
+
+La fin jugée (READY ou FAULT en 120 s, le chaos fini) : 10 928 cas ; non jugée : 558 (tenus en OFF par p0, ou le faux
+objectif hors modèle ou bloqué, que l'objectif fou rend tel quel), et les cas arrêtés avant par un échec.
+Ce que l'objectif fou a fait, sur les deux vagues : 117 973 émissions retardées, 60 757 perdues, 21 592 doublées, 593
+échangées, 61 722 champs et 55 451 longueurs mutés à la trame, 6 916 classes, 18 056 octets bruts sans somme, 13 462
+émissions coupées, 22 462 LENS_CS retombées avant la fin, 50 555 rangées, 9 454 émissions du banc ; 74 442 pas en retard.
+
+
+F2.4 Les propriétés jouées, leurs sources, ce qu'elles ont vu
+-------------------------------------------------------------
+
+Chaque vérification est jugée sur chaque cas (FZ_CHECKS de fuzz_session.c ; la source complète y est citée). Les
+oracles sont écrits à la main ; aucun n'appelle allowed ni listed_size (le modèle de la liste : liste.h, celui de F1).
+
+  P1          ASan et UBSan sur tout le banc : aucune erreur.
+  P2 poll     au plus 64 bsk_phy_poll par pas (session.c, STEP_EVENTS ; bsk_session.h) : jamais dépassé.
+  P2 garde    chaque cas rend la main en 10 s de processeur (fuzz.c) : jamais dépassée.
+  P3 etat, transition, fault, duree, fin, off
+              l'état dans l'énumération ; chaque transition, prise à son instant (bsk_journal_session), dans la table de
+              la spec § 3.1, lignes HOTE comprises, permises pendant le dépôt de leur commande seulement, et vers OFF
+              sans commande expliquée par une coupure de D2 ; FAULT sur E_LOST ou E_HOME_FAILED seulement
+              (plans/survie.md § 3) ; aucun état de séquence tenu plus de T_max, retards du pas injectés retirés (T_max
+              écrits à la main en tête de TMAX : POWERING 1,2 s, IDENTIFYING 18,1 s, HOMING 23,62 s, RESTORING 26,1 s,
+              RECOVERING 3,001 s, depuis bsk_session_params_default, init.c, motion.c, restore.h) ; le chaos fini,
+              READY ou FAULT en 120 s ; D2 retombé plus de 2 ms, OFF dès que la file de la PHY est lue : rien.
+  P3 cible    sous un 135 nominal où seul le moment est fou (1 982 cas, dont tous ceux du préfixe « arret » : un goto, q,
+              un goto), un goto fini ACK_COMPLETED l'est sur sa cible (le faux 135, l135_position) : rien. Le défaut de
+              #730, corrigé par #787, n'est pas revenu (la faute qui défait #787 le fait mordre, F2.7).
+  P4 instantane, identite, marque
+              l'instantané (ouverture, plage, bornes, position_valid) ; la déclaration à bench_core autre que OTHER et
+              l'identité publiée ne changent qu'en IDENTIFYING ; la marque publiée est la valeur relue de la NVS
+              (bits 0-15) ou aucune si ses bits 24-31 ne sont pas nuls (cible 5 : une valeur quelconque rangée sous la clé
+              que l'objectif fait calculer, des lectures ou écritures ratées, la file pleine) : rien.
+  P5 liste, signature, ecriture, refus
+              chaque trame émise passe le modèle de la liste pour la déclaration en cours (P5 b) ; un 0x40 ne part que
+              vers un objectif qui a donné sa signature dans la session, PROTOCOL.md § 2 (P5 c) ; un 'P' 0x38 ne part
+              qu'à la suite d'une CUSTOM WRITE déposée, un par commande (P5 d) ; bsk_bench_refused() reste à 0 (P5 e) :
+              rien. Le firmware n'a jamais tenté une trame que bench_core refuse.
+  P6 ligne, muet, debit
+              chaque ligne sous 600 octets ; journal éteint, aucune ligne ; sous LOG ON, au plus 2 × (30 + 30) lignes du
+              plafond et transitions par seconde de leur instant (une seconde alignée recouvre deux fenêtres) : rien.
+  P7 rail     un rail allumé ne retombe que par D2, p0 ou b : rien (un cas « à revoir », F2.5).
+  PRESENCE    un rail ne s'allume que D2 présent, l'insertion confirmée (300 ms), sans retombée de plus de 2 ms depuis,
+              d'après un modèle de D2 écrit à la main (phy_common.h, phy_sim.h) : rien.
+  DELAI       sous n'importe quel retard du pas : rail moteur 50 ms au moins après le logique, lignes 50 ms après le
+              moteur, BODY_CS haute 15 ms après basse, BODY_CS basse 3 ms au moins après LENS_CS vue haute, le 0x10 08
+              100 ms au moins après l'entrée en HOMING (bsk_session.h, PROTOCOL.md § 7, la classe de #689 et #691) :
+              rien.
+  ACCUSE      ACK_REJECTED seul, ou ACK_ACCEPTED puis un seul accusé final ; chaque commande acceptée finie 15 s après
+              la fin du chaos (bsk_session.h, bsk_session_command) : rien.
+  CONTRAT     voir ci-dessous.
+  ORDRE       la réponse qui termine une requête est du type demandé et, pour 0x40, 0x0B et 0x0A, de son contenu
+              (PROTOCOL.md § 6, #783) ; un CUSTOM n'est accepté qu'hors d'une désynchronisation (une échéance, ou un
+              abandon sans réponse, sans coupure des rails depuis ; bsk_session.h, #783, #789) : rien. Aucune régression
+              de l'audit de Codex.
+  P8 nvs, doigt, appui, have64
+              une écriture NVS est un js ou un jx déposés, ou le relâchement du bouton lu dans le 0x05 en cours (nvs) ;
+              d'un appui de 1 s à 4 s commencé en READY, lu dans les 0x05 qui portent l'offset 64 (doigt) ; d'un appui
+              réel du faux 135 de 1 s à 4 s, une écriture par appui, quand rien d'autre ne fabrique l'offset 64
+              (appui) ; d'un appui vu tout du long dans des 0x05 qui portent l'offset 64 (have64). appui et have64 ont
+              échoué : l'entrée connue du backlog, F2.5.
+
+Les deux contrats internes restants (backlog, « Trois contrats internes sans garde », 2 et 3), sous ASan et UBSan :
+  - bsk_txn_held_end (txn.c, sa place non bornée) : ATTEINT, 120 appels, tous à la place 0, jamais hors de
+    BSK_TXN_HELD_MAX. Le chemin : un q (CMD_FOCUS_STOP) déposé entre le 0x03 et le 0x04 de la boucle, son 0x1C retenu
+    jusqu'au 0x04 (motion_q, drive_stop_held), puis relevé à chaque pas par motion_q_end, dont la boucle ne passe que
+    des places de 0 à BSK_TXN_HELD_MAX − 1. Le contrat tient par ses appelants, comme le backlog le dit ; aucun
+    scénario ne l'a violé. Une place au-delà de 0 (un 0x1C retenu derrière une autre émission retenue) n'a pas été
+    vue.
+  - session_ack_last (session.c, une file vide) : ATTEINT, 112 appels, aucun sur une file vide (le modèle de la
+    file, tenu par l'enveloppe de session_ack et les lectures du banc). Le chemin : l'appui court du bouton vers une
+    marque rangée (cmd_button, board_goto), en READY ; board_goto le lit juste après bsk_session_command, qui dépose
+    toujours un accusé pour un goto (ACK_REJECTED ou ACK_ACCEPTED). Le contrat tient ; aucun scénario ne l'a violé.
+
+Le bouton sans have64 (backlog, « mark_button lit o64 sans have64 ») : ATTEINT, et il écrit la NVS plus qu'un doigt.
+  - 133 écritures du bouton ont suivi un appui vu en partie sans l'offset 64 (des 0x05 de 29 à 65 octets, ou plus de
+    2 s sans 0x05) : mark_button garde o64 d'un 0x05 d'avant, et compte l'appui jusqu'au premier 0x05 qui porte
+    l'offset 64 de nouveau. Tant que l'appui réel dure aussi longtemps, la carte écrit une fois, comme un doigt (have64).
+  - L'EFFET : un appui réel court (moins d'1 s, l'aller à la marque) dont le relâchement tombe dans une suite de 0x05
+    sans l'offset 64, ou de 0x05 perdus, est lu long : la carte réécrit la marque à la position courante (un PUT en
+    NVS) au lieu d'aller à elle. Cas : un appui réel de 0,21 s lu 1,25 s, de 0,20 s lu 1,92 s (des 0x05 perdus 1,9 s,
+    sous les 2 s de lost_ms : aucune perte constatée, o64 tenu), de 0,71 s lu 1,10 s. C'est plus qu'un doigt (appui).
+    Un appui long lu au-delà de 4 s n'écrit rien : moins qu'un doigt.
+  - Ce qu'un objectif qui « se perd bouton enfoncé » fait : une perte constatée (2 s sans 0x05 ni 0x06) oublie la
+    session, et l'appui avec elle (mark_forget) ; seul un 0x05 arrêté, le 0x06 courant, ou des 0x05 perdus moins de 2 s
+    gardent l'appui ouvert.
+
+
+F2.5 Index des cas
+------------------
+
+Un cas par ligne, comme en F1 : la cible ; la propriété et sa source ; le chemin ; la commande de rejeu (après
+`fuzz.sh construit <sortie>`) ; la classe, contre la liste des trous connus du brief (§ 7 : T1 à T12, constats_std.txt,
+le backlog, « Plus tard » et Fuzzing, le point (a) de B4) ; ce que fait la carte. Chaque cas est le premier échec de sa
+vérification dans un processus de la campagne, réduit (événements entiers retirés puis neutralisés, 120 essais au
+plus) ; les comptes de tous les échecs sont au F2.2.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g101-543.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g101-543.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe goto : un appui
+    de 2,98 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g102-39.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g102-39.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe goto : un appui
+    de 1,52 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 appui (plans/fuzzing.md § 3, P8 : « n'écrit pas plus qu'un doigt » ; mark.c) | cas/session/P8-appui-g103-16.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-appui-g103-16.bin |
+    CONNU (la même entrée du backlog : « l'appui peut être compté long au relâchement ») | le faux 135, préfixe custom : un
+    appui réel de 0,21 s, l'aller à la marque, relâché pendant des 0x05 sans l'offset 64 ou perdus, lu 1,25 s : la
+    marque réécrite à la position courante, une écriture NVS de plus qu'un doigt, au lieu du goto vers la marque.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g103-232.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g103-232.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe goto : un appui
+    de 2,95 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g104-112.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g104-112.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe ready : un appui
+    de 2,05 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g105-68.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g105-68.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe custom : un appui
+    de 2,18 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g106-146.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g106-146.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe ready : un appui
+    de 1,22 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g107-35.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g107-35.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe custom : un appui
+    de 1,10 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 appui (plans/fuzzing.md § 3, P8 : « n'écrit pas plus qu'un doigt » ; mark.c) | cas/session/P8-appui-g107-68.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-appui-g107-68.bin |
+    CONNU (la même entrée du backlog : « l'appui peut être compté long au relâchement ») | le faux 135, préfixe goto : un
+    appui réel de 0,20 s, l'aller à la marque, relâché pendant des 0x05 sans l'offset 64 ou perdus, lu 1,92 s : la
+    marque réécrite à la position courante, une écriture NVS de plus qu'un doigt, au lieu du goto vers la marque.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g108-155.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g108-155.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe marque : un appui
+    de 3,13 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 appui (plans/fuzzing.md § 3, P8 : « n'écrit pas plus qu'un doigt » ; mark.c) | cas/session/P8-appui-g108-543.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-appui-g108-543.bin |
+    CONNU (la même entrée du backlog : « l'appui peut être compté long au relâchement ») | le faux 135, préfixe ready : un
+    appui réel de 0,71 s, l'aller à la marque, relâché pendant des 0x05 sans l'offset 64 ou perdus, lu 1,10 s : la
+    marque réécrite à la position courante, une écriture NVS de plus qu'un doigt, au lieu du goto vers la marque.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g109-210.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g109-210.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe custom : un appui
+    de 1,70 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g110-92.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g110-92.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe custom : un appui
+    de 1,23 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 appui (plans/fuzzing.md § 3, P8 : « n'écrit pas plus qu'un doigt » ; mark.c) | cas/session/P8-appui-g110-206.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-appui-g110-206.bin |
+    CONNU (la même entrée du backlog : « l'appui peut être compté long au relâchement ») | le faux 135, préfixe custom : un
+    appui réel de 0,21 s, l'aller à la marque, relâché pendant des 0x05 sans l'offset 64 ou perdus, lu 3,13 s : la
+    marque réécrite à la position courante, une écriture NVS de plus qu'un doigt, au lieu du goto vers la marque.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g111-6.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g111-6.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe homing : un appui
+    de 1,68 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g112-30.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g112-30.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe froid : un appui
+    de 2,77 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g113-1.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g113-1.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe retour : un appui
+    de 2,70 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g114-134.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g114-134.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe custom : un appui
+    de 2,68 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g115-93.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g115-93.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe marque : un appui
+    de 3,58 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+session | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/session/P8-have64-g116-185.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/session/P8-have64-g116-185.bin |
+    CONNU (backlog.md, Fuzzing : « mark_button lit o64 sans have64 », à éprouver) | le faux 135, préfixe ready : un appui
+    de 2,87 s vu en partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui
+    publié le demande : pas plus qu'un doigt.
+
+À REVOIR — un oracle plus strict que sa propriété (brief § 8 : consigné avec le contre-exemple, sans affaiblissement
+silencieux). La première version de P7 rail, dans l'enveloppe de bsk_phy_rail, refusait toute coupure d'un rail allumé
+hors de p0 et b ; P7 (plans/fuzzing.md § 3, plans/survie.md § 3, table A) admet aussi la sécurité de D2. Le contre-exemple,
+graine 102, cas 380 (vague 1), 128 octets, à rejouer par `printf %s <octets> | xxd -r -p > cas.bin` puis `fuzz.sh rejoue` :
+    01000000000000000000000003010100000000006020000000000000000000005b6e060002150000404b4c00e51e2700
+    0000000000000000b0a60b000000000000000000fd1b0400000000000000000096dc11000300010000000000589d0400
+    0301010000000000b6893700000000000000000065232a000000000000000000
+    Le faux standard ; 21 pas en retard de 5 s chacun pendant l'init ; D2 retombé 5 s à 6,43 s (l'objectif coupé avec
+    lui), la coupure faite par la PHY à 6,43 s. Chaque pas ne lit que 64 événements (STEP_EVENTS), et la file de la PHY
+    simulée en tient 1024 (sim/phy_sim.c, EV_CAP) : la retombée, rendue à son rang (pres_next, #738), n'est lue qu'à
+    16,43 s. Entre-temps D2 est revenu (11,43 s, l'insertion confirmée à 11,73 s), la SESSION passe de RECOVERING à
+    POWERING et rallume le rail logique, sur un verrou levé ; puis elle lit la vieille retombée, passe en OFF et coupe le
+    rail, puis repart (OFF -> POWERING). La coupure vient bien de D2 : P7 la permet, l'oracle est corrigé depuis la vague
+    2 (une coupure faite en traitant une retombée de D2 est admise), et le cas passe. Sur la carte, la file de la PHY en
+    tient 32 et jette son plus ancien (plans/survie.md § 2) : la retombée y serait lue au premier pas qui suit. C'est un
+    écart du banc, non transposé à la carte (F2.9) ; aucune propriété du plan n'est en cause, PRESENCE a tenu (le rail
+    rallumé l'a été D2 présent, l'insertion confirmée).
+
+Ce qui n'a échoué nulle part : P1, P2, P3 (etat, transition, fault, duree, fin, off, cible), P4 (instantane, identite,
+marque), P5 (liste, signature, ecriture, refus), P6 (ligne, muet, debit), P7, PRESENCE, DELAI, ACCUSE, CONTRAT, ORDRE,
+P8 nvs et doigt. « Une réponse différée pendant une reprise » (le 10 00 d'une session d'avant, rails gardés, rangé puis
+rejoué par l'objectif fou) est acceptée par PROTOCOL.md § 6 et n'est jugée par aucun oracle : aucun cas ne la classe.
+
+
+F2.6 Le rejeu
+-------------
+
+Dans le pod : `fuzz.sh rejoue-tout` rejoue deux fois chaque cas rangé, F1 et F2 (21 cas : celui de lens_rx, les 20 de
+session) ; les deux sorties sont identiques octet pour octet, et chaque verdict est celui que porte son nom (« BILAN
+rejeu : 21 cas, 0 écart(s) », 4,1 s de processeur).
+Sur le runner, sous l'image du job `firmware` (ubuntu:24.04, gcc 13.3.0), l'essai trial-799-rejeu.yml : les huit
+harnais compilés avec les options de la suite et la ligne SAN de run.sh, chaque cas rejoué deux fois, puis 1000 cas
+de chaque harnais de F1 et 100 de session (graine 1) :
+run 3073 (essai trial-799-rejeu.yml, sur le commit 66dd83e, celui de la campagne et de ses cas) : gcc 13.3.0 compile
+les huit harnais sans avertissement (-Werror) ; les 21 cas, rejoués deux fois chacun, donnent deux sorties identiques
+et leur verdict (« BILAN rejeu : 21 cas, 0 écart(s) ») ; 1000 cas de chaque harnais de F1 n'échouent que sur l'écart
+connu de lens_rx (P4 avant_boucle, 13 cas) ; 100 cas de session, sur P8 have64 seulement (3 cas : l'entrée connue).
+Après 66dd83e, la livraison ne change que ce rapport (les numéros des runs) ; le rejeu est joué de nouveau sur la tête
+de la PR, dont le résumé cite le run.
+
+
+F2.7 Les oracles mordent
+------------------------
+
+`fuzz.sh mord` injecte chaque faute de fautes.txt dans une copie temporaire de 4_Firmware/ (jamais livrée), recompile
+le harnais visé et le joue ; une faute de fuzz_session joue `premier 1 400 <propriété> <vérification>` : les cas de la
+graine 1 jusqu'au premier échec de la vérification visée, les autres échecs passés (sans quoi la trouvaille connue,
+P8 have64, arrêtait la faute avant qu'elle soit vue), avec une garde de 20 s de processeur. Quand un oracle ne peut
+voir qu'une faute en deux lieux, la faute en a deux (fautes.txt, lignes `=`, `--`, `++`) : P5 liste (une sous-commande
+émise et admise à tort), P5 signature (un CUSTOM vers un objectif sans signature, et bench_core qui le laisse passer),
+PRESENCE (un rail allumé en OFF, et le verrou de phy_sim.c retiré), P6 debit (le plafond levé, et les trames du flux
+écrites sous LOG ON).
+
+La passe finale, sur le code livré, toutes les fautes de F1 et de F2 : 86 morsures sur 86 fautes (les 52 de F1 de nouveau, les 34 de F2), en 951 s de processeur, compilations comprises, dix fautes à la fois. Chaque vérification de
+fuzz_session a mordu au moins une fois : P2 (poll, garde), P3 (etat, transition, fault, duree, fin, off, cible),
+P4 (instantane, identite, marque), P5 (liste, signature, ecriture, refus), P6 (ligne, muet, debit), P7 rail, PRESENCE,
+DELAI (rail_moteur, lignes, cs_basse, cs_haute, homing), ACCUSE (final, fin), CONTRAT (held_end, ack_last), ORDRE
+(reponse, custom), P8 (nvs, doigt). P3 cible mord sur la faute qui défait #787 (motion.c, le 0x1D qui n'attend plus la
+fin de l'arrêt) : le constat de #730 revient, et l'oracle le voit.
+
+Les vérifications qui n'ont pas de faute injectée, et ne comptent comme couverture que par le code réel :
+  - P8 appui et P8 have64 : elles ont mordu sur le code livré, sans faute (F2.5), comme lens_rx P4 avant_boucle en F1.
+    Une faute qui ferait mordre appui avant doigt n'existe pas : un défaut de durée dans mark.c est vu d'abord par doigt.
+
+La passe finale des fautes de fuzz_session, faute par faute : le diff de la faute (sans contexte), puis la première
+ligne de sortie qui la voit :
+
+== faute 53 : fuzz_session, components/session/session.c, attendu « ECHEC P2 poll »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -41 +41 @@
+   -#define STEP_EVENTS    64u    /* les événements de PHY traités par pas, au plus (audit M10) */
+   +#define STEP_EVENTS    200u    /* les événements de PHY traités par pas, au plus (audit M10) */
+   MORD : ECHEC P2 poll : cas 2 de la graine 1 : t=8649876 : 200 bsk_phy_poll dans un pas
+== faute 54 : fuzz_session, components/session/session.c, attendu « ECHEC P2 garde »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -533 +533 @@
+   -    if (motion_expire(s.now)) return true;          /* -> STALLED (motion.c) */
+   +    if (motion_expire(s.now) || s.state == SESSION_RESTORING) return true;          /* -> STALLED (motion.c) */
+   MORD : ECHEC P2 garde : le cas ne rend pas la main en 20 s de processeur
+== faute 55 : fuzz_session, components/session/session.c, attendu « ECHEC P3 etat »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -290 +290 @@
+   -    enter(SESSION_FAULT);
+   +    enter((bsk_session_state_t)9);
+   MORD : ECHEC P3 etat : cas 8 de la graine 1 : t=2078000 : état 9
+== faute 56 : fuzz_session, components/session/session.c, attendu « ECHEC P3 transition »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -297 +297 @@
+   -    enter(SESSION_RECOVERING);
+   +    enter(SESSION_HOMING);
+   MORD : ECHEC P3 transition : cas 0 de la graine 1 : t=12304602 : ready -> homing
+== faute 57 : fuzz_session, components/session/session.c, attendu « ECHEC P3 fault »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -289 +289 @@
+   -    s.last_error = why;
+   +    s.last_error = why == E_HOME_FAILED ? E_TIMEOUT : why;
+   MORD : ECHEC P3 fault : cas 8 de la graine 1 : t=2078000 : FAULT sur timeout
+== faute 58 : fuzz_session, components/session/session.c, attendu « ECHEC P3 duree »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -621 +621 @@
+   -    p->retry_wait_ms = 3000;
+   +    p->retry_wait_ms = 3500;
+   MORD : ECHEC P3 duree : cas 0 de la graine 1 : t=15316602 : recovering tenu 3012000 µs (retards du pas retirés)
+== faute 59 : fuzz_session, components/session/session.c, attendu « ECHEC P3 fin »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -281 +281 @@
+   -    enter(SESSION_READY);
+   +    enter(SESSION_READY); s.step = S_REC_WAIT; s.due = 0; enter(SESSION_RECOVERING); return;
+   MORD : ECHEC P3 fin : cas 1 de la graine 1 : 120 s après le chaos : identifying
+== faute 60 : fuzz_session, components/session/session.c, attendu « ECHEC P3 off »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -589 +589 @@
+   -        if (!s.present && s.state != SESSION_OFF) to_off();
+   +        if (0) to_off();
+   MORD : ECHEC P3 off : cas 3 de la graine 1 : t=12801774 : D2 coupé (1 coupures), la session en identifying
+== faute 61 : fuzz_session, components/session/motion.c, attendu « ECHEC P3 cible »
+   --- a/4_Firmware/components/session/motion.c
+   +++ b/4_Firmware/components/session/motion.c
+   @@ -134 +134 @@
+   -    if (m.stop_sends) m.wait = true;
+   +    if (0) m.wait = true;
+   MORD : ECHEC P3 cible : cas 15 de la graine 1 : seq 3 : goto vers 22305 fini ACK_COMPLETED, le faux 135 en 19308
+== faute 62 : fuzz_session, components/session/session.c, attendu « ECHEC P4 instantane »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -705 +705 @@
+   -    st->position_valid = s.state == SESSION_READY && l->have06;
+   +    st->position_valid = l->have06;
+   MORD : ECHEC P4 instantane : cas 2 de la graine 1 : t=2094000 : état restoring ouverture 11B2 plage 11BF..1900 cap B bornes 1 13878..30733 position 1
+== faute 63 : fuzz_session, components/session/session.c, attendu « ECHEC P4 identite »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -567 +567 @@
+   -    mark_frame(type);                               /* le sens, la clé */
+   +    mark_frame(type); if (type == 0x06) init_forget();
+   MORD : ECHEC P4 identite : cas 1 de la graine 1 : t=2105000 : déclaration 2 à bench_core en ready
+== faute 64 : fuzz_session, components/session/cmd.c, attendu « ECHEC P5 liste »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -63 +63 @@
+   -    return sub == 0x38 && (v >> 4) < 3 && (v & 0x0F) < 3;
+   +    return (sub == 0x38 || sub == 0x39) && (v >> 4) < 3 && (v & 0x0F) < 3;
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -190 +190 @@
+   -        m[2] = 0x38;
+   +        m[2] = 0x39;
+   MORD : ECHEC P5 liste : cas 32 de la graine 1 : t=4544300 : type 40 len 19 émis, déclaration 2
+== faute 65 : fuzz_session, components/session/cmd.c, attendu « ECHEC P5 signature »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -70 +70 @@
+   -    if (lens != BSK_BENCH_SAMYANG && lens != BSK_BENCH_SAMYANG135) return false;
+   +    (void)lens;
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -70 +70 @@
+   -    if (lens != BSK_BENCH_SAMYANG && lens != BSK_BENCH_SAMYANG135) return false;
+   +    (void)lens;
+   @@ -72 +72 @@
+   -    return lens == BSK_BENCH_SAMYANG135 && svc135_allowed((char)m[1], m[2], m[3]);
+   +    return svc135_allowed((char)m[1], m[2], m[3]);
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -181 +181 @@
+   -    if (init_lens() != BSK_BENCH_SAMYANG135) {     /* le 135 seul : bench_core ne laisse qu'à lui cette exception */
+   +    if (0) {
+   MORD : ECHEC P5 signature : cas 193 de la graine 1 : t=8726249 : un 0x40 'P' FA émis sans signature dans la session
+== faute 66 : fuzz_session, components/session/cmd.c, attendu « ECHEC P5 ecriture »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -176 +176 @@
+   -    uint8_t m[19] = {0x40, 'P', 0xFA};
+   +    uint8_t m[19] = {0x40, 'P', 0x38, 0x30};
+   MORD : ECHEC P5 ecriture : cas 1 de la graine 1 : t=5000000 : un 'P' 0x38 émis sans CUSTOM WRITE déposée
+== faute 67 : fuzz_session, components/session/cmd.c, attendu « ECHEC P5 refus »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -176 +176 @@
+   -    uint8_t m[19] = {0x40, 'P', 0xFA};
+   +    uint8_t m[19] = {0x40, 'P', 0xFA, 0x53};
+   MORD : ECHEC P5 refus : cas 1 de la graine 1 : t=5002000 : bsk_bench_refused() = 1
+== faute 68 : fuzz_session, components/journal/journal.c, attendu « ECHEC P6 ligne »
+   --- a/4_Firmware/components/journal/journal.c
+   +++ b/4_Firmware/components/journal/journal.c
+   @@ -158 +158 @@
+   -    return n > cap ? cap : n;
+   +    return (n > cap ? cap : n) * 3;
+   MORD : ECHEC P6 ligne : cas 2 de la graine 1 : t=1442000 : une ligne du journal de 627 octets
+== faute 69 : fuzz_session, components/journal/journal.c, attendu « ECHEC P6 muet »
+   --- a/4_Firmware/components/journal/journal.c
+   +++ b/4_Firmware/components/journal/journal.c
+   @@ -614 +614 @@
+   -    j.on = on;
+   +    j.on = true;
+   MORD : ECHEC P6 muet : cas 0 de la graine 1 : t=1300000 : journal éteint, « * xdetect 1300 present »
+== faute 70 : fuzz_session, components/journal/journal.c, attendu « ECHEC P6 debit »
+   --- a/4_Firmware/components/journal/journal.c
+   +++ b/4_Firmware/components/journal/journal.c
+   @@ -409 +409 @@
+   -    if (j.on && (j.all || !periodic_rx(f))) frame("rx", true, f, t_us);
+   +    if (j.on && (j.all || !periodic_rx(f) || true)) frame("rx", true, f, t_us);
+   --- a/4_Firmware/components/journal/journal.c
+   +++ b/4_Firmware/components/journal/journal.c
+   @@ -32 +32 @@
+   -#define PER_S    30u
+   +#define PER_S    3000u
+   @@ -409 +409 @@
+   -    if (j.on && (j.all || !periodic_rx(f))) frame("rx", true, f, t_us);
+   +    if (j.on && (j.all || !periodic_rx(f) || true)) frame("rx", true, f, t_us);
+   MORD : ECHEC P6 debit : cas 7 de la graine 1 : t=2704450 : 121 lignes du plafond et transitions datées de la seconde 2
+== faute 71 : fuzz_session, components/session/session.c, attendu « ECHEC P7 rail »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -298 +298 @@
+   -    wait_for(S_REC_WAIT, s.p.retry_wait_ms);
+   +    wait_for(S_REC_WAIT, s.p.retry_wait_ms); bsk_phy_rail(BSK_RAIL_MOTOR, false);
+   MORD : ECHEC P7 rail : cas 0 de la graine 1 : t=12304602 : rail 1 coupé hors de p0, b et d'une retombée de D2
+== faute 72 : fuzz_session, components/session/session.c, attendu « ECHEC PRESENCE rail »
+   --- a/4_Firmware/sim/phy_sim.c
+   +++ b/4_Firmware/sim/phy_sim.c
+   @@ -356 +356 @@
+   -    if (on && !g.pres.present) return false;       /* le verrou */
+   +    (void)0;
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -218 +218 @@
+   -    bsk_phy_rail(BSK_RAIL_LOGIC, false);
+   +    bsk_phy_rail(BSK_RAIL_LOGIC, true);
+   MORD : ECHEC PRESENCE rail : cas 3 de la graine 1 : t=12801774 : un rail allumé (logique), D2 absent, insertion non confirmée ou retombée
+== faute 73 : fuzz_session, components/session/session.c, attendu « ECHEC DELAI rail_moteur »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -32 +32 @@
+   -#define RAIL_MS        50u
+   +#define RAIL_MS        49u
+   MORD : ECHEC DELAI rail_moteur : cas 0 de la graine 1 : t=1349000 : rail moteur 49000 µs après le logique
+== faute 74 : fuzz_session, components/session/session.c, attendu « ECHEC DELAI lignes »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -398 +398 @@
+   -        settle(S_RAIL_MOTOR, RAIL_MS);
+   +        settle(S_RAIL_MOTOR, 49);
+   MORD : ECHEC DELAI lignes : cas 0 de la graine 1 : t=1399000 : les lignes 49000 µs après le rail moteur
+== faute 75 : fuzz_session, components/session/session.c, attendu « ECHEC DELAI cs_basse »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -33 +33 @@
+   -#define HS_LOW_MS      15u    /* l'état 1 de l'objectif se réinitialise après 10 ms */
+   +#define HS_LOW_MS      14u    /* l'état 1 de l'objectif se réinitialise après 10 ms */
+   MORD : ECHEC DELAI cs_basse : cas 0 de la graine 1 : t=1414000 : BODY_CS haute 14000 µs après basse
+== faute 76 : fuzz_session, components/session/session.c, attendu « ECHEC DELAI cs_haute »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -34 +34 @@
+   -#define HS_HOLD_MS     3u
+   +#define HS_HOLD_MS     2u
+   MORD : ECHEC DELAI cs_haute : cas 0 de la graine 1 : t=1418000 : BODY_CS basse 2000 µs après LENS_CS vue haute
+== faute 77 : fuzz_session, components/session/session.c, attendu « ECHEC DELAI homing »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -35 +35 @@
+   -#define AF_STOP_MS     100u
+   +#define AF_STOP_MS     99u
+   MORD : ECHEC DELAI homing : cas 11 de la graine 1 : t=2970000 : le 0x10 08 99000 µs après l'entrée en HOMING
+== faute 78 : fuzz_session, components/session/cmd.c, attendu « ECHEC ACCUSE final »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -105 +105 @@
+   -    session_aperture(c->arg);
+   +    session_aperture(c->arg); session_ack(c->seq, ACK_COMPLETED, E_OK);
+   MORD : ECHEC ACCUSE final : cas 61 de la graine 1 : seq 1 : accusé final COMPLETED sans ACK_ACCEPTED seul avant
+== faute 79 : fuzz_session, components/session/cmd.c, attendu « ECHEC ACCUSE fin »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -225 +225 @@
+   -        session_ack(cu.seq, ACK_COMPLETED, E_OK);
+   +        (void)0;
+   MORD : ECHEC ACCUSE fin : cas 1 de la graine 1 : seq 1 (op 11) sans accusé final, 15 s après la fin
+== faute 80 : fuzz_session, components/session/drive.c, attendu « ECHEC CONTRAT held_end »
+   --- a/4_Firmware/components/session/drive.c
+   +++ b/4_Firmware/components/session/drive.c
+   @@ -76 +76 @@
+   -bool drive_stop_end(uint8_t place, bsk_err_t *e) { return bsk_txn_held_end(place, e); }
+   +bool drive_stop_end(uint8_t place, bsk_err_t *e) { return bsk_txn_held_end(place + BSK_TXN_HELD_MAX, e); }
+   MORD : ECHEC CONTRAT held_end : cas 75 de la graine 1 : t=8976436 : bsk_txn_held_end(4)
+== faute 81 : fuzz_session, components/session/cmd.c, attendu « ECHEC CONTRAT ack_last »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -303 +303 @@
+   -    bsk_session_command(&c);
+   +    (void)session_ack_last(); bsk_session_command(&c);
+   MORD : ECHEC CONTRAT ack_last : cas 59 de la graine 1 : t=5487462 : session_ack_last sur une file vide
+== faute 82 : fuzz_session, components/session/session.c, attendu « ECHEC P8 nvs »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -320 +320 @@
+   -        restore_skip(nomark);                       /* après la transition (enter) */
+   +        restore_skip(nomark); (void)mark_set(BSK_MARK_HERE);
+   MORD : ECHEC P8 nvs : cas 1 de la graine 1 : t=2094000 : écriture PUT déposée hors de js, jx et du relâchement du bouton
+== faute 83 : fuzz_session, components/session/mark.c, attendu « ECHEC P8 doigt »
+   --- a/4_Firmware/components/session/mark.c
+   +++ b/4_Firmware/components/session/mark.c
+   @@ -24 +24 @@
+   -#define BTN_LONG_US 1000000u
+   +#define BTN_LONG_US 500000u
+   MORD : ECHEC P8 doigt : cas 111 de la graine 1 : t=6805328 : écriture du bouton, un appui de 516646 µs commencé en ready
+== faute 84 : fuzz_session, components/txn/txn.c, attendu « ECHEC ORDRE reponse »
+   --- a/4_Firmware/components/txn/txn.c
+   +++ b/4_Firmware/components/txn/txn.c
+   @@ -303 +303 @@
+   -    if (r[0] != x.q[0]) return false;
+   +    if (r[0] != x.q[0] && r[0] != 0x05) return false;
+   MORD : ECHEC ORDRE reponse : cas 1 de la graine 1 : t=5004000 : la requête 40 50 FA (len 19) terminée par 05 B2 11 (len 97)
+== faute 85 : fuzz_session, components/session/cmd.c, attendu « ECHEC ORDRE custom »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -219 +219 @@
+   -        if (bsk_txn_error() == E_TIMEOUT) cu.desync = true;
+   +        (void)0;
+   MORD : ECHEC ORDRE custom : cas 169 de la graine 1 : seq 3 : CUSTOM accepté, le canal désynchronisé (une échéance ou un abandon sans réponse, sans coupure des rails depuis)
+== faute 86 : fuzz_session, components/session/mark.c, attendu « ECHEC P4 marque »
+   --- a/4_Firmware/components/session/mark.c
+   +++ b/4_Firmware/components/session/mark.c
+   @@ -80 +80 @@
+   -    if (v >> 24) return false;
+   +    if (v >> 25) return false;
+   MORD : ECHEC P4 marque : cas 73 de la graine 1 : t=2979015 : marque publiée en 37909, la valeur relue 01009415
+
+
+
+F2.8 Le budget
+--------------
+
+Campagne, en temps processeur (le plus strict : huit processus pendant une minute comptent huit minutes), dans le pod :
+
+  la mesure du débit, au premier jet (un pas par événement)          10,1 s
+  la mesure du débit, au rythme d'un pas par tic                      4,0 s
+  le profil sans sanitizers (gprof, 20 cas)                           2,7 s
+  deux lots de contrôle des oracles (4 × 100 cas, 4 × 60 cas)       178,6 s
+  vague 1 (graines 101 à 108, 6 800 cas)                          1 555,8 s
+  vague 2 (graines 109 à 116, 4 800 cas)                          1 004,2 s
+  total                                                           2 755,3 s, 45,9 min (60 au plus), 10 min murales
+
+Hors campagne, comme en F1 : les morsures (F2.7), des passes de mise au point (environ 780 s de processeur, dont 120
+estimées pour deux passes interrompues) puis la passe finale (951 s de processeur, compilations comprises) ; les rejeux et les réductions faits à la
+main, une vingtaine de secondes ; sur le runner, un essai à la fois : la CI complète (run 3070, sur cd12cf0 : les quatre jobs verts) et le rejeu final
+(run 3073, sur 66dd83e, puis sur la tête de la PR). Rien n'a été retranché faute de budget.
+
+
+F2.9 Limites, et ce qui n'est pas joué
+--------------------------------------
+
+  - La PHY simulée n'est pas la PHY de la carte sur un point que la campagne a rencontré : sa file d'événements en tient
+    1024 (sim/phy_sim.c, EV_CAP), celle de la carte 32, qui jette son plus ancien (plans/survie.md § 2, « Files
+    pleines »). Après des pas très en retard, la SESSION simulée lit pendant plusieurs pas des événements que la carte
+    aurait jetés, et une retombée de D2, rendue à son rang (pres_next), y est lue plus tard que sur la carte : le cas
+    « à revoir » de F2.5. phy_sim.c n'a pas été changé (brief § 5 : seulement si c'est indispensable) ; la dimension
+    « pas en retard de plusieurs secondes, plusieurs fois de suite » est jouée avec cet écart, déclaré.
+  - L'objectif fou décale de sa propre durée une émission qu'il saisit (il ne la connaît qu'entière) ; sans règle, il
+    ne saisit rien. Les retards d'émission plus courts qu'une émission ne sont pas jouables ainsi.
+  - Le retard du pas est l'écart au tic de 1 ms, tiré par paquets de pas (1 à 60 pas de suite, d'un même retard) ; un
+    pas retenu au milieu de son exécution (le temps passé dans le pas avant une émission) n'est pas représenté : sur
+    l'hôte, un pas ne dure aucun temps virtuel.
+  - P3 cible ne juge que les gotos absolus (f<n>, jg et les gotos des préfixes) sous un 135 où seul le moment est fou ;
+    un f±n se juge sur une position publiée, que le moment fou peut décaler.
+  - P8 appui n'est jugée que sous le faux 135 et quand le cas ne fabrique pas l'offset 64 autrement que par le bouton
+    (101 écritures du bouton jugées ainsi, sur 373) ; P8 doigt, le doigt lu dans les 0x05, juge les autres.
+  - P6 debit compte les lignes par leur instant écrit (le troisième jeton) ; une ligne sans instant compte à l'instant du
+    pas.
+  - Le faux standard refuse ce qu'il ne modélise pas (un 0x40, l'objectif resté alimenté en mode service) et peut
+    finir hors modèle ou bloqué : la fin d'un tel cas n'est pas jugée (558 cas, dont ceux tenus par p0).
+  - Hors de F2, comme le brief le dit : les lignes USB arbitraires et bsk_session_command à commande arbitraire (F3) ;
+    libFuzzer (F4) ; l'électrique et le temps réel de la carte (phy.c, l'UART, les interruptions, le cache coupé par une
+    écriture en flash ; plans/fuzzing.md § 4) ; les fonctions static (decode de mark.c n'est atteinte que par la NVS
+    relue, cible 5).
+
+
+RAPPORT DE LA CAMPAGNE F3 — l'hôte fou et le harnais secondaire de bsk_session_command (4_Firmware/sim/fuzz/, ticket #801)
+=========================================================================================================================
+
+Campagne du 2026-10-26. Elle remplace entière celle du 2026-10-25, qui a pris 65,2 min de processeur, 5,2 de plus que
+le plafond (F3.10) : rejouée sous lui, sur le banc de la tête, elle donne seule les comptes, les cas et l'index qui
+suivent. Les harnais sont fuzz_hote (fuzz_hote.c, qui inclut fuzz_session.c avec FZ_HOTE, et hote.c) et
+fuzz_commande (fuzz_commande.c, FZ_COMMANDE) ; les commandes sont dans README.md. La cible est la cible 4 du plan de
+l'atelier (plans/fuzzing.md § 2), ses propriétés P2, P3, P4, P5 (c, d, e), P8 et P10 (§ 3), plus celles du brief de
+#801 : aucune ligne `*` hors LOG ON et LOG ALL (P6 muet, tenu par les lignes LOG), les réponses différées bornées
+(DIFFEREE), l'admission de B4 (a) (B4) et le premier accusé d'une commande déposée (ACCUSE premier). Les oracles de F2
+restent actifs : PRESENCE, DELAI, ACCUSE, CONTRAT et ORDRE. Chaque vérification, sa source et son oracle écrit à la main
+sont dans FZ_CHECKS (fuzz_session.c) ; la forme attendue de chaque réponse est en tête de hote.c, commande par commande.
+
+
+F3.1 Où, avec quoi
+------------------
+
+Face code jugée     components/, include/ et main/ au commit 6449cd0 (main, merge de #800) : cette livraison n'y
+                    touche pas (le banc, sim/test/programmes.sh et un essai du runner seulement).
+Le banc             celui du commit 46fe01e, la tête de la PR avant cette campagne : son code est celui de 04701e2, qui
+                    corrige un oracle (F3.5) et sert une ligne par tour de boucle (8b645cd n'y change qu'un commentaire et
+                    une faute de fautes.txt, les commits suivants que ce rapport).
+Où                  la campagne : le pod de l'engineer (WSL2, 12 processeurs, partagé avec d'autres pods : une charge de 2
+                    à 34 pendant la campagne) ; le runner : le rejeu final seulement (F3.8).
+Compilateur         pod : gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0 ; runner : gcc 13.3.0 (ubuntu:24.04, le job `firmware`).
+Options             celles de la suite, -std=c11 -Wall -Wextra -Wpedantic -Werror -O2, puis la ligne SAN de run.sh :
+                    -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer. Toute la
+                    campagne tourne sous ASan et UBSan.
+Graines             l'hôte fou : 831 à 838, 500 cas chacune, une par processus ; puis le harnais secondaire : 3001 à
+                    3040, 100 cas chacune, un lot par processus (F3.6 dit pourquoi des lots) ; six processus à la fois.
+                    Aucune n'a servi à la campagne remplacée (801 à 828, 2001 à 2040).
+Le banc de l'hôte   celui de F2 (la vraie SESSION, TRANSACTION, bench_core, le journal, le magasin en mémoire, la PHY
+                    simulée, l'objectif fou sur le faux 135 ou le faux standard), plus la vraie couche HOTE compilée comme
+                    la suite la compile : host.c, lens_names.c, led.c, -lm, sim/stacks_sim.c et sim/sensor_none.c (la
+                    mesure du capteur inconnue ; programmes.sh, fuzz_hote).
+
+Le contrat de l'appelant de bsk_host_line (critère 1), tenu par construction :
+  - le cadrage. rx_task (host_usb.c) n'est pas compilé sur l'hôte ; hote.c en recopie les règles à la main, octet par
+    octet (cadre) : `\r` ignoré, blancs et `\n` de tête sautés, `:` … `#` pour Moonlite, un `\n` qui abandonne un `:`
+    orphelin, 255 octets au plus, une ligne avec un NUL ou trop longue jetée entière, une ligne vide pas livrée. Un cas
+    porte les octets reçus par l'USB (O_LIGNE, 6 par événement) : une ligne livrée à bsk_host_line est toujours une ligne
+    que ce cadrage produit (255 octets au plus, sans NUL ni `\n` ni `\r`, une ligne Moonlite commence par `:` et n'a pas
+    de `#`). Le cadrage lui-même n'est pas couvert : ce qu'il fait d'une ligne de plus de 255 octets ou d'un NUL ne se
+    voit qu'au banc matériel ;
+  - une ligne à la fois : rx_task ne cadre plus rien tant que la réponse de la ligne livrée n'est pas écrite ; un
+    BSK_HOST_LATER est redemandé par bsk_host_later après chaque pas, et aucune autre ligne n'est donnée avant sa réponse ;
+  - la boucle de main.c : un pas, bsk_host_observe, bsk_session_real, puis une ligne ou bsk_host_later, sur la même
+    « tâche » ; une ligne de plus attend le tour suivant (1 ms).
+Les commandes des scénarios de F2 (O_CMD) deviennent leurs lignes (`f<n>`, `f±n`, `q`, `js`, `jx`, `jg`, `b`, `p1`, `p0`,
+`CUSTOM READ`, `CUSTOM WRITE <h><b>`, `a<f>`), calculées au jeu comme en F2 (K_GOTO_SEL vise les bornes publiées) et
+écrites dans la trace ; les lignes de l'hôte fou (O_LIGNE) sont dans le cas, octet pour octet.
+
+Les lignes, tirées de quatre façons (critère 1 ; brief § 8, dans cet ordre de priorité) :
+  - la grammaire de PROTOCOL.md § 2 à § 4 aux bornes : les lettres et leurs suffixes, f/m et leurs nombres (0, 65535,
+    65536, les bornes du 135 resserrées ou non, 20 chiffres, signes doublés, `1e3`, `0x10`…), a et ses ouvertures (`nan`,
+    `inf`, `1e308`, `1,8`…), k et s, LOG (mots sans casse, tabulations, deux mots), CUSTOM (READ, WRITE et ses chiffres de
+    0 à 3, `1a`, trois chiffres…), DEBUG et autres majuscules, Moonlite (les huit lectures, :SN et ses nombres, :FG#, :FQ#,
+    les muettes, un `:` orphelin), des blancs de tête et des `\r` ;
+  - dans tous les états : le sondage d'un pilote, des lectures à 5 Hz (PROTOCOL.md § 1 règle 6), pendant le chaos de F2 ;
+  - pendant une réponse différée : des rafales, une ligne qui attend (CUSTOM, q, js, jx) suivie aussitôt d'une à quatre
+    autres, que le cadrage retient jusqu'à sa réponse ; le magasin peut retenir ses opérations (O_MAGASIN, de 0 à 3 s,
+    autour des 2 s de BSK_STORE_WRITE_MS), comme la tâche du magasin de la carte, ce qui rend différées `js` et `jx` ;
+  - des octets arbitraires (NUL, `\n`, `#`, `:`, `\r`, octets hauts compris), et des lignes de 254 à 257 octets.
+Rien n'a été retiré faute de débit : les quatre ont été jouées, et le harnais secondaire après elles.
+
+
+F3.2 Le débit, mesuré en premier, et le bilan
+---------------------------------------------
+
+Le débit a été mesuré juste avant la campagne, graine 1, 20 cas, un processus (charge 3 sur 12 coeurs) : l'hôte fou,
+20 cas en 2,40 s de processeur, 8,3 cas par seconde ; le harnais secondaire, 20 cas en 2,54 s, 7,9 cas par seconde (une
+réduction comprise). C'est le débit de F2 (5 cas par seconde) : la couche HOTE ne coûte presque rien à côté de la
+SESSION et de l'objectif fou. La campagne l'a payé deux fois plus cher, six processus à la fois sous la charge des
+autres pods (ci-dessous).
+
+La campagne, sous ASan et UBSan. Débit : cas par seconde de temps processeur, réductions comprises. Temps : processeur
+(la somme des processus, mesurée par /usr/bin/time sur chacun, ses fils de réduction compris), puis mural.
+
+harnais    graines    cas      débit    temps proc.  mural   échecs
+hote       831-838    4 000    3,9/s    1 016,2 s    274 s   76 : P8 have64 70, P8 appui 6
+commande   3001-3040  4 000    4,2/s      942,3 s    174 s  366 : ACCUSE premier 266, P5 refus 47, P5 ecriture 20,
+                                                                  P8 have64 32, P8 appui 1
+total                 8 000             1 958,5 s    448 s  442
+
+Trouvailles dans la couche HOTE : AUCUNE. Aucune réponse de HOTE n'a manqué à P10, à P4 côté HOTE, aux bornes des
+réponses différées ni à l'admission, sur 149 045 lignes ; la divergence de B4 (a) n'a pas été vue (F3.4).
+Les échecs de l'hôte fou sont tous des entrées connues : P8 have64 et P8 appui, « mark_button lit o64 sans have64 »
+(backlog, Fuzzing, confirmé par F2). Aucun autre : ni P7 rail (l'écart de file du banc déclaré en F2), ni un faux échec
+d'un oracle.
+Le harnais secondaire trouve trois contrats internes, qu'aucune ligne de l'hôte n'atteint (F3.6) : une commande hors de
+l'énumération reste sans accusé (ACCUSE premier), et CMD_LENS_CUSTOM ne vérifie pas son arg, que bench_core refuse
+(P5 refus) ou dont l'octet tronqué passe sa liste et écrit la flash du 135 (P5 ecriture). Aucune régression : ni #783
+(une réponse prise pour celle d'une autre requête, ORDRE reponse), ni #789 (un CUSTOM servi après un abandon sans
+réponse, ORDRE custom, l'oracle corrigé). #787 (un goto fini hors de sa cible après un arrêt) n'est pas rejugé ici : P3
+cible ne suit que les gotos que le banc dépose lui-même sous un 135 où seul le moment est fou, ceux de F2 (F3.11).
+#672 (le délai INDI) est hors du firmware, hors champ.
+Le premier échec de chaque vérification, par processus, est réduit ; F3.7 dit ce qui est rangé : 16 cas.
+
+
+F3.3 Ce qui a été joué
+----------------------
+
+L'hôte fou (4 000 cas) : 149 045 lignes servies, 1 241 873 octets reçus par l'USB.
+
+Les lignes par famille (la famille lue par hote.c, hote_famille) :
+  f 12 191      f… 7 866       m<n> 552        r 6 185       e 12 322      g 6 097       a 6 329       a… 2 867
+  d 6 179       s… 1 135       c 6 120         o 6 144       l 176         j 6 202       js 2 325      jx 1 532
+  jg 309        i 6 128        k 204           k… 906        q 1 896       p0 291        p1 355        b 786
+  z 175         x 183          t 6 196         v 174         inconnue 16 370 (minuscules, chiffres, octets hauts…)
+  DEBUG 105     LOG 2 496      CUSTOM 5 281    CUSTOM mal formée 1 668    majuscule inconnue 3 455
+  :GP# 6 116    :GI# 6 098     :GN# 168        :GV# 185      :GT# 157      :GC# 157      :GD# 144      :GH# 167
+  :SN…# 1 321   :FG# 156       :FQ# 157        :…# muette 3 019
+
+Les lignes par état de la session à leur arrivée (l'instantané lu par le banc juste avant) :
+  off 7 054 ; powering 20 490 ; identifying 12 786 ; homing 2 120 ; restoring 1 199 ; ready 81 835 ; recovering
+  12 162 ; fault 11 399.
+
+Les réponses différées : 3 259 BSK_HOST_LATER, la plus longue rendue 2 000 979 µs après sa ligne, retards du pas retirés
+(un `js` ou un `jx` à l'échéance de BSK_STORE_WRITE_MS, 2 s, servie au tic suivant : la borne est 2 001 000 µs). Sur un
+échantillon de 100 cas (graine 831, cas 0 à 99, écrits par `ecrit` puis rejoués) : CUSTOM 55, js 23, jx 8, q 1 ; les
+quatre sortes ont été différées.
+
+Ce que les cas ont atteint, au moins une fois (fz_bilan) : READY 3 713 ; un goto en vol 1 500 ; RESTORING 1 231 ;
+RECOVERING 1 340 ; FAULT 516 ; une marque rangée 1 125 ; un CUSTOM en vol 1 319. Les préfixes de F2, de 365 à 429 cas
+chacun. La fin jugée (READY ou FAULT en 120 s) : 3 730 cas ; non jugée : 202 (tenus en OFF par p0, ou le faux objectif
+hors modèle ou bloqué). Les contrats internes 2 et 3 : bsk_txn_held_end 181 appels, toujours à la place 0 ;
+session_ack_last 41 appels, aucun sur une file vide. L'objectif fou : 70 182 émissions retardées, 37 778 perdues,
+18 316 doublées, 69 043 champs et 40 607 longueurs mutés, 61 001 rangées, 2 201 émissions du banc ; 19 651 pas en
+retard.
+
+Le harnais secondaire (4 000 cas) : 11 686 bsk_cmd_t arbitraires, dont 295 hors de l'énumération. READY atteint dans
+3 691 cas, un goto en vol 1 392, RESTORING 1 006, RECOVERING 1 062, FAULT 474, une marque rangée 853, un CUSTOM en vol
+659.
+
+
+F3.4 Les propriétés jouées, leurs sources, ce qu'elles ont vu
+-------------------------------------------------------------
+
+Les oracles sont écrits à la main ; aucun n'appelle allowed ni listed_size, ni une fonction de host.c pour juger host.c :
+le banc lit l'instantané de la session (bsk_session_status), voit ce que HOTE dépose par --wrap=bsk_session_command et
+chaque accusé à son dépôt (session_ack), et tient lui-même le journal (les lignes LOG) et le plafond de la LED (`k`).
+
+Sur chaque réponse de l'hôte fou :
+  P10 fin       une réponse par ligne, finie par `\n` ; Moonlite sans fin de ligne pour ses huit lectures, aucune réponse
+                pour les autres lignes `:` ; BSK_HOST_LATER pour CUSTOM, q, js et jx seulement, et rendu fini par `\n`
+                (PROTOCOL.md § 1 règles 1 et 2, § 4 ; bsk_host.h) : rien.
+  P10 tampon    la réponse tient dans BSK_HOST_REPLY_MAX (bsk_host.h ; le tampon du banc a cette taille, celle de rep
+                dans host_usb.c : ASan y verrait un débordement) : rien.
+  P10 une_ligne aucun octet de contrôle dans une réponse (PROTOCOL.md § 1 règle 1) : rien.
+  P10 longueur  au plus 15 caractères pour les lignes qui commencent par f r e a d s c, et m<n> (§ 1 règle 4) : rien.
+  P10 ok        jamais la sous-chaîne `ok` dans une réponse en `er` (§ 1 règle 5) : rien.
+  P10 forme     la forme de chaque commande, écrite à la main en tête de hote.c d'après PROTOCOL.md § 2 à § 5 et la spec
+                § 4.5.1 (le tableau d'état ; une ligne inconnue répond `er nocap`), avec ses valeurs lues dans
+                l'instantané quand PROTOCOL.md les fixe (la position, les bornes, la marque, le nom, `e`, `t`, `x`, `k`,
+                LOG) : rien.
+  P4 hote       `f`, `r`, `a`, `o` ne rendent un nombre que si son drapeau le permet (plans/fuzzing.md § 3, P4) : rien.
+  B4 admission  une lecture ne dépose rien ; une commande dépose celle de sa ligne (son op, et son arg quand le banc le
+                lit dans la ligne) ; f…, m<n>, a…, js, jx, jg et CUSTOM ne déposent rien hors READY, et en READY, leur
+                texte lisible, déposent, leur réponse suivant le premier accusé (ACK_ACCEPTED : `ok` ou la réponse
+                différée ; ACK_REJECTED : `er …`) ; q, p0, p1 et b déposent comme PROTOCOL.md le dit : rien.
+  DIFFEREE borne  chaque BSK_HOST_LATER rendu dans sa borne (q 2,5 ms, CUSTOM 1 002,5 ms, js et jx 2 001 ms, retards du
+                pas retirés ; en tête de hote.c), et chaque ligne livrée a sa réponse 135 s après le chaos (bsk_host.h ;
+                PROTOCOL.md § 1 règle 1, § 2 ligne q, § 3.1) : rien.
+  P6 muet       aucune ligne `*` écrite quand le journal est éteint, d'après l'en-tête du cas puis les lignes LOG que le
+                banc a passées ; une ligne produite avant un LOG n'est pas écrite après lui (host_usb.c, write_line, la
+                génération) ; la carte ne parle jamais la première (PROTOCOL.md:20) : rien, sur 2 496 lignes LOG.
+  P5 ecriture   un 'P' 0x38 ne part qu'à la suite d'une ligne CUSTOM WRITE acceptée, un par ligne, son octet de données
+                celui des deux chiffres de la ligne, 0x30 + (h << 4 | b) (PROTOCOL.md § 3.1) : rien.
+  P8 nvs        une écriture NVS est une ligne js ou jx en cours, ou le relâchement du bouton : rien.
+Et, inchangés depuis F2, sur les mêmes cas : P1, P2 (poll, garde), P3 (etat, transition, fault, duree, fin, off),
+P4 (instantane, identite, marque), P5 (liste, signature, refus), P6 (ligne, debit), P7 rail, PRESENCE, DELAI, ACCUSE
+(final, fin, premier), CONTRAT (held_end, ack_last), ORDRE (reponse, custom), P8 (doigt, appui, have64) : seuls P8 appui
+et have64 ont échoué (l'entrée connue).
+
+LA DIVERGENCE DE B4 (a) (critère 4) : PAS VUE. HOTE prédit l'admission hors READY (host.c, is_ready et not_ready) ; sur
+8 335 lignes de commandes que HOTE admet elle-même arrivées hors READY (f…, m<n>, a…, js, jx, jg, CUSTOM), aucune n'a
+déposé de commande, chacune a rendu la réponse d'état de PROTOCOL.md, et sur 12 397 en READY, aucune n'a répondu une
+réponse d'état ni contredit le premier accusé de la session. Le doublon ne diverge pas sur ce qui a été joué. La faute
+qui fait dire READY à HOTE en OFF (F3.9, faute 95) montre ce que l'oracle verrait.
+
+F3.5 Les oracles corrigés avant cette campagne
+----------------------------------------------
+
+Des oracles du banc, pas le firmware (brief § 8 : consigné, avec le contre-exemple, sans affaiblissement silencieux),
+corrigés pendant la mise au point et pendant la campagne remplacée (F3.10), avant celle-ci, qui n'a vu aucun faux
+échec :
+  - ORDRE custom, graine 815, cas 45 (la vague 1 de la campagne remplacée, banc de 5e59d26). Un CUSTOM READ en vol,
+    retenu jusqu'au 0x04 puis émis ; D2 retombe, la session passe en OFF (to_off, session.c:208-221) : elle entre en
+    OFF, oublie la session (le CUSTOM abandonné, ACK_FAILED E_ABORTED, sans réponse : désynchronisé), puis coupe les
+    rails et lève la désynchronisation (cmd_rails_cut). Le modèle du banc levait la sienne à l'entrée en OFF, avant
+    l'abandon : il est resté désynchronisé, et le CUSTOM WRITE suivant, accepté à bon droit, a été jugé fautif. Corrigé
+    en 04701e2 : le modèle se lève à la coupure du rail logique, comme cmd_rails_cut juste après elle, et chaque accusé
+    est jugé à son dépôt, dans l'ordre où la session le pose (F2 les lisait après le pas : le même défaut l'attendait,
+    aucun de ses cas ne l'a rencontré). Le cas (`fuzz_hote ecrit 815 45`) passe sur 04701e2 ; les 20 cas de F2 se
+    rejouent à l'identique, octet pour octet, avant et après. Non rangé.
+  - Pendant la mise au point, avant toute campagne : P5 refus jugeait bsk_bench_refused() à zéro, alors qu'il compte
+    depuis le démarrage du processus (bench_core.c) ; après un premier refus, chaque cas suivant du processus échouait,
+    et la réduction, dans un fils, « réduisait » vers un cas vide. Il juge maintenant la hausse dans le cas. Et le crédit
+    d'un 'P' 0x38 ne suivait qu'une CUSTOM WRITE : deux déposées au même instant, la seconde refusée effaçait le crédit
+    de la première, émise ensuite. Il suit chacune par son seq. Aucun de ces deux défauts n'a touché un cas de F2.
+  - Entre les vagues 1 et 2 de la campagne remplacée, le service d'une ligne : la vague 1 servait aussitôt chaque ligne
+    livrée à l'instant d'un événement, plusieurs au même instant ; la carte n'en sert qu'une par tour de boucle (main.c,
+    bsk_host_usb_service). Depuis 04701e2, une ligne livrée au même instant qu'une autre servie attend le tour suivant.
+
+
+F3.6 Le harnais secondaire : trois contrats internes
+----------------------------------------------------
+
+fuzz_commande dépose, mêlés aux scénarios de F2, des bsk_cmd_t arbitraires : op hors de l'énumération une fois sur
+quarante (12, 13, 15, 16, 255, 256, 0x7FFF, 0xFFFF), arg aux bornes (les extrêmes d'un int32_t, les positions, l'octet
+0x30 + arg de CUSTOM autour de la liste de bench_core) ou quelconque. Il est jugé sur P1, P2, P3, P5 et ACCUSE, et les
+autres oracles de F2 restent actifs. Une trouvaille n'y est un trou que si une ligne de l'hôte y mène (plans/fuzzing.md
+§ 2, cible 4) : components/host/host.c ne dépose que des op de l'énumération, et pour CMD_LENS_CUSTOM un arg de -1
+(READ) ou de 0x00 à 0x22 (WRITE, deux chiffres de 0 à 2, custom). Aucune des trois n'est donc un trou : ce sont des
+contrats internes, qu'aucune ligne n'atteint. L'hôte fou les confirme : sur 5 281 lignes CUSTOM bien formées et 1 668 mal
+formées, P5 ecriture et P5 refus n'ont jamais échoué.
+
+  1. ACCUSE premier : une commande hors de l'énumération ne reçoit aucun accusé (266 cas). bsk_session_command passe
+     par `default: break;` (cmd.c:290-291), sans accusé ; bsk_session.h ne le dit que de CMD_HOME et de CMD_RING_SET, et
+     host.c (deposit) suppose qu'il y en a toujours un. Hors READY ou une commande en vol, la même commande reçoit
+     E_BUSY : le contrat dépend de l'état.
+  2. P5 refus : CMD_LENS_CUSTOM d'arg hors de la liste (47 cas) : custom_cmd ne vérifie pas arg (cmd.c:171-172, « La
+     valeur n'est pas vérifiée ici : bench_core vérifie l'octet émis ») ; bench_core refuse l'octet 0x30 + arg tronqué,
+     rien n'est émis, bsk_bench_refused() compte un refus et la commande est refusée E_FORBIDDEN. La barrière tient ;
+     la propriété P5 (e) (« une hausse veut dire que le firmware a tenté une trame interdite ») échoue.
+  3. P5 ecriture : CMD_LENS_CUSTOM d'arg hors de 0x00..0x22 dont l'octet tronqué tombe dans la liste (20 cas) : arg
+     20000 émet 'P' 0x38 0x50 (WRITE 20 ; le cas rangé, F3.7). L'octet est de ceux que bench_core admet : la
+     flash du 135 est écrite avec une configuration que l'arg ne nomme pas.
+En lisant custom_cmd, le banc note aussi que `0x30 + c->arg` (cmd.c:191) est calculé en int : au-delà de INT32_MAX −
+0x30, il déborde. gcc le rétrécit à 8 bits avant l'instrumentation, et UBSan ne le voit pas (un cas écrit à la main, arg
+INT32_MAX, rend P5 refus sans erreur d'UBSan) : une lecture, pas un résultat de la campagne. Aucune erreur des
+sanitizers en 4 000 cas.
+Pourquoi des lots : une erreur d'un sanitizer arrête le processus ; joué en lots de 100 cas, il n'aurait coûté qu'un lot.
+Il n'y en a eu aucune.
+
+
+F3.7 Index des cas
+------------------
+
+Un cas par ligne, comme en F1 et F2 : la cible ; la propriété et sa source ; le chemin ; la commande de rejeu (après
+`fuzz.sh construit <sortie>`) ; la classe, contre la liste des trous connus du brief (§ 7 : ceux de F2, T1 à T12,
+constats_std.txt, le backlog « Plus tard » et Fuzzing, « Les trois contrats internes », l'écart de file du banc) ; ce que
+fait la carte. L'hôte fou : le premier échec de chaque vérification par processus, réduit. Le harnais secondaire, joué
+en 40 lots : le premier de chaque vérification (la plus petite graine) ; les comptes de tous les échecs sont au F3.2.
+
+hote | P8 appui (plans/fuzzing.md § 3, P8 : « n'écrit pas plus qu'un doigt » ; mark.c) | cas/hote/P8-appui-g831-102.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-appui-g831-102.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 », confirmé par F2) | le faux 135, préfixe arret : un
+    appui réel de 0,68 s, l'aller à la marque, lu 1,17 s : la marque réécrite à la position courante au lieu du goto.
+
+hote | P8 appui (idem) | cas/hote/P8-appui-g833-334.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-appui-g833-334.bin |
+    CONNU (idem) | le faux 135, préfixe homing : un appui réel de 0,81 s, l'aller à la marque, lu 1,07 s : la marque
+    réécrite à la position courante au lieu du goto.
+
+hote | P8 appui (idem) | cas/hote/P8-appui-g834-143.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-appui-g834-143.bin |
+    CONNU (idem) | le faux 135, préfixe homing : un appui réel de 0,31 s, l'aller à la marque, lu 1,02 s : la marque
+    réécrite à la position courante au lieu du goto.
+
+hote | P8 have64 (lens_rx.h : « o64 n'est lu que derrière have64 ») | cas/hote/P8-have64-g831-80.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-have64-g831-80.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe arret : un appui de 2,35 s vu en
+    partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui publié le demande.
+
+hote | P8 have64 (idem) | cas/hote/P8-have64-g832-25.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-have64-g832-25.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe custom : un appui de 2,17 s vu en
+    partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui publié le demande.
+
+hote | P8 have64 (idem) | cas/hote/P8-have64-g833-60.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-have64-g833-60.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe goto : un appui de 2,13 s vu en
+    partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui publié le demande.
+
+hote | P8 have64 (idem) | cas/hote/P8-have64-g834-34.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-have64-g834-34.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe froid : un appui de 3,15 s vu en
+    partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui publié le demande.
+
+hote | P8 have64 (idem) | cas/hote/P8-have64-g835-6.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-have64-g835-6.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe arret : un appui de 2,73 s vu en
+    partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui publié le demande.
+
+hote | P8 have64 (idem) | cas/hote/P8-have64-g836-46.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-have64-g836-46.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe goto : un appui de 2,95 s vu en
+    partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui publié le demande.
+
+hote | P8 have64 (idem) | cas/hote/P8-have64-g837-5.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-have64-g837-5.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe perte : un appui de 2,95 s vu en
+    partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui publié le demande.
+
+hote | P8 have64 (idem) | cas/hote/P8-have64-g838-47.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/hote/P8-have64-g838-47.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe custom : un appui de 3,88 s vu en
+    partie dans des 0x05 sans l'offset 64 ; la marque écrite au relâchement, une fois, comme l'appui publié le demande.
+
+commande | ACCUSE premier (bsk_session.h, bsk_session_command ; host.c, deposit) | cas/commande/ACCUSE-premier-g3001-7.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/commande/ACCUSE-premier-g3001-7.bin |
+    NOUVEAU, contrat interne : aucune ligne de l'hôte n'y mène (F3.6, 1) | le faux 135, la session en OFF : la commande
+    d'op 255 ne reçoit aucun accusé ; la carte ne fait rien d'autre.
+
+commande | P5 refus (plans/fuzzing.md § 3, P5 (e)) | cas/commande/P5-refus-g3001-11.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/commande/P5-refus-g3001-11.bin |
+    NOUVEAU, contrat interne : aucune ligne de l'hôte n'y mène (F3.6, 2) | le faux 135 en READY, préfixe perte :
+    CMD_LENS_CUSTOM d'arg 1494328333 ; bench_core refuse 'P' 0x38 0x3D (l'octet 0x30 + arg tronqué), rien n'est émis,
+    refused compte 1.
+
+commande | P5 ecriture (PROTOCOL.md § 3.1 ; P5 (d)) | cas/commande/P5-ecriture-g3004-38.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/commande/P5-ecriture-g3004-38.bin |
+    NOUVEAU, contrat interne : aucune ligne de l'hôte n'y mène (F3.6, 3) | le faux 135 en READY : CMD_LENS_CUSTOM d'arg
+    20000 émet 'P' 0x38 0x50, la configuration WRITE 20, que bench_core admet : la flash du 135 écrite d'une valeur que
+    l'arg ne nomme pas.
+
+commande | P8 have64 (lens_rx.h) | cas/commande/P8-have64-g3002-27.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/commande/P8-have64-g3002-27.bin |
+    CONNU (backlog, Fuzzing : « mark_button lit o64 sans have64 ») | le faux 135, préfixe retour : un appui de 3,55 s vu en
+    partie sans l'offset 64 ; la marque écrite une fois.
+
+commande | P8 appui (plans/fuzzing.md § 3, P8 ; mark.c) | cas/commande/P8-appui-g3036-55.bin |
+    bash 4_Firmware/sim/fuzz/fuzz.sh rejoue <sortie> 4_Firmware/sim/fuzz/cas/commande/P8-appui-g3036-55.bin |
+    CONNU (idem) | le faux 135, préfixe ready : un appui réel de 0,53 s lu 1,25 s : la marque réécrite.
+
+Aucun cas « non reproduit » : chaque premier échec a été rejoué dans un fils avec le même verdict avant d'être réduit
+(fuzz.c). Les cas de la campagne remplacée ne sont plus rangés.
+
+Ce qui n'a échoué nulle part, sous les deux harnais : P1, P2 (poll, garde), P7 rail, P3 (etat, transition, fault, duree,
+fin, off), P4 (instantane, identite, marque, hote), P5 (liste, signature ; et, sous l'hôte fou, ecriture et refus), P6
+(ligne, muet, debit), P10 (fin, tampon, une_ligne, longueur, ok, forme), PRESENCE, DELAI, ACCUSE (final, fin ; premier
+sous l'hôte fou), CONTRAT, ORDRE (reponse ; custom, l'oracle corrigé), B4 admission, DIFFEREE borne, P8 nvs et doigt.
+
+
+F3.8 Le rejeu
+-------------
+
+Dans le pod : `fuzz.sh rejoue-tout` rejoue deux fois chaque cas rangé, F1, F2 et F3 (37 cas : celui de lens_rx, les 20 de
+session, les 11 de hote, les 5 de commande) ; les deux sorties sont identiques octet pour octet, et chaque verdict est
+celui que porte son nom (« BILAN rejeu : 37 cas, 0 écart(s) », 5,1 s de processeur). Les 20 cas de F2, rejoués par le
+fuzz_session de 6449cd0 et par celui de cette livraison, donnent les mêmes sorties, octet pour octet. rejoue-tout sait
+aussi rejouer un cas qui tue le processus (P1-sanitizer-…, P2-garde-…) : il y attend le rapport du sanitizer ou la ligne
+de la garde ; aucun n'est rangé.
+Sur le runner, sous l'image du job `firmware` (ubuntu:24.04, gcc 13.3.0), l'essai trial-801-rejeu.yml : les dix harnais
+compilés avec les options de la suite et la ligne SAN de run.sh, chaque cas rejoué deux fois, puis 1000 cas de chaque
+harnais de F1 et 100 de session, hote et commande (graine 1) :
+run 3160 (essai trial-801-rejeu.yml, sur le commit 63e4e68, celui de cette campagne, de ses cas et de ce rapport sans ce
+paragraphe) : les dix harnais compilent sans avertissement (-Werror) ; les 37 cas, rejoués deux fois chacun, donnent deux
+sorties identiques et leur verdict (« BILAN rejeu : 37 cas, 0 écart(s) ») ; 1000 cas de chaque harnais de F1
+n'échouent que sur l'écart connu de lens_rx (P4 avant_boucle, 13 cas) ; 100 cas de session sur P8 have64 (3 cas,
+l'entrée connue) ; 100 cas de hote (3 431 lignes servies, 83 réponses différées) sur P8 have64 seulement (2 cas) ;
+100 cas de commande sur ACCUSE premier, P5 refus et P8 have64 (10 cas : les contrats internes et l'entrée connue, F3.6).
+Un rapport ne peut pas citer le run de son propre commit : le commit qui porte ce paragraphe ne change que ce rapport,
+et le code rejoué par 3160 est celui de la tête. Le rejeu et la CI complète sur la tête sont cités dans le résumé de la
+PR.
+
+
+F3.9 Les oracles mordent
+------------------------
+
+`fuzz.sh mord` injecte chaque faute de fautes.txt dans une copie temporaire de 4_Firmware/ (jamais livrée), recompile
+le harnais visé et le joue ; une faute de fuzz_hote ou de fuzz_commande joue `premier 1 400 <propriété> <vérification>`
+(les cas de la graine 1 jusqu'au premier échec de la vérification visée, les autres échecs passés, sans quoi l'entrée
+connue P8 have64 arrêterait la faute avant qu'elle soit vue), avec une garde de 20 s de processeur. Quand un oracle ne
+peut voir qu'une faute en deux lieux, la faute en a deux (P6 muet : LOG OFF qui laisse le journal allumé, et sa réponse
+qui dit le contraire).
+
+La passe finale, sur le code livré, toutes les fautes de F1, F2 et F3 : 107 morsures sur 107 fautes (les 52 de F1, les 34
+de F2, les 21 de F3), en 21,7 min de processeur, compilations comprises, dix fautes à la fois. Chaque vérification ajoutée
+par F3 a mordu : P10 (fin, tampon, une_ligne, longueur, ok, forme), P4 hote (deux fautes : `r` sans bornes valides,
+`o` sans ouverture relue), B4 admission, DIFFEREE borne, P6 muet sous les lignes LOG, P5 ecriture d'une ligne (l'octet
+de la ligne), P8 nvs d'une ligne (une ligne qui n'est ni js ni jx), ACCUSE premier.
+P1 sous les nouveaux harnais a sa propre faute : sous fuzz_hote, `bsk_host_later` qui lit un octet de trop (UBSan, l'index
+hors du tableau) ; sous fuzz_commande, le relatif d'un CMD_FOCUS_MOVE calculé en int (UBSan, le débordement). Le harnais
+secondaire a aussi les siennes pour P2 poll, P3 transition, P5 liste et ACCUSE (final, premier) ; P5 refus et P5
+ecriture y ont mordu sur le code livré, sans faute (F3.6). Les fautes de F1 et de F2 mordent encore, sur le pilote et
+le moteur de scénarios modifiés par cette livraison.
+Les vérifications qui n'ont jamais vu d'échec sans faute injectée, et ne comptent comme couverture que par leur faute :
+toutes celles de la liste ci-dessus pour la couche HOTE ; aucun échec réel de HOTE n'a été vu.
+Sous fuzz_hote, les vérifications du moteur partagé n'ont pas de faute propre, propriété par propriété : P2 (poll,
+garde), P3 (etat, transition, fault, duree, fin, off), P4 (instantane, identite, marque), P5 (liste, signature, refus),
+P6 (ligne, debit), P7, PRESENCE, DELAI, ACCUSE (final, fin), CONTRAT et ORDRE. Leur oracle est le code de
+fuzz_session.c, compilé tel quel dans fuzz_hote : il mord sous fuzz_session (les fautes 53 à 86, F2) et, pour P2 poll,
+P3 transition, P5 liste et ACCUSE final, sous fuzz_commande (fautes 104 à 107). Ce qui est propre à fuzz_hote
+(ACCUSE premier, P5 ecriture et P8 nvs jugés par ligne, P6 muet sous les lignes LOG, P10, P4 hote, B4, DIFFEREE) a sa
+faute (87 à 101).
+
+La passe finale des fautes de F3, faute par faute : le diff de la faute (sans contexte), puis la première ligne de sortie
+qui la voit (le chemin de la copie temporaire ramené à 4_Firmware/) :
+
+== faute 87 : fuzz_hote, components/host/host.c, attendu « ECHEC P10 fin »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -857 +857 @@
+   -    return "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
+   +    return *line == 'f' ? "" : "\n";                                    /* une ligne par commande (PROTOCOL.md § 1) */
+   MORD : ECHEC P10 fin : cas 0 de la graine 1 : t=6290836 : « f » : une autre fin, attendu une ligne finie par `\n`
+== faute 88 : fuzz_hote, components/host/host.c, attendu « ECHEC P10 tampon »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -58 +58 @@
+   -static void put(char *out, size_t cap, const char *s) { snprintf(out, cap, "%s", s); }
+   +static void put(char *out, size_t cap, const char *s) { memset(out, 'x', cap - 1); out[cap - 1] = 0; (void)s; }
+   MORD : ECHEC P10 tampon : cas 0 de la graine 1 : t=5332676 : « c » : une réponse de 1535 octets, le tampon plein
+== faute 89 : fuzz_hote, components/host/host.c, attendu « ECHEC P10 une_ligne »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -662 +662 @@
+   -    put(out, cap, "er nocap");                            /* une ligne que PROTOCOL.md ne connaît pas (§ 4.5.1) */
+   +    put(out, cap, "er\tnocap");                            /* une ligne que PROTOCOL.md ne connaît pas (§ 4.5.1) */
+   MORD : ECHEC P10 une_ligne : cas 0 de la graine 1 : t=11905059 : « 3\x85Z\x5C#\xD2u:j\xB2\xD3\x94\xF6ct\xAD\xFF\x7Fv » : l'octet 09 dans la réponse « er\x09nocap »
+== faute 90 : fuzz_hote, components/host/host.c, attendu « ECHEC P10 longueur »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -199 +199 @@
+   -    case E_LIMIT: put(out, cap, "er range limits"); break;
+   +    case E_LIMIT: put(out, cap, "er range limits x"); break;
+   MORD : ECHEC P10 longueur : cas 2 de la graine 1 : t=10031386 : « f00000000000000000000000000000000000000000000000000000000000 » : « er range limits x », 17 caractères
+== faute 91 : fuzz_hote, components/host/host.c, attendu « ECHEC P10 ok »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -198 +198 @@
+   -    case E_BUSY: put(out, cap, "er busy"); break;
+   +    case E_BUSY: put(out, cap, "er busy ok"); break;
+   MORD : ECHEC P10 ok : cas 10 de la graine 1 : t=6454914 : « jx » : « er busy ok »
+== faute 92 : fuzz_hote, components/host/host.c, attendu « ECHEC P10 forme »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -570 +570 @@
+   -            put(out, cap, ready ? (st->moving ? "y" : "n") : in_sequence(st) ? "y" : "n");
+   +            put(out, cap, ready ? (st->moving ? "y" : "n") : in_sequence(st) ? "n" : "y");
+   MORD : ECHEC P10 forme : cas 4 de la graine 1 : t=13743369 : « e » en identifying : « n », attendu « y »
+== faute 93 : fuzz_hote, components/host/host.c, attendu « ECHEC P4 hote »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -583 +583 @@
+   -        else if (!st->limits_valid) put(out, cap, "er link limits");   /* bornes inconnues (PROTOCOL.md § 2) */
+   +        else if (0) put(out, cap, "er link limits");   /* bornes inconnues (PROTOCOL.md § 2) */
+   MORD : ECHEC P4 hote : cas 40 de la graine 1 : t=46733041 : r : « 0-0 » sans bornes valides
+== faute 94 : fuzz_hote, components/host/host.c, attendu « ECHEC P4 hote »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -306 +306 @@
+   -    if (!st->aperture_current) return false;
+   +    if (0) return false;
+   MORD : ECHEC P4 hote : cas 0 de la graine 1 : t=10503655 : o : « 2.8 », l'ouverture 0000, cap B
+== faute 95 : fuzz_hote, components/host/host.c, attendu « ECHEC B4 admission »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -227 +227 @@
+   -static bool is_ready(const bsk_status_t *st) { return st->session_state == SESSION_READY; }
+   +static bool is_ready(const bsk_status_t *st) { return st->session_state == SESSION_READY || st->session_state == SESSION_OFF; }
+   MORD : ECHEC B4 admission : cas 51 de la graine 1 : t=1009098 : « CUSTOM WRITE 22 » en off : la commande 11 déposée, hors READY ou pour un texte que HOTE refuse lui-même
+== faute 96 : fuzz_hote, components/host/host.c, attendu « ECHEC DIFFEREE borne »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -86 +86 @@
+   -        h.lt_done = true;
+   +        h.lt_done = h.lt_op != CMD_FOCUS_STOP;
+   MORD : ECHEC DIFFEREE borne : cas 77 de la graine 1 : t=20310942 : « q » (q) sans réponse depuis 3000 µs, retards du pas retirés (borne 2500)
+== faute 97 : fuzz_hote, components/host/host.c, attendu « ECHEC P6 muet »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -768 +768 @@
+   -    snprintf(out, cap, "ok log=%d all=%d", bsk_journal_on(), bsk_journal_all());
+   +    snprintf(out, cap, "ok log=%d all=%d", bsk_journal_on() && !word(a, n, "OFF"), bsk_journal_all());
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -763 +763 @@
+   -    else if (word(a, n, "OFF")) bsk_journal_set(false, false);
+   +    else if (word(a, n, "OFF")) bsk_journal_set(true, false);
+   @@ -768 +768 @@
+   -    snprintf(out, cap, "ok log=%d all=%d", bsk_journal_on(), bsk_journal_all());
+   +    snprintf(out, cap, "ok log=%d all=%d", bsk_journal_on() && !word(a, n, "OFF"), bsk_journal_all());
+   MORD : ECHEC P6 muet : cas 10 de la graine 1 : t=17718467 : journal éteint, « * tx 17718 F0 29 00 02 23 01 FF FF FF FF FF FF FF 01 00 00 0 »
+== faute 98 : fuzz_hote, components/host/host.c, attendu « ECHEC P5 ecriture »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -724 +724 @@
+   -        arg = (t[1][0] - '0') << 4 | (t[1][1] - '0');
+   +        arg = (t[1][1] - '0') << 4 | (t[1][0] - '0');
+   MORD : ECHEC P5 ecriture : cas 4 de la graine 1 : t=18753637 : un 'P' 0x38 d'octet 31 émis, 40 demandé (0x30 + arg)
+== faute 99 : fuzz_hote, components/host/host.c, attendu « ECHEC P8 nvs »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -427 +427 @@
+   -        command(CMD_FOCUS_GOTO, st->mark_position, out, cap);
+   +        command(CMD_SET_MARK, BSK_MARK_HERE, out, cap);
+   MORD : ECHEC P8 nvs : cas 22 de la graine 1 : t=17632061 : écriture PUT déposée hors de js, jx et du relâchement du bouton
+== faute 100 : fuzz_hote, components/session/cmd.c, attendu « ECHEC ACCUSE premier »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -262 +262 @@
+   -        aperture_cmd(c);
+   +        if (session_state() != SESSION_READY) aperture_cmd(c);
+   MORD : ECHEC ACCUSE premier : cas 16 de la graine 1 : t=15938532 : seq 3 op 6 arg 5867 : aucun accusé dans l'appel
+== faute 101 : fuzz_hote, components/host/host.c, attendu « runtime error »
+   --- a/4_Firmware/components/host/host.c
+   +++ b/4_Firmware/components/host/host.c
+   @@ -874 +874 @@
+   -    for (size_t i = 0; i < sizeof d; i++) snprintf(out + 2 + 3 * i, cap - 2 - 3 * i, " %02X", (unsigned)d[i]);
+   +    for (size_t i = 0; i <= sizeof d; i++) snprintf(out + 2 + 3 * i, cap - 2 - 3 * i, " %02X", (unsigned)d[i]);
+   MORD : 4_Firmware/components/host/host.c:874:107: runtime error: index 16 out of bounds for type 'uint8_t [16]'
+== faute 102 : fuzz_commande, components/session/cmd.c, attendu « ECHEC ACCUSE premier »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -262 +262 @@
+   -        aperture_cmd(c);
+   +        if (session_state() != SESSION_READY) aperture_cmd(c);
+   MORD : ECHEC ACCUSE premier : cas 10 de la graine 1 : t=8023586 : seq 1 op 16 arg 47 : aucun accusé dans l'appel
+== faute 103 : fuzz_commande, components/session/motion.c, attendu « runtime error »
+   --- a/4_Firmware/components/session/motion.c
+   +++ b/4_Firmware/components/session/motion.c
+   @@ -204 +204 @@
+   -    int64_t target = c->op == CMD_FOCUS_MOVE ? (int64_t)lens_rx()->pos + c->arg : (int64_t)c->arg;
+   +    int64_t target = c->op == CMD_FOCUS_MOVE ? (int64_t)(lens_rx()->pos + c->arg) : (int64_t)c->arg;
+   MORD : 4_Firmware/components/session/motion.c:204:73: runtime error: signed integer overflow: 16384 + 2147483600 cannot be represented in type 'int'
+== faute 104 : fuzz_commande, components/session/session.c, attendu « ECHEC P2 poll »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -41 +41 @@
+   -#define STEP_EVENTS    64u    /* les événements de PHY traités par pas, au plus (audit M10) */
+   +#define STEP_EVENTS    200u    /* les événements de PHY traités par pas, au plus (audit M10) */
+   MORD : ECHEC P2 poll : cas 0 de la graine 1 : t=17374476 : 200 bsk_phy_poll dans un pas
+== faute 105 : fuzz_commande, components/session/session.c, attendu « ECHEC P3 transition »
+   --- a/4_Firmware/components/session/session.c
+   +++ b/4_Firmware/components/session/session.c
+   @@ -297 +297 @@
+   -    enter(SESSION_RECOVERING);
+   +    enter(SESSION_HOMING);
+   MORD : ECHEC P3 transition : cas 0 de la graine 1 : t=17374476 : ready -> homing
+== faute 106 : fuzz_commande, components/session/cmd.c, attendu « ECHEC P5 liste »
+   --- a/4_Firmware/components/bench_core/bench_core.c
+   +++ b/4_Firmware/components/bench_core/bench_core.c
+   @@ -63 +63 @@
+   -    return sub == 0x38 && (v >> 4) < 3 && (v & 0x0F) < 3;
+   +    return (sub == 0x38 || sub == 0x39) && (v >> 4) < 3 && (v & 0x0F) < 3;
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -190 +190 @@
+   -        m[2] = 0x38;
+   +        m[2] = 0x39;
+   MORD : ECHEC P5 liste : cas 5 de la graine 1 : t=7259869 : type 40 len 19 émis, déclaration 2
+== faute 107 : fuzz_commande, components/session/cmd.c, attendu « ECHEC ACCUSE final »
+   --- a/4_Firmware/components/session/cmd.c
+   +++ b/4_Firmware/components/session/cmd.c
+   @@ -105 +105 @@
+   -    session_aperture(c->arg);
+   +    session_aperture(c->arg); session_ack(c->seq, ACK_COMPLETED, E_OK);
+   MORD : ECHEC ACCUSE final : cas 14 de la graine 1 : seq 3 : accusé final COMPLETED sans ACK_ACCEPTED seul avant
+
+
+F3.10 Le budget
+---------------
+
+Campagne, en temps processeur (le plus strict : six processus pendant une minute comptent six minutes), dans le pod :
+
+  la mesure du débit (20 cas de hote, 20 de commande, graine 1)            4,9 s
+  l'hôte fou (graines 831 à 838, 4 000 cas)                            1 016,2 s
+  le harnais secondaire (graines 3001 à 3040, 4 000 cas)                 942,3 s
+  total                                                                1 963,5 s, 32,7 min, environ 7,5 min murales
+
+Sous le plafond de 60 min. Le harnais secondaire a été lancé une fois l'hôte fou fini et compté (16,9 min), sa taille
+fixée avant : 4 000 cas à 0,25 s, le coût par cas de l'hôte fou sous la même charge, tenaient dans ce qui restait. Rien
+n'a été joué après lui.
+
+La campagne remplacée, du 2026-10-25 : 3 911,6 s de processeur, 65,2 min, au-delà du plafond de 5,2 min (sa vague 2 et
+son harnais secondaire avaient tourné ensemble, seize processus sur douze coeurs, avec les autres pods à une charge de
+22 : un cas du harnais secondaire y coûtait 2,4 fois le débit mesuré à vide). La revue de la PR #802 l'a refusée sur ce
+plafond ; elle a été rejouée entière, sur d'autres graines, et ni ses cas, ni ses comptes, ni son index ne sont repris.
+Ce qu'elle a appris au banc reste, consigné en F3.5 : l'oracle ORDRE custom et le service d'une ligne par tour, corrigés
+en 04701e2.
+
+Hors campagne, comme en F1 et F2 : la campagne remplacée (65,2 min) ; la mise au point des oracles (environ 450 s de
+processeur : des lots de 20 à 300 cas, les rejeux des cas de F2 contre le fuzz_session de 6449cd0, deux campagnes de 200
+cas de session comparées, des échantillons de traces), les morsures (deux passes partielles de mise au point, environ
+9 min de processeur, puis la passe finale, 21,7 min, sur le même code que cette campagne) ; l'échantillon des réponses
+différées (100 cas écrits puis rejoués, 22 s) ; les rejeux et les réductions faits à la main, quelques dizaines de
+secondes ; sur le runner, un essai à la fois : le rejeu final et la CI complète (F3.8).
+
+
+F3.11 Limites, et ce qui n'est pas joué
+---------------------------------------
+
+  - Le cadrage de l'USB (rx_task, host_usb.c) n'est pas compilé : hote.c en recopie les règles, lues sur 6449cd0. Ce que
+    fait la carte d'une ligne de plus de 255 octets, d'un NUL, d'un octet perdu sur l'USB, d'une réponse écrite en partie
+    (`dropped`), relève du banc matériel. La tâche du journal (journal_task) et son mutex non plus : le banc écrit une
+    ligne du journal si sa génération est la courante quand il la prend, comme write_line le décide.
+  - Le capteur de fuzz_hote est sim/sensor_none.c : `z` rend `-` et `:GT#` `0000#` ; une mesure connue, le seuil de
+    condensation et la ligne `* sht40` sont l'affaire de fuzz_climat et fuzz_sht40 (F1).
+  - Les commandes des scénarios de F2 deviennent leurs lignes au jeu (O_CMD) ; leur texte n'est pas dans le cas, il se
+    recalcule de l'instantané, et la trace le dit.
+  - P3 cible n'est pas jugée sous l'hôte fou ni sous le harnais secondaire : #787 reste rejugé par F2 seul.
+  - B4 admission juge ce que HOTE dépose contre l'état publié et le premier accusé : une divergence où HOTE et CMD liraient
+    tous deux un état faux ne se voit pas ainsi (le C_ETAT de F2 juge l'état publié contre l'état entré).
+  - Les bornes des réponses différées comptent un tic de 1 ms pour le service : la plus longue attente vue (2 000 996 µs
+    pour une borne de 2 001 000 µs) l'a presque toute prise. Un pas en retard est retiré de l'attente : un retard du pas
+    sans injection (la durée d'un pas sur la carte) n'est pas représenté, comme en F2.
+  - La file de la PHY simulée (1 024 événements, 32 sur la carte) : le cas P7 de F2 en vient ; cette campagne n'en a pas
+    vu (la campagne remplacée, une fois).
+  - Le harnais secondaire n'a pas atteint d'erreur des sanitizers ; le débordement lu dans custom_cmd n'est pas visible par
+    UBSan avec gcc (F3.6).
+  - Hors de F3, comme le brief le dit : libFuzzer (F4) ; l'électrique et le temps réel de la carte ; les fonctions static.
+
+
+=================================================================================================================
+RAPPORT DE LA CAMPAGNE F4 — les cibles d'octets sous libFuzzer, sur le runner (4_Firmware/sim/fuzz/, ticket #804)
+=================================================================================================================
+
+Campagne du 2026-10-26. Quatre cibles d'octets sous libFuzzer, guidées par la couverture : les trois de F1, rx (la
+réception en flux), lens_rx et bench, et une nouvelle, ligne (fuzz_ligne.c : la ligne de l'hôte en harnais d'octets).
+Chacune appelle, depuis LLVMFuzzerTestOneInput (fuzz.c, compilé avec -DFZ_LIBFUZZER), la même fz_run et les mêmes
+FZ_CHECKS que le pilote gcc. Les commandes sont dans README.md (§ « libFuzzer et la ligne de l'hôte (F4) ») ; la campagne
+se rejoue par `fuzz.sh libfuzzer` et l'essai .gitea/workflows/trial-804-libfuzzer.yml.
+
+AUCUNE TROUVAILLE : en 3 246 s de libFuzzer (54,1 min), 70 857 070 exécutions sur les quatre cibles, aucune vérification
+inconnue n'a échoué et aucun sanitizer n'a parlé ; le seul échec vu est l'entrée connue de lens_rx (P4 avant_boucle),
+comptée et passée 277 759 fois. Aucun cas n'est rangé par F4 ; cas/ est inchangé.
+
+
+F4.1 Où, avec quoi
+------------------
+
+Face code jugée     components/, include/ et main/ au commit f094fc2 (main, merge de #802) : cette livraison n'y touche
+                    pas (le banc, sim/test/programmes.sh et un essai du runner seulement).
+Le banc             celui du commit 0b404ba : les sept essais de la campagne (F4.3) portent sur lui ; le commit qui suit ne
+                    change que ce rapport. La passe de fumée (run 3173) porte sur 8fd152b, dont le banc ne diffère que
+                    d'une ligne de fuzz_ligne.c (la ligne du journal citée par P6 muet terminée par NUL), du README et des
+                    plafonds de l'essai.
+Où                  la campagne : le runner (12 processeurs Intel Core Ultra 7 265H), dans l'image ubuntu:24.04, un essai
+                    à la fois, un processus libFuzzer à la fois ; le pod : fuzz_ligne au pilote gcc, les morsures, le rejeu.
+Compilateurs        libFuzzer : Ubuntu clang 18.1.3 (1ubuntu1), installé par apt dans l'essai (clang, libclang-rt-18-dev ;
+                    llvm-18 pour llvm-symbolizer), avec -std=c11 -Wall -Wextra -Wpedantic -O1 -g -DFZ_LIBFUZZER
+                    -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer ; aucun
+                    avertissement sur les quatre cibles, à chaque essai.
+                    Rejeu : gcc 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1) sur le runner, gcc 15.2.0 (Ubuntu 15.2.0-16ubuntu1)
+                    dans le pod, avec les options de la suite (-std=c11 -Wall -Wextra -Wpedantic -Werror -O2) et la ligne
+                    SAN de run.sh (-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer).
+Options de          -max_total_time posé avant de lancer (le plafond de chaque cible, F4.6), -seed au numéro du run,
+libFuzzer           -timeout=10 (les 10 s de la garde du pilote gcc), -rss_limit_mb=4096, -print_final_stats=1 ; deux
+                    répertoires : le corpus (vide au départ, où libFuzzer écrit) et les graines.
+Graines             par cible, 1000 cas du générateur du banc, graine 1 (`fuzz_<cible> ecrit 1 <i>`), et les cas rangés
+                    de F1 de la cible (un seul : cas/lens_rx/P4-avant_boucle-g6-69.bin) ; aucun cas de scénario de F2 ou
+                    F3 (un autre format), aucun octet de firmware d'objectif. Le corpus ne passe pas d'un essai à l'autre :
+                    chaque essai repart des graines, sous un autre -seed.
+
+
+F4.2 Le nouveau harnais : la ligne de l'hôte (fuzz_ligne)
+--------------------------------------------------------
+
+Il n'existait aucune cible d'octets pour la ligne de l'hôte (fuzz_hote est le moteur de scénarios de F2). fuzz_ligne.c
+en est une, passée d'abord par le pilote gcc (fz_run, fz_gen, FZ_CHECKS, l'entrée fuzz_ligne de programmes.sh), puis
+sous libFuzzer comme les trois autres.
+
+L'entrée     un en-tête de 32 octets, la session, puis les octets reçus par l'USB, cadrés par cadre() (hote.c, la copie
+             de rx_task de host_usb.c faite par F3) ; chaque ligne livrée va à la vraie couche HOTE (host.c) comme
+             bsk_host_usb_service la donne : une ligne par tour de boucle, après le pas et bsk_host_observe, et après
+             BSK_HOST_LATER, bsk_host_later à chaque tour, aucune autre ligne avant sa réponse (bsk_host.h, main/main.c).
+La session   SCRIPTÉE, choix de cet engineer : la vraie SESSION menée jusqu'à READY coûte un scénario de F2 par cas (de 3,9
+derrière     à 8,3 cas par seconde, F3.2), et libFuzzer n'y apprend rien. La session scriptée est celle de
+HOTE         sim/test/test_host.c, réduite au contrat de bsk_session.h et de bsk_contract.h (en tête de fuzz_ligne.c) :
+             deux états choisis par le cas, qui alternent au rythme que le cas choisit (READY dans la moitié des cas du
+             générateur, et chacun des huit états), l'instantané (position, bornes, ouverture, marque, identité, nom,
+             commutateurs), le capteur (mesure connue ou non, tour par tour), DEBUG (des compteurs à 0xFFFFFFFF ou
+             petits), et les accusés : le premier dans l'appel, l'accusé final dans l'appel ou jusqu'à 3 tours plus
+             tard, les vols, E_BUSY pendant un vol, l'arrêt d'un mouvement par STOP, la sortie de READY. Chaque changement
+             d'état est journalisé comme la session le journalise (bsk_journal_session) : avec la ligne `* sht40` du
+             capteur, c'est ce qui donne à P6 muet des lignes à taire. HOTE est compilé comme la suite le compile (led.c,
+             -lm, stacks_sim.c, un capteur : celui du cas ; le vrai journal, journal.c).
+Les          celles de F3 qui se jugent sans scénario, écrites à la main (en tête de fuzz_ligne.c) : P10 fin (`\n` après
+oracles      une ligne Basilisk ou Pinefeat, rien après une lecture Moonlite :G…#, aucune réponse à une autre ligne `:…`,
+             BSK_HOST_LATER pour CUSTOM, q, js et jx seulement, `\n` après la réponse différée), P10 tampon (dans
+             BSK_HOST_REPLY_MAX), P10 une_ligne (aucun octet de contrôle), P10 longueur (15 caractères au plus pour
+             f r e a d s c et m<n>), P10 ok (jamais `ok` dans une réponse en `er`, hors `i`, qui rend un nom), P6 muet
+             (journal éteint au départ et après LOG OFF, aucune ligne `*` écrite ; le mode suivi par hote_log, d'après
+             PROTOCOL.md § 3), DIFFEREE borne (la réponse différée rendue au plus 4 tours après le dépôt : l'accusé final
+             vient au plus 3 tours après), P1 (ASan, UBSan), P2 (la garde du pilote, -timeout sous libFuzzer). La
+             famille d'une ligne, les lignes qui peuvent attendre et le mode de LOG sont ceux de hote.c (hote_famille,
+             hote_differable, hote_log). La forme commande par commande, P4 côté HOTE et l'admission de B4 ne sont pas
+             jugées ici : elles dépendent de ce que la vraie session fait, et fuzz_hote les juge.
+
+Un oracle corrigé avant la campagne (comme F3.5). La première session scriptée refusait une commande avec une raison
+quelconque de bsk_err.h : `f-0` en READY, refusé E_HOME_FAILED, rendait « er link home_failed », 19 caractères, et P10
+longueur échouait (307 cas sur 20 000 au pilote gcc). Ce n'est pas un défaut de host.c : la vraie session ne refuse
+GOTO et MOVE que par E_BUSY ou E_LIMIT (cmd.c, bsk_session_command et focus ; motion.c, motion_command), d'où
+`er busy` et `er range limits`. La session scriptée ne donne plus, commande par commande, que les raisons que la vraie
+session donne (raisons(), fuzz_ligne.c, d'après cmd.c, motion.c, mark.c et txn.c). Rien n'a été rangé de cet essai.
+
+Au pilote gcc, dans le pod, après cette correction : 600 000 cas (graines 1 à 6, 100 000 chacune, six processus, 13,3 s
+de processeur, de 44 300 à 45 700 cas par seconde), aucun échec. Un échantillon de 300 cas de la graine 7, rejoués :
+5 854 lignes servies, 76 réponses différées (q, js, jx, CUSTOM, dont des CUSTOM finis avec leurs 16 octets, d'autres
+par `er link aborted`, `er link timeout`, `er link bus`), 744 lignes du journal écrites sous LOG ON ou LOG ALL.
+
+
+F4.3 Les essais, les exécutions, le débit
+-----------------------------------------
+
+Un essai joue les quatre cibles l'une après l'autre, sous leurs plafonds : ligne 180 s, rx 150 s, lens_rx 60 s, bench
+60 s (la passe de fumée : 15 s chacune). Les durées sont celles que fuzz.sh mesure autour de libFuzzer, en secondes
+murales (libFuzzer en compte une de moins, « Done … in N second(s) ») ; le job du run 3175 a duré 8 min 56 s, et
+aucun n'a atteint sa limite de 10 min.
+
+run    commit    -seed  ligne                     rx                       lens_rx                  bench
+3173   8fd152b      1   16 s    283 517          16 s    24 963          16 s   202 277          16 s  2 242 153
+3175   0b404ba   1397   181 s  1 847 798         151 s  139 882          61 s   479 144          61 s  6 810 277
+3177   0b404ba   1398   181 s  2 437 569         152 s   85 968          61 s   386 804          61 s  4 640 791
+3180   0b404ba   1399   182 s  2 757 075         151 s  212 910          61 s   652 404          61 s  7 084 215
+3181   0b404ba   1400   181 s  2 659 340         151 s  197 166          61 s   661 279          61 s  7 044 909
+3182   0b404ba   1401   181 s  2 995 378         151 s  188 005          62 s   619 535          62 s  4 384 147
+3184   0b404ba   1402   181 s  2 765 376         151 s  205 599          61 s   666 792          61 s  7 699 793
+3186   0b404ba   1403   181 s  2 672 495         151 s  197 718          61 s   669 266          61 s  6 942 525
+
+cible    temps    exécutions     débit moyen        échecs connus             trouvailles
+ligne    1 284 s  18 418 548     14 345 /s          aucun                     aucune
+rx       1 074 s   1 252 211      1 166 /s          aucun                     aucune
+lens_rx    444 s   4 337 501      9 769 /s          P4 avant_boucle : 277 759 aucune
+bench      444 s  46 848 810    105 515 /s          aucun                     aucune
+total    3 246 s  70 857 070
+
+Le débit varie d'un essai à l'autre (rx de 569 à 1 410 exécutions par seconde, bench de 71 871 à 126 226) : le runner
+est partagé. rx est lent parce que fz_run joue chaque cas trois fois (trois découpages) sur des flux jusqu'à 64 Ko.
+L'échec connu de lens_rx (backlog.md, « Fuzzing du firmware » ; RAPPORT.txt § 4) : 6,4 % des exécutions sous libFuzzer
+(environ 1 % des cas du générateur gcc) — libFuzzer garde les entrées qui y mènent, le corpus en est plus riche ; il a
+été compté et passé (CONNUS, fuzz.c), sans couper aucun essai.
+
+
+F4.4 Les trouvailles et leur rejeu par gcc
+------------------------------------------
+
+Aucune. Aucun essai n'a été interrompu : ni vérification inconnue, ni erreur d'un sanitizer, ni dépassement de -timeout,
+ni de la mémoire ; le répertoire des trouvailles est resté vide à chaque cible de chaque essai (« 0 trouvaille(s),
+0 reproduite(s) sous gcc »). Le chemin du rejeu (fuzz.sh libfuzzer : deux rejeux par le pilote gcc 13, comparés, puis
+la réduction et l'hexadécimal) n'a donc servi à aucun cas ; il est le même que celui de `fuzz.sh rejoue` et `reduit`.
+Index des cas de F4 : vide. Aucun défaut corrigé n'est revenu (#783, #787, #789 : régressions) ; aucune ligne de l'hôte n'a
+mené aux trois contrats internes de cmd.c (F3.6) — fuzz_ligne ne les voit pas directement : il juge ce que HOTE
+répond, et ses commandes vont à la session scriptée.
+
+
+F4.5 La comparaison de couverture
+---------------------------------
+
+Pour chaque cible et chaque essai, fuzz.sh libfuzzer relève la couverture des graines seules (`-runs=0
+-print_coverage=1`, la ligne INITED) et celle des graines et du corpus final ; puis, dans components/, les fonctions dont
+les arêtes couvertes ont augmenté, et les lignes que les graines laissaient sans arête. Les graines sont les cas du
+générateur gcc : cov au début est ce que le générateur atteignait, cov à la fin ce que libFuzzer y a ajouté.
+
+cible    cov graines -> fin   ft graines -> fin (selon l'essai)   dans components/
+ligne    763 -> 798 (+35)     2 842 -> 5 541 à 5 759             de nouveaux chemins, les mêmes à chaque essai (ci-dessous)
+rx       133 -> 141 (+8)        652 -> 826 à 857                 aucun : phy_common.c n'a gagné aucune arête
+lens_rx  171 -> 175 (+4)        840 -> 1 145 à 1 183             lens_rx_name (lens_rx.c:161) : 13 -> 14 arêtes sur 22
+bench    129 -> 135 (+6)        507 -> 777 à 807                 aucun : bench_core.c n'a gagné aucune arête
+
+(La passe de fumée, 15 s : ligne 763 -> 797, rx 133 -> 141, lens_rx 171 -> 175, bench 129 -> 135.)
+
+La ligne de l'hôte : libFuzzer a pris des chemins que les cas du générateur ne prenaient pas, les mêmes aux sept essais.
+  - host.c, `j`, `o` et `i` en FAULT (lignes 416-417, 600-601, 609-610) : les branches « servie si l'identité est
+    établie, `er nolens` sinon » ; le générateur tire l'état, le nom et le code modèle indépendamment, et la combinaison
+    FAULT, sans nom et sans code, suivie de `j`, `o` ou `i`, y est rare ;
+  - lens_names.c, lens_name_lookup trouvé (5 -> 7 arêtes sur 10) et identity (host.c:248, 5 -> 7) : `i` sur un code
+    modèle de la table des noms. Le générateur tire un code de 16 bits au hasard ou aux bornes, qui n'y tombe presque
+    jamais ; libFuzzer suit les comparaisons de la recherche dichotomique et trouve les codes de la table ;
+  - host.c, condensation (lignes 520 et 523) et climate (10 -> 12) : `z` quand le seuil n'est pas défini (humidité nulle,
+    air au-dessus de 60 °C, givre sous -65 °C) ;
+  - journal.c, transition (8 -> 10), line (3 -> 4), admit (6 -> 7) et admit_tr (ligne 242) : les plafonds du journal
+    par seconde atteints, des transitions tues et comptées (`dropped`) — la session scriptée qui bascule à chaque tour ;
+  - host.c, bsk_host_line (82 -> 85), letter (129 -> 137) et observe_ (37 -> 38) : les mêmes lettres sur ces états.
+Les trois autres cibles : libFuzzer n'a pris aucun chemin nouveau dans phy_common.c ni dans bench_core.c, et un seul
+dans lens_rx.c (une arête de plus dans le nom du 0x3F, lens_rx_name). Leurs arêtes nouvelles (rx 8, lens_rx 3, bench 6)
+sont hors de components/ : dans le harnais et le pilote, que le dépouillement ne détaille pas. Les ft gagnés (des
+compteurs d'arêtes par paliers, pas des arêtes) disent des combinaisons nouvelles des mêmes chemins. Pour ces trois
+cibles, les générateurs de F1 atteignaient déjà, en arêtes, ce que libFuzzer atteint en 7 essais.
+
+
+F4.6 Le budget
+--------------
+
+Le plafond, 60 min de campagne cumulées sur le runner, comptées en durée de libFuzzer, a été réglé avant chaque lancement
+(-max_total_time) : 15 s par cible pour la passe de fumée, puis, pour chaque essai, ligne 180, rx 150, lens_rx 60 et
+bench 60, soit 450 s, fixés dans trial-804-libfuzzer.yml avant le premier essai de la campagne. Le nombre d'essais a été
+arrêté au fil des runs sur le compte mesuré ci-dessous : un huitième essai aurait porté le total à 61,7 min.
+
+  la passe de fumée (run 3173)                              64 s
+  sept essais (runs 3175, 3177, 3180, 3181, 3182, 3184, 3186)  3 182 s (de 454 à 456 s chacun)
+  total                                                  3 246 s, 54,1 min (en secondes murales autour de libFuzzer)
+
+Hors campagne : sur le runner, l'outillage, les constructions, les graines et la couverture de chaque essai (environ 9 min
+de job pour 7,5 min de libFuzzer), puis la CI complète ; dans le pod, fuzz_ligne au pilote gcc (environ 820 000 cas,
+une vingtaine de secondes de processeur), les morsures (F4.8), rejoue-tout (F4.7) et la suite (run.sh).
+
+
+F4.7 Le rejeu
+-------------
+
+Dans le pod (gcc 15.2.0), `fuzz.sh rejoue-tout` sur les onze harnais compilés de cette livraison, le pilote modifié
+(fuzz.c : la branche FZ_LIBFUZZER ajoutée, le pilote gcc inchangé hors d'elle) : les 37 cas de F1 à F3 rejoués deux fois,
+deux sorties identiques octet pour octet et le verdict que porte leur nom (« BILAN rejeu : 37 cas, 0 écart(s) »). F4
+n'en ajoute aucun.
+
+
+F4.8 Les oracles mordent
+------------------------
+
+Dix fautes pour fuzz_ligne dans fautes.txt, une par vérification (P10 fin deux fois : une ligne Basilisk sans `\n`, une
+lecture Moonlite sans réponse), plus P1 et P2 ; chacune injectée dans une copie temporaire, `premier 1 2000 <propriété>
+<vérification>`, garde de 2 s de processeur. Toutes mordent :
+
+   ECHEC P10 fin : cas 0 de la graine 1 : « f1.5 » : une autre fin, attendu une ligne finie par `\n`
+   ECHEC P10 fin : cas 22 de la graine 1 : « :GV » : aucune réponse, attendu la réponse sans fin de ligne
+   ECHEC P10 tampon : cas 0 de la graine 1 : « LOG  x » : une réponse de 1535 octets, le tampon plein
+   ECHEC P10 une_ligne : cas 0 de la graine 1 : « 14\xAD\x15\x01\xEFg » : l'octet 09 à la place 2 de la réponse
+   ECHEC P10 longueur : cas 21 de la graine 1 : « f65535 » : 17 caractères
+   ECHEC P10 ok : cas 13 de la graine 1 : « f-0 » : « er busy ok »
+   ECHEC P6 muet : cas 23 de la graine 1 : tour 8 : journal éteint, « * session 8 ready »
+   ECHEC DIFFEREE borne : cas 22 de la graine 1 : « q » (q) : toujours sans réponse après 5 tours
+   host.c:874:107: runtime error: index 16 out of bounds for type 'uint8_t [16]'
+   ECHEC P2 garde : le cas ne rend pas la main en 2 s de processeur
+
+La passe complète de `fuzz.sh mord`, F1 à F4, sur le code de cette livraison : « BILAN morsures : 117 sur 117 fautes »
+(15 min 10 s de processeur, 3 min 14 s murales, six fautes à la fois). Les morsures se jouent au pilote gcc : sous
+libFuzzer, les mêmes FZ_CHECKS jugent le cas, et un échec qui n'est pas dans CONNUS appelle abort().
+
+
+F4.9 Limites, et ce qui n'est pas joué
+--------------------------------------
+
+  - La session derrière fuzz_ligne est scriptée : elle ne fait d'une commande que ce que son contrat permet, sans
+    l'objectif. Ce que HOTE répond à ce que la vraie session fait vraiment (la forme, P4 côté HOTE, B4) reste à fuzz_hote ;
+    un défaut qui n'apparaîtrait qu'avec un instantané que la vraie session publie et que la session scriptée ne tire pas
+    (un état publié incohérent, par exemple) ne se voit pas ici, et ne serait pas un défaut de HOTE.
+  - Le corpus repart des graines à chaque essai (le runner ne garde rien d'un run à l'autre) : sept explorations de 3 min
+    pour ligne, de 2,5 min pour rx, plutôt qu'une de 21 min. La couverture a atteint son plafond dès la passe de 15 s pour
+    rx, lens_rx et bench, et dès le premier essai pour ligne (798 à chaque essai).
+  - Le cadrage USB reste la copie de hote.c (rx_task n'est pas compilé sur l'hôte) : comme en F3, une ligne de plus de 255
+    octets, un NUL, un octet perdu relèvent du banc matériel.
+  - Les cibles à scénario (session, hote, commande) et les autres cibles de F1 (sht40, journal, climat, rtc) ne sont pas
+    jouées sous libFuzzer ; AFL++ (le plan, § 5 C) ne l'est pas : un seul outil guidé.
+  - La couverture est dépouillée dans components/ seulement ; les arêtes nouvelles du harnais et du pilote sont comptées
+    (cov), pas détaillées.
+  - llvm-symbolizer nomme une ligne 0 dans lens_names.c (une instruction sans ligne de source) : elle est dans la liste
+    des lignes nouvelles telle que libFuzzer l'imprime.

@@ -1,7 +1,7 @@
 /* SOURCE: spec de l'atelier § 3.1 — IDENTIFYING, la séquence d'init
  * AUTHOR: engineer
  * DATE: 2026-10-03
- * STATUS: actif — en-tête privé de la SESSION, inclus par session.c, init.c et cmd.c
+ * STATUS: actif — en-tête privé de la SESSION, inclus par session.c, init.c, cmd.c et restore.c
  *
  * Quelle requête d'init envoyer, quand la renvoyer, la reconnaissance Samyang (aux réponses au 0x07 et au 0x3F, et à
  * l'oubli de la session seulement) et le lancement de la boucle. Le superviseur

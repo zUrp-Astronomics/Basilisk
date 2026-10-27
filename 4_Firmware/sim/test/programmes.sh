@@ -9,13 +9,16 @@
 # compilé de la même façon par les deux.
 
 # programme_sources <racine firmware> <programme> : remplit SOURCES et LIENS (options d'édition de liens,
-# après les sources) ; rend 1 si le programme est inconnu.
-# test_session135, test_std et test_host135 sont liés avec --wrap : ils notent ce que la session fait sur le fil sans
-# toucher à la PHY simulée (sim/test/test_session135.c, sim/test/test_std.c, sim/test/test_host135.c). Tout programme
+# après les sources ; pour test_store, le chemin de l'ESP-IDF simulé, sim/idf, que lui seul lit) ; rend 1 si le
+# programme est inconnu.
+# test_session135, test_std, test_host135 et test_stop_goto135 sont liés avec --wrap : ils notent ce que la session fait
+# sur le fil sans toucher à la PHY simulée (sim/test/test_session135.c, sim/test/test_std.c, sim/test/test_host135.c,
+# sim/test/test_stop_goto135.c). Tout programme
 # qui compile la couche HOTE (components/host/host.c) compile aussi components/led/led.c (`k`, le plafond de la LED)
 # et est lié avec -lm (l'ouverture : log2, pow), et reçoit les marges de pile de `DEBUG` (bsk_host_stacks, bsk_host.h)
 # et la mesure du capteur de la carte (bsk_sensor_read, bsk_sensor.h) : test_host pose les siennes, les autres
-# compilent sim/stacks_sim.c et sim/sensor_none.c (le capteur avant sa première lecture).
+# compilent sim/stacks_sim.c et sim/sensor_none.c (le capteur avant sa première lecture). test_host compile host.c par
+# sim/test/host_seq.c, qui l'inclut et lui ajoute host_seq_set (le dernier seq alloué, posé par le test : son rebouclage).
 programme_sources() {
     local r=$1
     local sim=("$r/components/phy/phy_common.c" "$r/sim/frame.c" "$r/sim/sources135.c" "$r/sim/lens135.c"
@@ -30,8 +33,10 @@ programme_sources() {
         test_lens_std) SOURCES=("$r/sim/lens_std.c" "$r/sim/test/$2.c") ;;
         test_led) SOURCES=("$r/components/led/led.c" "$r/sim/test/$2.c") ;;
         test_sht40) SOURCES=("$r/components/sensor/sht40.c" "$r/sim/sht40_sim.c" "$r/sim/test/$2.c") ;;
+        test_store) SOURCES=("$r/components/store/store.c" "$r/sim/test/$2.c")
+            LIENS=(-I"$r/sim/idf") ;;
         test_journal) SOURCES=("$r/components/journal/journal.c" "$r/components/phy/phy_common.c" "$r/sim/test/jdecode.c" "$r/sim/test/$2.c") ;;
-        test_host) SOURCES=("$r/components/host/host.c" "$r/components/host/lens_names.c" "$r/components/led/led.c" "$r/components/journal/journal.c"
+        test_host) SOURCES=("$r/sim/test/host_seq.c" "$r/components/host/lens_names.c" "$r/components/led/led.c" "$r/components/journal/journal.c"
                             "$r/components/phy/phy_common.c" "$r/sim/test/$2.c")
             LIENS=(-lm) ;;
         test_host135)
@@ -46,11 +51,55 @@ programme_sources() {
         test_session135)
             SOURCES=("${session[@]}" "$r/sim/lens135.c" "$r/sim/lens_sim_135.c" "$r/sim/phy_sim.c" "$r/sim/test/jdecode.c" "$r/sim/test/$2.c")
             LIENS=(-Wl,--wrap=bsk_phy_send,--wrap=bsk_phy_body_cs,--wrap=bsk_phy_rail,--wrap=bsk_phy_vd,--wrap=bsk_phy_lines,--wrap=bsk_phy_poll) ;;
+        test_stop_goto135)
+            SOURCES=("${session[@]}" "$r/sim/lens135.c" "$r/sim/lens_sim_135.c" "$r/sim/phy_sim.c" "$r/sim/test/$2.c")
+            LIENS=(-Wl,--wrap=bsk_phy_send,--wrap=bsk_phy_poll) ;;
         test_std)
             SOURCES=("${session[@]}" "$r/sim/lens_std.c" "$r/sim/lens_sim_std.c" "$r/sim/phy_sim.c" "$r/components/host/host.c"
                      "$r/components/host/lens_names.c" "$r/components/led/led.c" "$r/sim/test/jdecode.c" "$r/sim/stacks_sim.c"
                      "$r/sim/sensor_none.c" "$r/sim/test/$2.c")
             LIENS=(-Wl,--wrap=bsk_phy_send,--wrap=bsk_phy_poll -lm) ;;
+        # Le banc de fuzzing (sim/fuzz/README.md), hors de la suite : ni run.sh ni mutants.sh ne nomment un fuzz_*.
+        fuzz_rx) SOURCES=("$r/components/phy/phy_common.c" "$r/sim/frame.c" "$r/sim/sources135.c" "$r/sim/fuzz/fuzz.c"
+                          "$r/sim/fuzz/$2.c") ;;
+        fuzz_lens_rx) SOURCES=("$r/components/session/lens_rx.c" "$r/components/phy/phy_common.c" "$r/sim/frame.c" "$r/sim/sources135.c"
+                              "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c") ;;
+        fuzz_bench) SOURCES=("$r/components/bench_core/bench_core.c" "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c")
+            LIENS=(-Wl,--wrap=bsk_phy_send) ;;
+        fuzz_sht40) SOURCES=("$r/components/sensor/sht40.c" "$r/sim/sht40_sim.c" "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c")
+            LIENS=(-lm) ;;
+        fuzz_journal) SOURCES=("$r/components/journal/journal.c" "$r/components/phy/phy_common.c" "$r/sim/fuzz/fuzz.c"
+                               "$r/sim/fuzz/$2.c") ;;
+        fuzz_climat)
+            SOURCES=("${session[@]}" "$r/components/host/host.c" "$r/components/host/lens_names.c" "$r/components/led/led.c"
+                     "$r/sim/test/phy_script.c" "$r/sim/stacks_sim.c" "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c")
+            LIENS=(-lm) ;;
+        fuzz_rtc)
+            SOURCES=("${session[@]}" "$r/sim/test/phy_script.c" "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c")
+            LIENS=(-Wl,--wrap=bsk_phy_poll) ;;
+        fuzz_session)
+            SOURCES=("${session[@]}" "$r/sim/lens135.c" "$r/sim/lens_sim_135.c" "$r/sim/lens_std.c" "$r/sim/lens_sim_std.c"
+                     "$r/sim/phy_sim.c" "$r/sim/fuzz/lens_fou.c" "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c")
+            LIENS=(-Wl,--wrap=bsk_phy_send,--wrap=bsk_phy_poll,--wrap=bsk_phy_rail,--wrap=bsk_phy_lines,--wrap=bsk_phy_body_cs,--wrap=bsk_txn_samyang,--wrap=bsk_txn_held_end,--wrap=session_ack,--wrap=session_ack_last,--wrap=bsk_journal_session,--wrap=bsk_store_request,--wrap=bsk_txn_ack,--wrap=bsk_store_result) ;;
+        # fuzz_hote et fuzz_commande incluent fuzz_session.c (sim/fuzz/fuzz_hote.c, sim/fuzz/fuzz_commande.c) ; fuzz_hote
+        # compile la couche HOTE comme la suite la compile (led.c, -lm, stacks_sim.c, un capteur : en tête de ce fichier).
+        fuzz_hote)
+            SOURCES=("${session[@]}" "$r/sim/lens135.c" "$r/sim/lens_sim_135.c" "$r/sim/lens_std.c" "$r/sim/lens_sim_std.c"
+                     "$r/sim/phy_sim.c" "$r/sim/fuzz/lens_fou.c" "$r/components/host/host.c" "$r/components/host/lens_names.c"
+                     "$r/components/led/led.c" "$r/sim/stacks_sim.c" "$r/sim/sensor_none.c" "$r/sim/fuzz/hote.c"
+                     "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c")
+            LIENS=(-Wl,--wrap=bsk_phy_send,--wrap=bsk_phy_poll,--wrap=bsk_phy_rail,--wrap=bsk_phy_lines,--wrap=bsk_phy_body_cs,--wrap=bsk_txn_samyang,--wrap=bsk_txn_held_end,--wrap=session_ack,--wrap=session_ack_last,--wrap=bsk_journal_session,--wrap=bsk_store_request,--wrap=bsk_txn_ack,--wrap=bsk_store_result,--wrap=bsk_session_command,--wrap=bsk_session_ack -lm) ;;
+        # fuzz_ligne (F4) : HOTE au-dessus d'une session scriptée (sim/fuzz/fuzz_ligne.c, qui fournit aussi le capteur),
+        # compilée comme la suite la compile : led.c, -lm, stacks_sim.c, le journal (journal.c, et fr_encode).
+        fuzz_ligne)
+            SOURCES=("$r/components/host/host.c" "$r/components/host/lens_names.c" "$r/components/led/led.c"
+                     "$r/components/journal/journal.c" "$r/components/phy/phy_common.c" "$r/sim/stacks_sim.c"
+                     "$r/sim/fuzz/hote.c" "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c")
+            LIENS=(-lm) ;;
+        fuzz_commande)
+            SOURCES=("${session[@]}" "$r/sim/lens135.c" "$r/sim/lens_sim_135.c" "$r/sim/lens_std.c" "$r/sim/lens_sim_std.c"
+                     "$r/sim/phy_sim.c" "$r/sim/fuzz/lens_fou.c" "$r/sim/fuzz/fuzz.c" "$r/sim/fuzz/$2.c")
+            LIENS=(-Wl,--wrap=bsk_phy_send,--wrap=bsk_phy_poll,--wrap=bsk_phy_rail,--wrap=bsk_phy_lines,--wrap=bsk_phy_body_cs,--wrap=bsk_txn_samyang,--wrap=bsk_txn_held_end,--wrap=session_ack,--wrap=session_ack_last,--wrap=bsk_journal_session,--wrap=bsk_store_request,--wrap=bsk_txn_ack,--wrap=bsk_store_result) ;;
         *) return 1 ;;
     esac
 }

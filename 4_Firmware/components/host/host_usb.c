@@ -2,7 +2,8 @@
  * AUTHOR: engineer
  * DATE: 2026-10-04
  * STATUS: actif — ESP-IDF seulement : aucun test hôte ne le compile ; ticket #528 : les créations des tâches vérifiées,
- *         les marges de pile pour DEBUG (bsk_host_stacks), le chien de garde ; ticket #594 : la pile du capteur
+ *         les marges de pile pour DEBUG (bsk_host_stacks), le chien de garde ; ticket #594 : la pile du capteur ;
+ *         ticket #694 : l'horloge de la carte donnée à HOTE, pour `x`
  *
  * L'USB série-JTAG de la carte : cadre les lignes, les passe à la couche HOTE, écrit les réponses et le journal. */
 #include "bsk_host.h"
@@ -80,7 +81,7 @@ static uint64_t clock_us(void) { return (uint64_t)esp_timer_get_time(); }
  * d'abord la fin de ligne qui lui manque, pour ne pas s'y coller (PROTOCOL.md § 1) ; si cette fin de ligne ne part pas,
  * rien de la suivante ne part, perdue aussi. Une réponse Moonlite n'écrit jamais de fin de ligne, ni avant ni après :
  * intercalée, elle se colle à la ligne coupée, et la fin de ligne attend la ligne de texte suivante. */
-static bool write_line(const char *b, size_t n, const char *tail, uint32_t timeout_ms, bool journal, uint8_t gen)
+static bool write_line(const char *b, size_t n, const char *tail, uint32_t timeout_ms, bool journal, uint32_t gen)
 {
     int w, wt = 0;
     size_t nt = strlen(tail);
@@ -163,7 +164,7 @@ static void journal_task(void *arg)
     static char b[JOURNAL_LINE];
     (void)arg;
     for (;;) {
-        uint8_t gen;
+        uint32_t gen;
         size_t n = bsk_journal_take(b, sizeof b, &gen);
         if (!n) {
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -179,11 +180,11 @@ void bsk_host_usb_init(void)
         .rx_buffer_size = 1024,
         .tx_buffer_size = 8192,
     };
-    out_mutex = xSemaphoreCreateMutex();
-    req_ready = xSemaphoreCreateBinary();
-    rep_ready = xSemaphoreCreateBinary();
+    MUST((out_mutex = xSemaphoreCreateMutex()) != NULL);
+    MUST((req_ready = xSemaphoreCreateBinary()) != NULL);
+    MUST((rep_ready = xSemaphoreCreateBinary()) != NULL);
     bsk_journal_init(clock_us);
-    bsk_host_init(esp_app_get_description()->version, reset_str());
+    bsk_host_init(esp_app_get_description()->version, reset_str(), clock_us);
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
     /* le cœur 0, comme toutes les tâches (décision de l'humain) : la carte finale est un ESP32-C3, à un seul cœur */
     MUST(xTaskCreatePinnedToCore(rx_task, "usb_rx", 4096, NULL, 6, &rx_handle, 0) == pdPASS);

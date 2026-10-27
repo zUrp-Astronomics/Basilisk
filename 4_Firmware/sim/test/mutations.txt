@@ -416,10 +416,10 @@
 +     if (0) {
 +         x.state = TXN_FAILED;
 
-@ test_session_script | components/txn/txn.c | bsk_txn_on_event
+@ test_session_script | components/txn/txn.c | answers
 = TRANSACTION WAIT -> DONE : n'importe quelle trame termine la requête (t_txn_done)
-- e->u.frame.msg[0] == x.type
-+ e->u.frame.msg[0] != 0
+-     if (r[0] != x.q[0]) return false;
++     if (0) return false;
 
 @ test_session_script | components/txn/txn.c | bsk_txn_on_event
 = TRANSACTION WAIT -> DONE : la réponse vaut échec (t_txn_done)
@@ -479,8 +479,8 @@
 @ test_session_script | components/txn/txn.c | request_out
 = TRANSACTION : le numéro n'avance pas après une requête (t_txn_seq)
 -     seq_advance();
--     x.type = msg[0];
-+     x.type = msg[0];
+-     x.deadline = now_us + (uint64_t)timeout_ms * 1000u;
++     x.deadline = now_us + (uint64_t)timeout_ms * 1000u;
 
 @ test_session_script | components/txn/txn.c | seq_advance
 = TRANSACTION : numéro jusqu'à 0xFF au lieu de 0xEF (t_txn_seq)
@@ -507,8 +507,8 @@
 = OFF : rails laissés (t_d2_homing)
 -     bsk_phy_rail(BSK_RAIL_MOTOR, false);
 -     bsk_phy_rail(BSK_RAIL_LOGIC, false);
--     s.fails = 0;
-+     s.fails = 0;
+-     cmd_rails_cut();
++     cmd_rails_cut();
 
 @ test_session_script | components/session/session.c | lines_rest
 = OFF : VD laissée (t_d2_homing)
@@ -929,25 +929,6 @@
 -     p->retry_wait_ms = 3000;
 +     p->retry_wait_ms = 2000;
 
-@ test_session_script | components/session/session.c | on_due
-= RECOVERING : rails non coupés (t_01_silent_cut, coupure activée)
--         bsk_phy_rail(BSK_RAIL_MOTOR, false);
--         bsk_phy_rail(BSK_RAIL_LOGIC, false);
--         wait_for(S_REC_CUT
-+         wait_for(S_REC_CUT
-
-@ test_session_script | components/session/session.c | bsk_session_params_default
-= RECOVERING : coupure de 400 ms (t_01_silent_cut, coupure activée)
--     p->cut_ms = 500;
-+     p->cut_ms = 400;
-
-@ test_session_script | components/session/session.c | on_due
-= RECOVERING -> OFF au lieu de POWERING (t_01_silent_cut : FAULT au 4e échec, sans OFF)
--     case S_REC_CUT:
--         to_powering();
-+     case S_REC_CUT:
-+         to_off();
-
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = position lue aux offsets 1-2 (t_cold_start, 14623)
 - pub.pos = (uint16_t)(f->msg[3] | f->msg[4] << 8);
@@ -1089,7 +1070,7 @@
 + {
 +     static bool again;
 +     if (x.state == TXN_WAIT && now_us >= x.deadline && !again) {
-+         uint8_t m[2] = {x.type, 0x00};
++         uint8_t m[2] = {x.q[0], 0x00};
 +         again = true;
 +         (void)bsk_txn_request(m, 2, 300, now_us);
 +         return;
@@ -1099,8 +1080,10 @@
 @ test_session_script | components/session/session.c | advance
 = E7 : la perte armée aussi en HOMING (t_no_loss_in_homing)
 -     bsk_txn_tick(s.now);
+-     motion_q_end(s.now);
 -     switch (s.step) {
 +     bsk_txn_tick(s.now);
++     motion_q_end(s.now);
 +     {
 +         static uint64_t t06;
 +         static uint32_t n06;
@@ -1144,7 +1127,7 @@
 
 @ test_session_script | components/txn/txn.c | pair_due
 = 0x1D : la consigne repart à chaque paire (t_txn_goto, un seul 0x1D)
--             x.att_len = 0;
+-             if (att) x.att_len = 0;
 +             (void)0;
 
 @ test_session_script | components/session/drive.c | af_hold
@@ -1159,7 +1142,7 @@
 
 @ test_session_script | components/session/drive.c | paired
 = bit AF : jamais décompté (t_txn_goto, 30 paires)
--     if (d.af_left) af_hold((uint8_t)(d.af_left - 1));
+-     if (d.af_left && bsk_txn_n03() != d.from) af_hold((uint8_t)(d.af_left - 1));
 +     (void)0;
 
 @ test_session_script | components/session/drive.c
@@ -1184,10 +1167,10 @@
 -     af_hold(0);
 +     (void)0;
 
-@ test_session135 | components/session/motion.c | mv_start
+@ test_session135 | components/session/motion.c | mv_send
 = MOUVEMENT PLANNING -> COMMANDED : la consigne n'est pas déposée (t_goto, aucun 0x1D)
--     drive_goto(target);
-+     (void)target;
+-     drive_goto(m.target);
++     (void)m.target;
 
 @ test_session135 | components/session/motion.c | mv_start
 = MOUVEMENT COMMANDED : l'état publié est MOVING dès le dépôt (t_goto)
@@ -1307,27 +1290,27 @@
 
 @ test_session135 | components/session/motion.c | motion_stop
 = arrêt, READY en mouvement : le goto n'est pas clos (t_stop_goto)
--     if (moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
+-     if (motion_moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
 +     (void)0;
 
 @ test_session135 | components/session/motion.c | motion_stop
 = arrêt, READY en mouvement : E_STALL au lieu de E_ABORTED (t_stop_goto)
--     if (moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
-+     if (moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_STALL);
+-     if (motion_moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
++     if (motion_moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_STALL);
 
 @ test_session135 | components/session/motion.c | motion_stop
 = arrêt, READY : pas de 0x1C (t_stop_goto, t_stop_ready)
 -     bsk_err_t e = drive_stop();
--     if (moving())
+-     if (motion_moving())
 +     bsk_err_t e = E_OK;
-+     if (moving())
++     if (motion_moving())
 
 @ test_session135 | components/session/motion.c | motion_stop
 = arrêt, READY sans mouvement : pas de 0x1C (t_stop_ready)
 -     bsk_err_t e = drive_stop();
--     if (moving())
-+     bsk_err_t e = moving() ? drive_stop() : E_OK;
-+     if (moving())
+-     if (motion_moving())
++     bsk_err_t e = motion_moving() ? drive_stop() : E_OK;
++     if (motion_moving())
 
 @ test_session_script | components/session/cmd.c | stop
 = arrêt, HOMING : q arrête le homing du démarrage au lieu de E_BUSY (t_d2_homing)
@@ -1339,10 +1322,10 @@
 -     if (session_state() == SESSION_READY) {
 +     if (session_state() != SESSION_HOMING) {
 
-@ test_session135 | components/session/cmd.c | stop
+@ test_session135 | components/session/motion.c | q_sent
 = arrêt : ACK_FAILED au lieu de ACK_COMPLETED (t_stop_ready)
--     if (e == E_OK) session_ack(c->seq, ACK_COMPLETED, E_OK);
-+     if (e == E_OK) session_ack(c->seq, ACK_FAILED, E_OK);
+-     session_ack(seq, e == E_OK ? ACK_COMPLETED : ACK_FAILED, e);
++     session_ack(seq, ACK_FAILED, e);
 
 @ test_session135 | components/session/cmd.c | bsk_session_command
 = arrêt : E_BUSY pendant un goto en vol, alors que q passe toujours (t_stop_goto)
@@ -1386,13 +1369,13 @@
 
 @ test_session135 | components/session/motion.c | motion_command
 = relatif : la cible est n, pas la position ± n (t_move)
-- (int64_t)l->pos + c->arg
+- (int64_t)lens_rx()->pos + c->arg
 + (int64_t)c->arg
 
 @ test_session135 | components/session/motion.c | motion_command
 = relatif : le sens inversé (t_move)
-- (int64_t)l->pos + c->arg
-+ (int64_t)l->pos - c->arg
+- (int64_t)lens_rx()->pos + c->arg
++ (int64_t)lens_rx()->pos - c->arg
 
 
 
@@ -1500,32 +1483,32 @@
 + #define RING     4096u
 
 @ test_journal | components/journal/journal.c | room
-= anneau : l'en-tête de 3 octets oublié dans la place libre (t_ring)
--     return RING - 1 - used >= n + 3;
+= anneau : l'en-tête de 6 octets oublié dans la place libre (t_ring)
+-     return RING - 1 - used >= n + HDR;
 +     return RING - 1 - used >= n;
 
 @ test_journal | components/journal/journal.c | put
 = anneau plein : la ligne perdue n'est pas comptée (t_ring, dropped)
--     if (!room(n + (k ? (size_t)k + 3 : 0))) {
+-     if (!room(n + (k ? (size_t)k + HDR : 0))) {
 -         j.dropped++;
-+     if (!room(n + (k ? (size_t)k + 3 : 0))) {
++     if (!room(n + (k ? (size_t)k + HDR : 0))) {
 
 @ test_journal | components/journal/journal.c
 = plafond à 31 lignes par seconde (t_rate)
 - #define PER_S    30u
 + #define PER_S    31u
 
-@ test_journal | components/journal/journal.c | admit
+@ test_journal | components/journal/journal.c | window
 = fenêtre de 999 ms au lieu d'une seconde (t_rate, à 999 ms)
 -     if (!j.win || ms >= j.win_ms + 1000) {
 +     if (!j.win || ms >= j.win_ms + 999) {
 
-@ test_journal | components/journal/journal.c | admit
+@ test_journal | components/journal/journal.c | window
 = pas de `* rxflood` (t_rate)
 -         if (supp) {
 +         if (0) {
 
-@ test_journal | components/journal/journal.c | admit
+@ test_journal | components/journal/journal.c | window
 = `* rxflood` ne compte pas dans la fenêtre (t_rate, 28 lignes de plus)
 -             j.win_n = 1;
 +             j.win_n = 0;
@@ -1652,8 +1635,8 @@
 
 @ test_journal | components/journal/journal.c | put_raw
 = une ligne ne porte pas sa génération (t_gen)
--     j.ring[h] = atomic_load_explicit(&j.gen, memory_order_relaxed);
-+     j.ring[h] = 0;
+-     uint32_t g = atomic_load_explicit(&j.gen, memory_order_relaxed);
++     uint32_t g = 0;
 
 @ test_journal | components/journal/journal.c | bsk_journal_set
 = LOG OFF n'éteint pas (t_gen)
@@ -1677,8 +1660,8 @@
 
 @ test_journal | components/journal/journal.c | bsk_err_token
 = deux jetons d'erreur échangés (t_names)
--                                     "home_failed", "identity", "forbidden", "busy", "lost", "aborted", "nocap"};
-+                                     "home_failed", "identity", "forbidden", "busy", "aborted", "lost", "nocap"};
+- "busy", "lost", "aborted"
++ "busy", "aborted", "lost"
 
 # ── les octets qu'une erreur de réception a rejetés, au journal (test_journal, t_rx_bytes) ──
 
@@ -1777,23 +1760,13 @@
 
 @ test_host | components/host/host.c | letter
 = e : y en FAULT, au lieu de n (t_states)
--             put(out, cap, ready ? (moving(st) ? "y" : "n") : in_sequence(st) ? "y" : "n");
-+             put(out, cap, ready ? (moving(st) ? "y" : "n") : st->session_state == SESSION_OFF ? "n" : "y");
+-             put(out, cap, ready ? (st->moving ? "y" : "n") : in_sequence(st) ? "y" : "n");
++             put(out, cap, ready ? (st->moving ? "y" : "n") : st->session_state == SESSION_OFF ? "n" : "y");
 
 @ test_host | components/host/host.c | letter
 = e : n dans les états de séquence (t_states)
--             put(out, cap, ready ? (moving(st) ? "y" : "n") : in_sequence(st) ? "y" : "n");
-+             put(out, cap, ready ? (moving(st) ? "y" : "n") : "n");
-
-@ test_host | components/host/host.c | moving
-= e : SETTLING pris pour l'arrêt (t_ready_reads)
--            st->motion_state == MOTION_SETTLING;
-+            0;
-
-@ test_host | components/host/host.c | moving
-= e : PLANNING pris pour l'arrêt (t_ready_reads)
--     return st->motion_state == MOTION_PLANNING || st->motion_state == MOTION_COMMANDED
-+     return st->motion_state == MOTION_COMMANDED
+-             put(out, cap, ready ? (st->moving ? "y" : "n") : in_sequence(st) ? "y" : "n");
++             put(out, cap, ready ? (st->moving ? "y" : "n") : "n");
 
 @ test_host | components/host/host.c | letter
 = f : une autre valeur que focus_position (t_ready_reads)
@@ -1829,7 +1802,7 @@
 
 @ test_host | components/host/host.c | letter
 = r : sans 0x06, des bornes rendues comme lues (t_ready_reads, er link limits)
--         else if (!st->position_valid) put(out, cap, "er link limits");
+-         else if (!st->limits_valid) put(out, cap, "er link limits");
 +         else if (0) put(out, cap, "er link limits");
 
 @ test_host | components/host/host.c | letter
@@ -1951,44 +1924,24 @@
 + }
 
 @ test_host | components/host/host.c | power
-= p1 ne lève pas le maintien de p0 (t_state_commands)
--         if (a.result == ACK_ACCEPTED) h.hold = false;
-+         (void)a;
-
-@ test_host | components/host/host.c | power
-= p0 accepté ne pose pas le maintien (t_state_commands)
--             h.hold = true;
-+             h.hold = false;
-
-@ test_host | components/host/host.c | power
 = p0 pendant un démarrage : er busy au lieu de er busy boot (v1, t_state_commands)
 -         } else if (in_sequence(st)) {
 +         } else if (in_sequence(st) && 0) {
 
 @ test_host | components/host/host.c | reboot
 = b en OFF après p0 : er nolens (t_state_commands)
--     if (st->session_state == SESSION_OFF && !h.hold) {
+-     if (st->session_state == SESSION_OFF && !st->held) {
 +     if (st->session_state == SESSION_OFF) {
 
 @ test_host | components/host/host.c | reboot
 = b hors OFF : er nolens sans maintien (t_ready_commands)
--     if (st->session_state == SESSION_OFF && !h.hold) {
-+     if (!h.hold) {
+-     if (st->session_state == SESSION_OFF && !st->held) {
++     if (!st->held) {
 
 @ test_host | components/host/host.c | reboot
 = b en FAULT : CMD_ATTACH au lieu de CMD_CLEAR_FAULT (t_state_commands)
 -     a = st->session_state == SESSION_FAULT ? deposit(CMD_CLEAR_FAULT, 0) : deposit(CMD_ATTACH, 0);
 +     a = deposit(CMD_ATTACH, 0);
-
-@ test_host | components/host/host.c | reboot
-= b accepté ne lève pas le maintien de p0 (t_state_commands)
--     if (a.result == ACK_ACCEPTED) {
--         h.hold = false;
--         put(out, cap, "ok");
--     } else if (a.reason == E_BUSY) {
-+     if (a.result == ACK_ACCEPTED) {
-+         put(out, cap, "ok");
-+     } else if (a.reason == E_BUSY) {
 
 @ test_host | components/host/host.c | reboot
 = b refusé en READY : er busy au lieu de er busy move (t_refusals)
@@ -2012,13 +1965,13 @@
 
 @ test_host | components/host/host.c | mark_line
 = ms : la marque posée à 0 au lieu d'ici (BSK_MARK_HERE, t_ready_commands)
--         command(CMD_SET_MARK, BSK_MARK_HERE, out, cap);
-+         command(CMD_SET_MARK, 0, out, cap);
+- deposit(CMD_SET_MARK, BSK_MARK_HERE)
++ deposit(CMD_SET_MARK, 0)
 
 @ test_host | components/host/host.c | mark_line
 = mx : CMD_SET_MARK au lieu de CMD_CLEAR_MARK (t_ready_commands)
--         command(CMD_CLEAR_MARK, 0, out, cap);
-+         command(CMD_SET_MARK, 0, out, cap);
+- deposit(CMD_CLEAR_MARK, 0)
++ deposit(CMD_SET_MARK, 0)
 
 @ test_host | components/host/host.c | mark_line
 = jg sans marque : déposé quand même (§ 4.5.1, er range nomark, t_ready_commands)
@@ -2095,8 +2048,8 @@
 
 @ test_host | components/host/host.c | deposit
 = seq non croissant (§ 4.1, t_ready_commands)
--     bsk_cmd_t c = {.seq = ++h.seq, .op = op, .arg = arg};
-+     bsk_cmd_t c = {.seq = h.seq, .op = op, .arg = arg};
+-     if (++h.seq == BSK_SEQ_BOARD) ++h.seq;
++     if (h.seq == BSK_SEQ_BOARD) ++h.seq;
 
 
 
@@ -2150,8 +2103,8 @@
 
 @ test_host | components/host/host.c | line_t
 = t : busy=- dans les états de séquence (t_line_t)
-- in_sequence(st) ? "boot" : "-", h.hold
-+ "-", h.hold
+- in_sequence(st) ? "boot" : "-", st->held
++ "-", st->held
 
 
 
@@ -2248,43 +2201,26 @@
 -     forget();
 -     lines_rest();
 +     forget();
++     (void)lines_rest;
 
 @ test_session135 | components/session/session.c | to_off
 = OFF : rails coupés avant que les lignes soient au repos (wires_check)
 -     lines_rest();
 -     bsk_phy_rail(BSK_RAIL_MOTOR, false);
 -     bsk_phy_rail(BSK_RAIL_LOGIC, false);
--     s.fails = 0;
+-     cmd_rails_cut();
 +     bsk_phy_rail(BSK_RAIL_MOTOR, false);
 +     bsk_phy_rail(BSK_RAIL_LOGIC, false);
 +     lines_rest();
-+     s.fails = 0;
-
-@ test_session135 | components/session/session.c | on_due
-= RECOVERING : lignes et VD laissées pilotées pendant la coupure (wires_check, t_lines_recovering)
--         lines_rest();
-
-@ test_session135 | components/session/session.c | on_due
-= RECOVERING : la VD de la v1, laissée en marche pendant la coupure (t_lines_recovering)
--         lines_rest();
-+         bsk_phy_lines(false);
++     cmd_rails_cut();
 
 @ test_session135 | components/session/session.c | lines_rest
-= RECOVERING : VD non relancée au POWERING suivant (t_lines_recovering)
+= OFF : VD non relancée au POWERING qui suit (t_detach_attach : CMD_ATTACH -> READY ; t_fault : CMD_ATTACH -> READY)
 -     bsk_phy_vd(0);
 -     s.vd_on = false;
 - }
 +     bsk_phy_vd(0);
 + }
-
-@ test_session135 | components/session/session.c | on_due
-= RECOVERING : rails coupés avant les lignes (wires_check, t_lines_recovering)
--         lines_rest();
--         bsk_phy_rail(BSK_RAIL_MOTOR, false);
--         bsk_phy_rail(BSK_RAIL_LOGIC, false);
-+         bsk_phy_rail(BSK_RAIL_MOTOR, false);
-+         bsk_phy_rail(BSK_RAIL_LOGIC, false);
-+         lines_rest();
 
 # ── la réception en flux (components/phy/phy_common.c, rx_t), commune aux deux PHY ──
 
@@ -2376,12 +2312,12 @@
 
 @ test_session_script | components/session/session.c | on_due
 = l'instant de BODY_CS levée non relevé : lens_cs_up_us compté depuis zéro (t_hs_journal, lens_cs_up_us=1100)
--         s.hs_body_up = s.now;
+-         s.hs_body_up = acted();
 +         (void)s.hs_body_up;
 
 @ test_session_script | components/session/session.c | advance
 = la levée de LENS_CS non mesurée (t_hs_journal, lens_cs_up_us=1100)
--             s.hs_up_us = s.now - s.hs_body_up;
+-             s.hs_up_us = s.now > s.hs_body_up ? s.now - s.hs_body_up : 0;
 +             s.hs_up_us = 0;
 
 @ test_session_script | components/session/session.c | advance
@@ -2470,30 +2406,30 @@
 - #define MIN06          12u
 + #define MIN06          13u
 
-@ test_session_script | components/session/motion.c | motion_command
+@ test_session_script | components/session/motion.c | motion_admit
 = sans 0x06, une cible 0 acceptée (t_limits_06)
--     if (!l->have06 || target < l->fmin || target > l->fmax) {
-+     if (target < l->fmin || target > l->fmax) {
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     return target >= l->fmin && target <= l->fmax;
 
-@ test_session135 | components/session/motion.c | motion_command
+@ test_session135 | components/session/motion.c | motion_admit
 = la borne basse refusée (t_goto_limit, relatif jusqu'à la borne basse)
--     if (!l->have06 || target < l->fmin || target > l->fmax) {
-+     if (!l->have06 || target <= l->fmin || target > l->fmax) {
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     return l->lim && target > l->fmin && target <= l->fmax;
 
-@ test_session135 | components/session/motion.c | motion_command
+@ test_session135 | components/session/motion.c | motion_admit
 = la borne haute refusée (t_goto_limit, goto à la borne haute)
--     if (!l->have06 || target < l->fmin || target > l->fmax) {
-+     if (!l->have06 || target < l->fmin || target >= l->fmax) {
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     return l->lim && target >= l->fmin && target < l->fmax;
 
-@ test_session135 | components/session/motion.c | motion_command
+@ test_session135 | components/session/motion.c | motion_admit
 = la borne basse - 1 acceptée (t_goto_limit)
--     if (!l->have06 || target < l->fmin || target > l->fmax) {
-+     if (!l->have06 || target < l->fmin - 1 || target > l->fmax) {
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     return l->lim && target >= l->fmin - 1 && target <= l->fmax;
 
-@ test_session135 | components/session/motion.c | motion_command
+@ test_session135 | components/session/motion.c | motion_admit
 = la borne haute + 1 acceptée (t_goto_limit)
--     if (!l->have06 || target < l->fmin || target > l->fmax) {
-+     if (!l->have06 || target < l->fmin || target > l->fmax + 1) {
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     return l->lim && target >= l->fmin && target <= l->fmax + 1;
 
 @ test_session_script | components/session/session.c | bsk_session_status
 = les bornes non publiées (t_cold_start, t_limits_06)
@@ -2505,10 +2441,11 @@
 -     st->focus_max = l->fmax;
 +     st->focus_max = l->fmin;
 
-@ test_std | components/session/motion.c | motion_command
+@ test_std | components/session/motion.c | motion_admit
 = une cible hors des bornes émise (goto_butee : E_LIMIT, aucun 0x1D ; hote : er range limits)
--     if (!l->have06 || target < l->fmin || target > l->fmax) {
-+     if (!l->have06) {
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     (void)target;
++     return l->lim;
 
 # ── le 0x01 sans réponse, trois essais, puis le reset soft (un 0x0A), puis l'init ──
 
@@ -2569,30 +2506,32 @@
 -             ask(S_RESET0A, INIT0A, sizeof INIT0A, in.p.info_ms);
 +             ask(S_RESET0A, (const uint8_t[]){0x35, 0x00}, 2, in.p.info_ms);
 
-# ── la coupure de RECOVERING, désactivée par défaut (cut_rails) ──
-
-@ test_session_script | components/session/session.c | bsk_session_params_default
-= la coupure activée par défaut (t_01_silent : rails coupés, POWERING 3,5 s après)
--     p->cut_rails = false;
-+     p->cut_rails = true;
+# ── la reprise ne coupe jamais les rails (décision de l'humain du 2026-10-23) : POWERING au bout de l'attente ──
 
 @ test_session_script | components/session/session.c | on_due
-= cut_rails ignoré, la coupure toujours faite (t_01_silent)
--         if (!s.p.cut_rails) {
-+         if (0) {
+= la reprise coupe les rails avant POWERING (t_01_silent : aucun rail coupé, aucune ligne mise au repos, la VD jamais arrêtée)
+-     case S_REC_WAIT:
+-         to_powering();
++     case S_REC_WAIT:
++         lines_rest();
++         bsk_phy_rail(BSK_RAIL_MOTOR, false);
++         bsk_phy_rail(BSK_RAIL_LOGIC, false);
++         to_powering();
 
 @ test_session_script | components/session/session.c | on_due
-= cut_rails ignoré, la coupure jamais faite (t_01_silent_cut)
--         if (!s.p.cut_rails) {
-+         if (1) {
+= la reprise met les lignes au repos avant POWERING (t_01_silent : aucune ligne mise au repos, la VD jamais arrêtée)
+-     case S_REC_WAIT:
+-         to_powering();
++     case S_REC_WAIT:
++         lines_rest();
++         to_powering();
 
 @ test_session_script | components/session/session.c | on_due
-= sans coupure, les lignes mises au repos avant POWERING (t_01_silent)
--         if (!s.p.cut_rails) {
--             to_powering();
-+         if (!s.p.cut_rails) {
-+             lines_rest();
-+             to_powering();
+= RECOVERING -> OFF au lieu de POWERING (t_01_silent : POWERING 3 s après, la poignée de main ré-émise)
+-     case S_REC_WAIT:
+-         to_powering();
++     case S_REC_WAIT:
++         to_off();
 
 # ── la consigne d'ouverture posée par la SESSION dans le 0x03 de la boucle, f/1,8 à chaque session ──
 
@@ -2620,18 +2559,18 @@
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = l'ouverture relue un octet trop loin, offsets 1-2 du 0x05 (t_aperture : B2 11 attendu ; t_aperture_sony : o -> 4.0)
--         pub.ap = (uint16_t)(f->msg[1] | f->msg[2] << 8);
-+         pub.ap = (uint16_t)(f->msg[2] | f->msg[3] << 8);
+-         pub.ap = ap_code(f->msg[1], f->msg[2]);
++         pub.ap = ap_code(f->msg[2], f->msg[3]);
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = le minimum de la plage un octet trop loin, octets 2-3 du 0x08 (t_aperture)
--         pub.ap_min = (uint16_t)(f->msg[1] | f->msg[2] << 8);
-+         pub.ap_min = (uint16_t)(f->msg[2] | f->msg[3] << 8);
+-             pub.ap_min = ap_code(f->msg[1], f->msg[2]);
++             pub.ap_min = ap_code(f->msg[2], f->msg[3]);
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = le maximum de la plage un octet trop loin, octets 4-5 du 0x08 (t_aperture)
--         pub.ap_max = (uint16_t)(f->msg[3] | f->msg[4] << 8);
-+         pub.ap_max = (uint16_t)(f->msg[4] | f->msg[5] << 8);
+-             pub.ap_max = ap_code(f->msg[3], f->msg[4]);
++             pub.ap_max = ap_code(f->msg[4], f->msg[5]);
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = une réponse au 0x08 de 6 octets ignorée (t_aperture_08))
@@ -2755,8 +2694,8 @@
 
 @ test_host | components/host/host.c | aperture_get
 = la plage lue sans CAP_APERTURE (t_aperture : a -> er nocap ap avec la relecture seule)
-- !(st->capabilities & CAP_APERTURE) ||
-+ 0 ||
+-     if (!(st->capabilities & CAP_APERTURE)) return false;
++     if (0) return false;
 
 @ test_host | components/host/host.c | aperture_line
 = a : la plage au mauvais format, le dixième du maximum (t_aperture : 1.8-22)
@@ -3043,7 +2982,7 @@
 
 @ test_session_script | components/session/ring.c | aperture
 = la pause de 400 ms ne clôt pas le geste (t_ring_aperture)
--     } else if (r.gesture && t - r.last_us > PAUSE_US) {
+-     } else if (t - r.last_us > PAUSE_US) {
 +     } else if (0) {
 
 @ test_session_script | components/session/ring.c | aperture
@@ -3115,13 +3054,13 @@
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = l'ouverture publiée au bit 1 de l'offset 19 (t_ring_aperture : jamais prise)
--         pub.ap_ring = f->msg[20] & 0x01 ? (uint16_t)(f->msg[18] | f->msg[19] << 8) : 0;
-+         pub.ap_ring = f->msg[20] & 0x02 ? (uint16_t)(f->msg[18] | f->msg[19] << 8) : 0;
+-         pub.ap_ring = f->msg[20] & 0x01 ? ap_code(f->msg[18], f->msg[19]) : 0;
++         pub.ap_ring = f->msg[20] & 0x02 ? ap_code(f->msg[18], f->msg[19]) : 0;
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = l'ouverture publiée un octet trop tôt, offsets 16-17 (t_ring_aperture : 0x1457)
--         pub.ap_ring = f->msg[20] & 0x01 ? (uint16_t)(f->msg[18] | f->msg[19] << 8) : 0;
-+         pub.ap_ring = f->msg[20] & 0x01 ? (uint16_t)(f->msg[17] | f->msg[18] << 8) : 0;
+-         pub.ap_ring = f->msg[20] & 0x01 ? ap_code(f->msg[18], f->msg[19]) : 0;
++         pub.ap_ring = f->msg[20] & 0x01 ? ap_code(f->msg[17], f->msg[18]) : 0;
 
 @ test_session_script | components/session/session.c | on_frame
 = les impulsions comptées pendant un goto (t_ring_motion : la consigne reste f/1,8)
@@ -3231,7 +3170,7 @@
 +         k.valid = decode(r->value, &k.m);
 
 @ test_session_script | components/session/mark.c | on_result
-= une lecture périmée prise, celle d'avant l'écriture (t_mark_async : 15000 au lieu de 16000)
+= une lecture périmée prise, celle d'une clé quittée (t_mark_async : 12345, celle de 134 mm, au lieu de 15000)
 -         if (!k.loading || k.ask || got != k.want) return;
 +         if (!k.loading || k.ask) return;
 
@@ -3249,24 +3188,19 @@
 +     while (bsk_store_result(&r)) on_result(&r);
 
 @ test_session_script | components/session/mark.c | on_result
-= une écriture ratée, la clé pas relue (t_mark_letters : m -> 17000 au lieu de 16000)
--         if (!strcmp(r->key, k.key)) reload();
-+         (void)0;
-
-@ test_session_script | components/session/mark.c | on_result
 = une écriture ratée pas journalisée (t_mark_letters : * mark <t> store=er)
--         bsk_journal_mark(BSK_MARK_STORE_ER, r->key, NULL);
-+         (void)0;
+-     else bsk_journal_mark(BSK_MARK_STORE_ER, r->key, NULL);
++     else (void)r;
 
 @ test_session_script | components/session/mark.c | mark_set
 = ms sans identité accepté (t_mark_key : er nocap)
 -     if (!k.key[0]) return E_NOCAP;
--     if (!l->have06) return E_LIMIT;
-+     if (!l->have06) return E_LIMIT;
+-     if (!l->lim) return E_LIMIT;
++     if (!l->lim) return E_LIMIT;
 
 @ test_session_script | components/session/mark.c | mark_set
 = ms sans 0x06 accepté, la position 0 dans des bornes à 0 (t_limits_06 : E_LIMIT)
--     if (!l->have06) return E_LIMIT;
+-     if (!l->lim) return E_LIMIT;
 +     (void)0;
 
 @ test_session_script | components/session/mark.c | mark_set
@@ -3279,22 +3213,15 @@
 -     if (m.position < l->fmin || m.position > l->fmax) return E_LIMIT;
 +     if (m.position < l->fmin || m.position > l->fmax + 1) return E_LIMIT;
 
-@ test_session_script | components/session/mark.c | mark_set
-= la file pleine, la marque changée quand même (t_mark_letters : er busy)
--     if (!deposit(BSK_STORE_PUT, encode(&m))) return E_BUSY;
-+     (void)deposit(BSK_STORE_PUT, encode(&m));
+@ test_session_script | components/session/mark.c | write
+= la file pleine, le geste accepté quand même (t_mark_letters : er busy)
+-     if (!deposit(op, encode(m))) return false;
++     (void)deposit(op, encode(m));
 
-@ test_session_script | components/session/mark.c | mark_clear
-= mx, la file pleine, effacée quand même (t_mark_letters : er busy)
--     if (!deposit(BSK_STORE_DEL, 0)) return E_BUSY;
-+     (void)deposit(BSK_STORE_DEL, 0);
-
-@ test_session_script | components/session/mark.c | mark_clear
+@ test_session_script | components/session/mark.c | stored
 = mx ne retire pas la marque tenue (t_mark_letters : m -> -)
--     k.valid = k.loading = k.ask = false;
--     bsk_journal_mark(BSK_MARK_CLEAR, k.key, NULL);
-+     k.loading = k.ask = false;
-+     bsk_journal_mark(BSK_MARK_CLEAR, k.key, NULL);
+-     k.valid = w.op == BSK_STORE_PUT;
++     k.valid = k.valid || w.op == BSK_STORE_PUT;
 
 @ test_session_script | components/session/mark.c | mark_frame
 = le sens inversé (t_mark_dir : croissant après un goto croissant)
@@ -3469,7 +3396,7 @@
 
 @ test_session135 | components/session/restore.c | restore_skip
 = sans marque, rien au journal (t_restore_journal : skip=nomark)
--     if (!s.have) bsk_journal_restore_skip(nomark, NULL);
+-     if (!s.have) bsk_journal_restore_skip(nomark, false, NULL);
 +     if (!s.have) (void)nomark;
 
 @ test_session135 | components/session/session.c | boot_decide
@@ -3479,19 +3406,19 @@
 +         restore_skip(nomark);
 +         to_ready();
 
-@ test_session135 | components/session/restore.c | restore_plan
+@ test_session135 | components/session/motion.c | motion_admit
 = une marque sous la borne basse visée quand même (t_restore_none : 13000)
--     if (!l->have06 || m.position < l->fmin || m.position > l->fmax) return false;
-+     if (!l->have06 || m.position > l->fmax) return false;
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     return l->lim && target <= l->fmax;
 
-@ test_session135 | components/session/restore.c | restore_plan
+@ test_session135 | components/session/motion.c | motion_admit
 = une marque au-delà de la borne haute visée quand même (t_restore_none : 31000)
--     if (!l->have06 || m.position < l->fmin || m.position > l->fmax) return false;
-+     if (!l->have06 || m.position < l->fmin) return false;
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     return l->lim && target >= l->fmin;
 
 @ test_session135 | components/session/restore.c | restore_skip
 = la marque hors des bornes, rien au journal (t_restore_journal : skip=limit mark=13000)
--     else bsk_journal_restore_skip("limit", &s.m);
+-     else bsk_journal_restore_skip("limit", s.last, &s.m);
 +     else (void)0;
 
 @ test_session135 | components/session/restore.c
@@ -3501,13 +3428,13 @@
 
 @ test_session135 | components/session/restore.c | restore_plan
 = le 135 pas reconnu, X = 1 % de sa course, 168 (t_restore_paths : 20168 au lieu de 20200)
--     x = l->lens_type2 == LT2_135 ? X_135 : (l->fmax - l->fmin) / 100;
-+     x = l->lens_type2 == 9 ? X_135 : (l->fmax - l->fmin) / 100;
+-     x = init_lens() == BSK_BENCH_SAMYANG135 ? X_135 : (l->fmax - l->fmin) / 100;
++     x = init_lens() == BSK_BENCH_SAMYANG ? X_135 : (l->fmax - l->fmin) / 100;
 
 @ test_std | components/session/restore.c | restore_plan
 = dépassement : X = 2 % de la course (restauration : 20126 au lieu de 20063)
--     x = l->lens_type2 == LT2_135 ? X_135 : (l->fmax - l->fmin) / 100;
-+     x = l->lens_type2 == LT2_135 ? X_135 : (l->fmax - l->fmin) / 50;
+-     x = init_lens() == BSK_BENCH_SAMYANG135 ? X_135 : (l->fmax - l->fmin) / 100;
++     x = init_lens() == BSK_BENCH_SAMYANG135 ? X_135 : (l->fmax - l->fmin) / 50;
 
 @ test_session_script | components/session/restore.c | restore_plan
 = X sans plancher, 0 sur une course de 80 pas (t_restore_x : un seul 0x1D)
@@ -3557,9 +3484,9 @@
 @ test_session135 | components/session/cmd.c | stop
 = q en RESTORING : pas de 0x1C (t_restore_stop)
 -     } else if (session_state() == SESSION_RESTORING) {
--         e = motion_stop(session_now());
+-         motion_q(c->seq, session_now());
 +     } else if (session_state() == SESSION_RESTORING) {
-+         (void)0;
++         session_ack(c->seq, ACK_COMPLETED, E_OK);
 
 @ test_session135 | components/session/session.c | session_restore_stop
 = q en RESTORING : la session y reste (t_restore_stop : READY au dépôt de q)
@@ -3582,8 +3509,8 @@
 
 @ test_session135 | components/session/restore.c | restore_start
 = l'entrée en RESTORING journalisée avec sa cible intermédiaire même directe (t_restore_journal : path=direct)
--     bsk_journal_restore(&s.m, s.x, s.via == s.m.position ? -1 : s.via);
-+     bsk_journal_restore(&s.m, s.x, s.via);
+-     bsk_journal_restore(&s.m, s.last, s.x, s.via == s.m.position ? -1 : s.via);
++     bsk_journal_restore(&s.m, s.last, s.x, s.via);
 
 @ test_session135 | components/session/session.c | enter
 = la sortie de RESTORING pas journalisée (t_restore_journal : end=arrived)
@@ -3607,13 +3534,13 @@
 
 @ test_journal | components/journal/journal.c | bsk_journal_restore
 = * restore direct sans path= (t_lines)
--         line(false, t, "* restore %llu mark=%ld dir=%s x=%ld path=direct", (unsigned long long)(t / 1000), (long)m->position,
-+         line(false, t, "* restore %llu mark=%ld dir=%s x=%ld", (unsigned long long)(t / 1000), (long)m->position,
+-         transition(t, "* restore %llu %s=%ld dir=%s x=%ld path=direct", (unsigned long long)(t / 1000),
++         transition(t, "* restore %llu %s=%ld dir=%s x=%ld", (unsigned long long)(t / 1000),
 
 @ test_journal | components/journal/journal.c | bsk_journal_restore
 = * restore avec dépassement, via= porte X (t_lines : via=20200)
--              (long)m->position, DIR[m->approach_dir], (long)x, (long)via);
-+              (long)m->position, DIR[m->approach_dir], (long)x, (long)x);
+-                    last ? "pos" : "mark", (long)m->position, DIR[m->approach_dir], (long)x, (long)via);
++                    last ? "pos" : "mark", (long)m->position, DIR[m->approach_dir], (long)x, (long)x);
 
 @ test_journal | components/journal/journal.c | bsk_journal_restore
 = * restore, les sens échangés (t_lines : dir=inc, dir=dec)
@@ -3622,13 +3549,14 @@
 
 @ test_journal | components/journal/journal.c | bsk_journal_restore_skip
 = * restore skip= sans la marque hors des bornes (t_lines : skip=limit mark=13000)
--     if (m) line(false, t, "* restore %llu skip=%s mark=%ld", (unsigned long long)(t / 1000), why, (long)m->position);
-+     if (m) line(false, t, "* restore %llu skip=%s", (unsigned long long)(t / 1000), why);
+-     if (m) transition(t, "* restore %llu skip=%s %s=%ld", (unsigned long long)(t / 1000), why, last ? "pos" : "mark",
+-                       (long)m->position);
++     if (m) { (void)last; transition(t, "* restore %llu skip=%s", (unsigned long long)(t / 1000), why); }
 
 @ test_journal | components/journal/journal.c | bsk_journal_restore_end
 = * restore end= sans sa cause (t_lines : end=stall)
--     line(false, t, "* restore %llu end=%s", (unsigned long long)(t / 1000), why);
-+     line(false, t, "* restore %llu end=%.0s", (unsigned long long)(t / 1000), why);
+-     transition(t, "* restore %llu end=%s", (unsigned long long)(t / 1000), why);
++     transition(t, "* restore %llu end=%.0s", (unsigned long long)(t / 1000), why);
 
 # ── le homing du pilote mène aussi à RESTORING ; la cause end=stop ──
 
@@ -3664,46 +3592,39 @@
 
 @ test_session_script | components/session/motion.c | motion_stop
 = le mouvement laissé en cours quand le 0x1C n'est pas parti (t_stop_link : ABORTED)
--     if (moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
-+     if (e == E_OK && moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
+-     if (motion_moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
++     if (e == E_OK && motion_moving()) mv_end(MOTION_ABORTED, ACK_FAILED, E_ABORTED);
 
-@ test_session_script | components/session/cmd.c | stop
+@ test_session_script | components/session/motion.c | q_sent
 = q accusé ACK_COMPLETED sans condition (t_stop_link : ACK_FAILED, E_BUS ; er link bus)
--     else session_ack(c->seq, ACK_FAILED, e);
-+     else session_ack(c->seq, ACK_COMPLETED, E_OK);
+-     session_ack(seq, e == E_OK ? ACK_COMPLETED : ACK_FAILED, e);
++     session_ack(seq, ACK_COMPLETED, E_OK);
 
 @ test_session_script | components/session/cmd.c | stop
 = en RESTORING, le 0x1C raté laisse la session en RESTORING (t_stop_link : READY quand même)
 -         session_restore_stop();
-+         if (e != E_OK) {
-+             session_ack(c->seq, ACK_FAILED, e);
-+             return;
-+         }
-+         session_restore_stop();
++         if (session_ack_last()->result != ACK_FAILED) session_restore_stop();
 
 @ test_session_script | components/session/cmd.c | stop
 = hors READY et RESTORING, q rend un échec sans rien émettre (t_stop_link : OFF, ok)
--     bsk_err_t e = E_OK;
--     session_ack(c->seq, ACK_ACCEPTED, E_OK);
-+     bsk_err_t e = E_BUS;
-+     session_ack(c->seq, ACK_ACCEPTED, E_OK);
+-         session_ack(c->seq, ACK_COMPLETED, E_OK);
++         session_ack(c->seq, ACK_FAILED, E_BUS);
 
-@ test_session_script | components/session/cmd.c | stop
-= en READY, le résultat de motion_stop ignoré (t_stop_link : ACK_FAILED, E_BUS)
--     if (session_state() == SESSION_READY) {
--         e = motion_stop(session_now());
-+     if (session_state() == SESSION_READY) {
-+         (void)motion_stop(session_now());
+@ test_session_script | components/session/motion.c | motion_q
+= le résultat de motion_stop ignoré (t_stop_link : ACK_FAILED, E_BUS)
+-     bsk_err_t e = motion_stop(now);
++     bsk_err_t e = E_OK;
++     (void)motion_stop(now);
 
 @ test_host | components/host/host.c | observe_
 = le dernier accusé de la commande déposée pas retenu (t_refusals : q, er link bus)
 -         if (first && a.seq == want) h.pend_last = a;
 +         if (first && a.seq == want && a.result == ACK_ACCEPTED) h.pend_last = a;
 
-@ test_host | components/host/host.c | letter
+@ test_host | components/host/host.c | final
 = q en échec répond ok (t_refusals : q, er link bus)
--             refusal(out, cap, h.pend_last.reason);
-+             put(out, cap, "ok");
+-     else if (h.pend_last.result == ACK_FAILED) refusal(out, cap, h.pend_last.reason);
++     else if (h.pend_last.result == ACK_FAILED) put(out, cap, "ok");
 
 # ── un sens de marque invalide lu inconnu, la marque gardée ──
 
@@ -4100,7 +4021,7 @@
 +         drive_goto(m.target);
 +         m.due = now + (uint64_t)START_MS * MS / 2;
 
-@ test_session135 | components/session/motion.c | mv_start
+@ test_session135 | components/session/motion.c | mv_send
 = les envois ne repartent pas de un à chaque goto (t_resend_goto : le compte d'un autre goto, quatre envois)
 -     m.sends = 1;
 +     (void)0;
@@ -4123,15 +4044,15 @@
 - #define STOP_MS        1500u
 + #define STOP_MS        1400u
 
-@ test_session135 | components/session/motion.c | motion_stop
+@ test_session135 | components/session/motion.c | q_sent
 = l'arrêt de q n'est pas surveillé (t_resend_stop, « le même à 1,5 s exactement, une fois »)
--     stop_watch(e == E_OK ? 1 : 0, now);
-+     stop_watch(0, now);
+-         if (e == E_OK) stop_watch(1, now);
++         if (e == E_OK) stop_watch(0, now);
 
-@ test_session_script | components/session/motion.c | motion_stop
-= un 0x1C pas parti est surveillé aussi (t_stop_watch, « rien à surveiller, aucun 0x1C ensuite »)
--     stop_watch(e == E_OK ? 1 : 0, now);
-+     stop_watch(1, now);
+@ test_session_script | components/session/motion.c | q_sent
+= un 0x1C pas parti est surveillé aussi (t_stop_watch, « rien à surveiller, aucun 0x1C ensuite » ; t_stop_held, raté)
+-         else stop_end(now);
++         else stop_watch(1, now);
 
 @ test_session_script | components/session/motion.c | stopped
 = l'accusé 1C n'éteint pas la surveillance (t_stop_watch, « accusé, la position qui bouge encore : un seul 0x1C »)
@@ -4149,9 +4070,10 @@
 +             pub.ack1c = pub.ack1c || f->msg[i] == 0x1E;
 
 @ test_std | components/session/motion.c | mv_start
-= un goto déposé n'éteint pas la surveillance : le 0x1C renvoyé l'arrête (renvoi_arret_goto, « aucun 0x1C après le goto admis »)
--     stop_watch(0, now);
-+     (void)0;
+= le code d'avant le ticket #787 : le goto déposé éteint la surveillance et part aussitôt, le 0x1C perdu n'est pas renvoyé avant lui (renvoi_arret_goto, « le 0x1C perdu renvoyé à 1,5 s, avant le 0x1D du goto admis »)
+-     if (m.stop_sends) m.wait = true;
++     stop_watch(0, now);
++     if (m.stop_sends) m.wait = true;
 
 @ test_session135 | components/session/motion.c | motion_forget
 = la surveillance survit à la session (t_resend_stop, « puis une nouvelle session (CMD_ATTACH) : jamais renvoyé »)
@@ -4191,10 +4113,11 @@
 @ test_std | components/session/cmd.c | stop
 = q en RESTORING, le 0x1C émis sans MOUVEMENT : l'arrêt pas surveillé (renvoi_arret_restoring, « le même à 1,5 s, une fois »)
 -     } else if (session_state() == SESSION_RESTORING) {
--         e = motion_stop(session_now());
+-         motion_q(c->seq, session_now());
 +     } else if (session_state() == SESSION_RESTORING) {
 +         bsk_err_t drive_stop(void);
-+         e = drive_stop();
++         (void)drive_stop();
++         session_ack(c->seq, ACK_COMPLETED, E_OK);
 
 @ test_session_script | components/session/init.c | loop_start
 = la boucle jamais signalée à lens_rx ; aucun 0x05 ni 0x06 n'est jamais lu, la session ne sort pas de S_FIRST05 (t_stale_telemetry, « READY au premier 0x06 de la boucle de la session »)
@@ -4226,17 +4149,17 @@
 - (!looping || f->len < (type == 0x05 ? MIN05 : MIN06))
 + ((type == 0x06 && !looping) || f->len < (type == 0x05 ? MIN05 : MIN06))
 
-@ test_session_script | components/session/mark.c | mark_set
+@ test_session_script | components/session/mark.c | stored
 = une pose servie n'est pas comptée (t_mark_gestures, « ms, m16340, mx : deux poses, un effacement »)
--     sets++;
--     bsk_journal_mark(BSK_MARK_SET, k.key, &m);
-+     bsk_journal_mark(BSK_MARK_SET, k.key, &m);
+-         sets++;
+-         bsk_journal_mark(BSK_MARK_SET, key, &w.m);
++         bsk_journal_mark(BSK_MARK_SET, key, &w.m);
 
-@ test_session_script | components/session/mark.c | mark_clear
+@ test_session_script | components/session/mark.c | stored
 = un effacement servi n'est pas compté (t_mark_gestures, « ms, m16340, mx : deux poses, un effacement »)
--     clears++;
--     k.valid = k.loading = k.ask = false;
-+     k.valid = k.loading = k.ask = false;
+-         clears++;
+-         bsk_journal_mark(BSK_MARK_CLEAR, key, NULL);
++         bsk_journal_mark(BSK_MARK_CLEAR, key, NULL);
 
 @ test_session_script | components/session/mark.c | mark_set
 = une pose refusée hors des bornes est comptée (t_mark_gestures, « refusés : rien de compté »)
@@ -4245,13 +4168,13 @@
 
 @ test_session_script | components/session/mark.c | mark_set
 = une pose refusée par le magasin (file pleine) est comptée (t_mark_gestures, « refusés : rien de compté »)
--     if (!deposit(BSK_STORE_PUT, encode(&m))) return E_BUSY;
-+     if (!deposit(BSK_STORE_PUT, encode(&m))) return sets++, E_BUSY;
+-     if (w.wait || !write(BSK_STORE_PUT, &m)) return E_BUSY;
++     if (w.wait || !write(BSK_STORE_PUT, &m)) return sets++, E_BUSY;
 
 @ test_session_script | components/session/mark.c | mark_clear
 = un effacement refusé par le magasin (file pleine) est compté (t_mark_gestures, « refusés : rien de compté »)
--     if (!deposit(BSK_STORE_DEL, 0)) return E_BUSY;
-+     if (!deposit(BSK_STORE_DEL, 0)) return clears++, E_BUSY;
+-     if (w.wait || !write(BSK_STORE_DEL, &none)) return E_BUSY;
++     if (w.wait || !write(BSK_STORE_DEL, &none)) return clears++, E_BUSY;
 
 @ test_session_script | components/session/mark.c | on_result
 = une relecture rendue compte une pose (t_mark_gestures, « la relecture rendue en READY : la marque 16340 revient, rien de compté »)
@@ -4600,9 +4523,11 @@
 @ test_host | components/host/host.c | bsk_host_line
 = une lettre sans fin de ligne (ask : chaque réponse suivie de \n ; t_moonlite, « v -> 1.3\n » après :GP#))
 -         letter(line, &st, out, cap);
+-         if (h.lt_wait) return BSK_HOST_LATER;
 -     }
 -     return "\n";
 +         letter(line, &st, out, cap);
++         if (h.lt_wait) return BSK_HOST_LATER;
 +     }
 +     return "";
 
@@ -4888,7 +4813,7 @@
 
 @ test_session_script | components/session/ring.c | aperture
 = la pause ne clôt plus le geste, aucune ligne (t_ring_gesture : 5 impulsions, puis la pause)
--         gesture_end();
+-         if (r.gesture) gesture_end();
 -         r.accum = 0;
 +         r.accum = 0;
 
@@ -5033,8 +4958,8 @@
 
 @ test_session_script | components/txn/txn.c | bsk_txn_on_event
 = la requête retenue terminée par une trame de son type avant son départ (t_txn_held)
--         if (x.state == TXN_WAIT && !x.req_held && e->u.frame.msg[0] == x.type) {
-+         if (x.state == TXN_WAIT && e->u.frame.msg[0] == x.type) {
+-         if (x.state == TXN_WAIT && !x.req_held && answers(&e->u.frame)) {
++         if (x.state == TXN_WAIT && answers(&e->u.frame)) {
 
 @ test_session_script | components/txn/txn.c | bsk_txn_deadline
 = la requête retenue a l'échéance de la précédente (t_txn_held : sans échéance tant qu'elle n'est pas partie)
@@ -5059,15 +4984,10 @@
 -         if (!out) pair_end(false, now_us);
 +         (void)out;
 
-@ test_session_script | components/session/session.c | lines_rest
-= la coupure de RECOVERING laisse partir la paire en attente (t_cut_pending_pair : pas de 0x04 après les lignes relâchées)
--     bsk_txn_loop(false);
-+     (void)0;
-
-@ test_session_script | components/txn/txn.c
+@ test_session_script | include/bsk_txn.h
 = la file des retenues d'une place de plus (t_txn_held : le cinquième 0x1C refusé, E_BUSY)
-- #define HELD_MAX  4u
-+ #define HELD_MAX  5u
+- #define BSK_TXN_HELD_MAX 4u
++ #define BSK_TXN_HELD_MAX 5u
 
 # ── l'offset 60 du faux 135 (sim/lens135.c, S12) et la fenêtre que la carte en voit ──
 
@@ -5254,7 +5174,7 @@
 
 @ test_journal | components/journal/journal.c | put
 = le repère écrit sans la ligne, ou la ligne sans le repère (t_all_ring : la trame qui tenait sans son repère, perdue)
--     if (!room(n + (k ? (size_t)k + 3 : 0))) {
+-     if (!room(n + (k ? (size_t)k + HDR : 0))) {
 -         j.dropped++;
 -         if (atomic_load_explicit(&j.all, memory_order_relaxed)) j.unsaid++;
 -         return false;
@@ -5265,7 +5185,7 @@
 +         if (atomic_load_explicit(&j.all, memory_order_relaxed)) j.unsaid++;
 +         return false;
 +     }
-+     if (k && room(n + (size_t)k + 3)) put_raw(m, (size_t)k);
++     if (k && room(n + (size_t)k + HDR)) put_raw(m, (size_t)k);
 
 @ test_journal | components/journal/journal.c | put
 = l'anneau plein dit aussi sous LOG ON (t_ring : vidé, il reprend, une ligne)
@@ -5284,7 +5204,7 @@
 
 @ test_journal | components/journal/journal.c | lost_line
 = la perte dite sous la génération courante, pas sous la sienne (t_all_ring : périmée après LOG OFF)
--     *gen = (uint8_t)(v >> 24);
+-     *gen = (uint32_t)(v >> 32);
 +     *gen = bsk_journal_gen();
 
 @ test_session135 | components/journal/journal.c
@@ -5328,17 +5248,19 @@
 -             }
 -             r.accum -= r.accum > 0 ? PULSES : -PULSES;
 -         }
--     } else if (r.gesture && t - r.last_us > PAUSE_US) {
+-         if (r.frames == GESTURE_N) gesture_end();
+-     } else if (t - r.last_us > PAUSE_US) {
 +                 r.capped++;
 +                 break;
 +             }
 +             r.accum -= r.accum > 0 ? PULSES : -PULSES;
 +         }
++         if (r.frames == GESTURE_N) gesture_end();
 +     } else if (abs(r.accum) >= PULSES && (t - r.third_us) * CAP_PER_S >= 1000000u) {
 +         r.third_us = t;
 +         r.thirds += step(r.accum);
 +         r.accum -= r.accum > 0 ? PULSES : -PULSES;
-+     } else if (r.gesture && t - r.last_us > PAUSE_US) {
++     } else if (t - r.last_us > PAUSE_US) {
 
 @ test_session_script | components/session/ring.c | aperture
 = les tiers perdus pas comptés (t_ring_cap : capped=54)
@@ -5452,7 +5374,7 @@
 
 @ test_host | components/host/host.c | line_t
 = power_off ne suit pas le maintien de p0 (t_line_t)
-- in_sequence(st) ? "boot" : "-", h.hold,
+- in_sequence(st) ? "boot" : "-", st->held,
 + in_sequence(st) ? "boot" : "-", false,
 
 @ test_host | components/host/host.c | labo
@@ -5523,8 +5445,8 @@
 
 @ test_host | components/host/host.c | mark_line
 = jx n'efface pas la marque, il y va (t_ready_commands : CMD_CLEAR_MARK)
--     } else if (l[1] == 'x') {
-+     } else if (l[1] == 'z') {
+-     } else if (l[1] == 's' || l[1] == 'x') {
++     } else if (l[1] == 's' || l[1] == 'z') {
 
 @ test_host | components/host/host.c | letter
 = u dépose de nouveau CMD_RING_SET (t_retired : u -> er nocap, aucune CMD_RING_SET)
@@ -5690,20 +5612,20 @@
 -     if (motion_busy() || cu.wait) {
 +     if (motion_busy()) {
 
-@ test_session_script | components/session/cmd.c | cmd_custom_poll
-= une 0x40 d'une autre sous-commande prise pour la réponse (t_custom : 'P' FA à 'P' 38, E_FRAMING)
--     } else if (r->len < 19 || r->msg[1] != 'P' || r->msg[2] != cu.sub) {
-+     } else if (r->len < 19 || r->msg[1] != 'P') {
+@ test_session_script | components/txn/txn.c | answers
+= une 0x40 d'une autre sous-commande prise pour la réponse (t_custom_other_40 : la réponse à 'P' 38 termine la lecture 'P' FA)
+- r[1] == x.q[1] && r[2] == x.q[2]
++ r[1] == x.q[1]
 
-@ test_session_script | components/session/cmd.c | cmd_custom_poll
-= une 0x40 d'un autre MainCmd prise pour la réponse (t_custom : toute réponse 'P' refusée si le test est inversé)
--     } else if (r->len < 19 || r->msg[1] != 'P' || r->msg[2] != cu.sub) {
-+     } else if (r->len < 19 || r->msg[1] != 'F' || r->msg[2] != cu.sub) {
+@ test_session_script | components/txn/txn.c | answers
+= une 0x40 d'un autre MainCmd prise pour la réponse (t_custom_other_40 : le 'L' sous la sous-commande FA termine la lecture)
+- r[1] == x.q[1] && r[2] == x.q[2]
++ r[2] == x.q[2]
 
 @ test_session_script | components/session/cmd.c | cmd_custom_poll
 = une réponse de 19 octets refusée (t_custom : COMPLETED)
--     } else if (r->len < 19 || r->msg[1] != 'P' || r->msg[2] != cu.sub) {
-+     } else if (r->len < 20 || r->msg[1] != 'P' || r->msg[2] != cu.sub) {
+-     } else if (r->len < 19) {
++     } else if (r->len < 20) {
 
 @ test_session_script | components/session/cmd.c | cmd_custom_poll
 = les données lues un octet trop tôt (t_custom : les 16 octets tels quels)
@@ -5742,24 +5664,23 @@
 
 @ test_host | components/host/host.c | bsk_host_later
 = la réponse rendue avant l'accusé final (t_custom : toujours différée)
--     if (!h.cu_done) return BSK_HOST_LATER;
-+     if (!h.cu_done && 0) return BSK_HOST_LATER;
+-     if (!h.lt_done) return BSK_HOST_LATER;
++     if (!h.lt_done && 0) return BSK_HOST_LATER;
 
 @ test_host | components/host/host.c | on_ack
 = l'accusé final d'une autre commande pris pour celui de CUSTOM (t_custom : le goto du bouton)
--     if (h.cu_wait && a->seq == h.cu_seq) {
-+     if (h.cu_wait) {
+-     if (h.lt_wait && a->seq == h.lt_seq) {
++     if (h.lt_wait) {
 
 @ test_host | components/host/host.c | on_ack
 = CUSTOM jamais suivi (t_custom : toujours différée, jamais rendue)
--             h.cu_wait = true;
--             h.cu_seq = a->seq;
-+             h.cu_seq = a->seq;
+-             later(a->seq, CMD_LENS_CUSTOM);
++             (void)0;
 
 @ test_host | components/host/host.c | bsk_host_later
 = un échec rendu comme une réussite (t_custom : FAILED -> er link …)
--     if (h.cu_ack.result != ACK_COMPLETED) {
-+     if (h.cu_ack.result == ACK_REJECTED) {
+-     if (h.lt_ack.result != ACK_COMPLETED) {
++     if (h.lt_ack.result == ACK_REJECTED) {
 
 @ test_host | components/host/host.c | bsk_host_later
 = les données en minuscules (t_custom : A0 A1 …, PROTOCOL.md § 3)
@@ -6245,8 +6166,8 @@
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_stale
 = L03-02 : le 0x06 arrêté, la position publiée valide à 0 (t_one_stream, « ni position ni bornes »)
--         pub.have06 = false;
-+         (void)0;
+-         pub.have06 = pub.lim = false;
++         pub.lim = false;
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_stale
 = L03-02 : le 0x06 arrêté, les bornes gardées (t_one_stream, « ni position ni bornes », la borne haute)
@@ -6338,39 +6259,29 @@
 -     if (type == 0x08) session_aperture(s.ap);
 +     if (0) session_aperture(s.ap);
 
-@ test_host | include/bsk_contract.h
-= L07-03 : le domaine des codes d'ouverture ouvert sous f/0,5 (t_aperture_unknown, « relue 0x0DFF », « plage 0x0DFF-0x1900 »)
+@ test_session_script | include/bsk_contract.h
+= L07-03 : le domaine des codes d'ouverture ouvert sous f/0,5 (t_aperture_domain, « relue 0x0DFF » ; t_aperture_inverted, « plage 0x0DFF-0x1900 »)
 - #define BSK_AP_CODE_MIN 0x0E00u
 + #define BSK_AP_CODE_MIN 0x0DFFu
 
-@ test_host | include/bsk_contract.h
-= L07-03 : le domaine des codes d'ouverture fermé à f/0,5 exclu (t_aperture_unknown, « a -> 0.5-256 »)
+@ test_session_script | include/bsk_contract.h
+= L07-03 : le domaine des codes d'ouverture fermé à f/0,5 exclu (t_aperture_domain, « relue 0x0E00 » ; t_aperture_inverted, « a -> 0.5-256 »)
 - #define BSK_AP_CODE_MIN 0x0E00u
 + #define BSK_AP_CODE_MIN 0x0E01u
 
-@ test_host | include/bsk_contract.h
-= L07-03 : le domaine des codes d'ouverture ouvert au-delà de f/256 (t_aperture_unknown, « relue 0x2001 », « plage 0x11BF-0x2001 »)
+@ test_session_script | include/bsk_contract.h
+= L07-03 : le domaine des codes d'ouverture ouvert au-delà de f/256 (t_aperture_domain, « relue 0x2001 » ; t_aperture_inverted, « plage 0x11BF-0x2001 »)
 - #define BSK_AP_CODE_MAX 0x2000u
 + #define BSK_AP_CODE_MAX 0x2001u
 
-@ test_host | include/bsk_contract.h
-= L07-03 : le domaine des codes d'ouverture fermé à f/256 exclu (t_aperture_unknown, « o -> 256.0 »)
+@ test_session_script | include/bsk_contract.h
+= L07-03 : le domaine des codes d'ouverture fermé à f/256 exclu (t_aperture_domain, « relue 0x2000 » ; t_aperture_inverted, « a -> 0.5-256 »)
 - #define BSK_AP_CODE_MAX 0x2000u
 + #define BSK_AP_CODE_MAX 0x1FFFu
 
-@ test_host | components/host/host.c | aperture_get
-= L07-03 : le minimum de la plage converti hors du domaine (t_aperture_unknown, « plage 0x0000-0x11BF », « plage 0x0DFF-0x1900 »)
-- || !ap_known(st->aperture_min)
-+ || 0
-
-@ test_host | components/host/host.c | aperture_get
-= L07-03 : le maximum de la plage converti hors du domaine, 0xFFFF publié 0 (t_aperture_unknown, « plage 0x11BF-0xFFFF »)
-- || !ap_known(st->aperture_max)
-+ || 0
-
 @ test_host | components/host/host.c | aperture_cur
-= L03-02, L07-03 : une ouverture relue hors du domaine convertie et ramenée à la plage (t_aperture_unknown, « o -> er link aperture »)
--     if (!ap_known(st->aperture_current)) return false;
+= L03-02, L07-03 : une ouverture relue inconnue (0) convertie et ramenée à la plage (t_aperture_unknown, « o -> er link aperture »)
+-     if (!st->aperture_current) return false;
 +     (void)0;
 
 @ test_host | components/host/host.c | aperture_now
@@ -6385,13 +6296,13 @@
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = L07-03 : le maximum de la plage du 0x08 retenu hors du domaine, la consigne de départ bornée à BF 11 / FF FF (t_aperture_absurd)
--             if (!ap_known(pub.ap_min) || !ap_known(pub.ap_max)) {
-+             if (!ap_known(pub.ap_min)) {
+-             pub.ap_max = ap_code(f->msg[3], f->msg[4]);
++             pub.ap_max = (uint16_t)(f->msg[3] | f->msg[4] << 8);
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = L07-03 : le minimum de la plage du 0x08 retenu hors du domaine (t_aperture_absurd, FF 0D / 00 19)
--             if (!ap_known(pub.ap_min) || !ap_known(pub.ap_max)) {
-+             if (!ap_known(pub.ap_max)) {
+-             pub.ap_min = ap_code(f->msg[1], f->msg[2]);
++             pub.ap_min = (uint16_t)(f->msg[1] | f->msg[2] << 8);
 
 @ test_session_script | components/session/lens_rx.c | lens_rx_frame
 = L07-03 : la plage hors du domaine publiée telle quelle sans CAP_APERTURE (t_aperture_absurd, « pas de plage »)
@@ -6696,12 +6607,12 @@
 
 @ test_session_script | components/txn/txn.c | pair_due
 = N2 : le 0x04 jeté hors de sa fenêtre, jamais tenté, noté comme raté (t_txn_window : un report sans émission)
--         } else if (tried && x.att_len) {
-+         } else if (x.att_len) {
+-         } else if (tried && att) {
++         } else if (att) {
 
 @ test_session_script | components/txn/txn.c | pair_due
 = N2 : un 0x04 raté sans message accroché noté pour le message déjà parti (t_txn_cancel)
--         } else if (tried && x.att_len) {
+-         } else if (tried && att) {
 +         } else if (tried) {
 
 @ test_session_script | components/txn/txn.c | bsk_txn_attach
@@ -6756,33 +6667,38 @@
 
 @ test_phy | sim/phy_sim.c | phy_sim_rail_fault
 = l'état commandé lu sur le rail moteur quel que soit le rail (t_rail_fault : le rail logique coupé, le moteur allumé)
--     e.u.fault.on = g.w.rail[rail];
-+     e.u.fault.on = g.w.rail[BSK_RAIL_MOTOR];
+- g.w.rail[rail], g.now, e);
++ g.w.rail[BSK_RAIL_MOTOR], g.now, e);
 
 @ test_phy | sim/phy_sim.c | phy_sim_rail_fault
 = le FAULT d'un rail jugé sur celui du moteur (t_rail_fault : le rail logique, ses comptes)
--     fault_ev_t k = fault_edge(&g.rail_fault[rail], active);
-+     fault_ev_t k = fault_edge(&g.rail_fault[BSK_RAIL_MOTOR], active);
+- fault_edge(&g.rail_fault[rail], active)
++ fault_edge(&g.rail_fault[BSK_RAIL_MOTOR], active)
 
-@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+@ test_phy | components/phy/phy_common.c | fault_events
 = retombé puis activé rendu dans l'autre ordre (t_rail_fault : FAULT_REON, la retombée d'abord)
--     e.u.fault.active = k != FAULT_OFF && k != FAULT_REON;
-+     e.u.fault.active = k != FAULT_OFF;
+-     e[0].u.fault.active = k != FAULT_OFF && k != FAULT_REON;
++     e[0].u.fault.active = k != FAULT_OFF;
 
-@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+@ test_phy | components/phy/phy_common.c | fault_events
 = une retombée suivie d'une activation rendue en un seul changement (t_rail_fault : trois événements du rail logique)
--     if (k == FAULT_PULSE || k == FAULT_REON) {
-+     if (k == FAULT_PULSE) {
+-     if (k != FAULT_PULSE && k != FAULT_REON) return 1;
++     if (k != FAULT_PULSE) return 1;
 
-@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+@ test_phy | components/phy/phy_common.c | fault_events
 = le second changement rendu comme le premier (t_rail_fault : l'activation brève, activé puis retombé)
--         e.u.fault.active = !e.u.fault.active;
-+         (void)0;
+-     e[1].u.fault.active = !e[0].u.fault.active;
++     (void)0;
 
 @ test_phy | sim/phy_sim.c | phy_sim_rail_fault
 = le changement daté au démarrage de la simulation, pas à l'instant de l'interruption (t_rail_fault : T0 + 1 ms)
--     bsk_phy_event_t e = {.kind = BSK_PHY_FAULT, .t_us = g.now};
-+     bsk_phy_event_t e = {.kind = BSK_PHY_FAULT, .t_us = 0};
+- g.now, e);
++ 0, e);
+
+@ test_phy | components/phy/phy_common.c | fault_events
+= le changement daté d'un autre instant que celui de la prise (t_rail_fault : T0 + 1 ms)
+-     e[0] = (bsk_phy_event_t){.kind = BSK_PHY_FAULT, .t_us = t};
++     e[0] = (bsk_phy_event_t){.kind = BSK_PHY_FAULT, .t_us = t / 2};
 
 @ test_phy | sim/phy_sim.c | bsk_phy_stats
 = fault_motor rend le compte du rail logique (t_rail_fault : moteur 1, logique 0)
@@ -7123,8 +7039,8 @@
 
 @ test_host | components/host/host.c | debug
 = stack_sensor rend 0, pas la marge de la tâche du capteur (t_debug : 4294967295)
--              (unsigned long)k.sensor);
-+              (unsigned long)0);
+-              (unsigned long)k.sensor, NVS[d.nvs]);
++              (unsigned long)0, NVS[d.nvs]);
 
 @ test_host | components/journal/journal.c | bsk_journal_sht40
 = la ligne `* sht40` sans son instant en millisecondes (t_sensor : 123456)
@@ -7205,3 +7121,1038 @@
 = un seuil non défini rendu vide au lieu de `-` (t_sensor : -0.50 0.00 -)
 -         snprintf(out + n, cap - n, " -");
 +         snprintf(out + n, cap - n, " ");
+
+# ── Ticket #676 : l'état de la NVS dans DEBUG (bsk_store_nvs, par la SESSION), une lecture de marque en erreur
+#    distinguée d'une marque absente (`* mark … load=er`, `* restore … skip=storeer`) ──
+
+@ test_host | components/host/host.c | debug
+= nvs=erased et nvs=er échangés (t_debug : nvs=erased, nvs=er)
+-     static const char *const NVS[] = {"ok", "erased", "er"};
++     static const char *const NVS[] = {"ok", "er", "erased"};
+
+@ test_host | components/host/host.c | debug
+= nvs toujours saine, l'état de la session ignoré (t_debug : nvs=erased)
+-              (unsigned long)k.sensor, NVS[d.nvs]);
++              (unsigned long)k.sensor, NVS[0]);
+
+@ test_host135 | components/session/session.c | bsk_session_debug
+= l'état de la NVS pas remonté du magasin (t_nvs : nvs=erased)
+-     d->nvs = bsk_store_nvs();
++     d->nvs = BSK_STORE_NVS_OK;
+
+@ test_journal | components/journal/journal.c | bsk_journal_mark
+= la lecture en erreur journalisée comme une écriture ratée (t_lines : load=er)
+-     static const char *const o[] = {"set", "clear", "store=er", "load=er"};
++     static const char *const o[] = {"set", "clear", "store=er", "store=er"};
+
+@ test_session135 | components/session/session.c | advance
+= le code d'avant le ticket : la lecture en erreur journalisée comme une absence (t_restore_store_error : skip=storeer)
+-             boot_decide(mark_failed() ? "storeer" : "nomark");
++             boot_decide("nomark");
+
+@ test_session135 | components/session/session.c | advance
+= l'absence journalisée comme une erreur, et l'erreur comme une absence (t_restore_journal : skip=nomark)
+-             boot_decide(mark_failed() ? "storeer" : "nomark");
++             boot_decide(mark_failed() ? "nomark" : "storeer");
+
+@ test_session135 | components/session/mark.c | on_result
+= la lecture en erreur prise pour une absence (t_restore_store_error : skip=storeer, load=er)
+-         k.failed = r->err;
++         k.failed = false;
+
+@ test_session135 | components/session/mark.c | on_result
+= une clé absente prise pour une erreur (t_restore_journal : skip=nomark)
+-         k.failed = r->err;
++         k.failed = !r->ok;
+
+@ test_session135 | components/session/mark.c | on_result
+= la lecture en erreur pas journalisée (t_restore_store_error : * mark <t> load=er)
+-         if (k.failed) bsk_journal_mark(BSK_MARK_LOAD_ER, r->key, NULL);
++         (void)0;
+
+@ test_session135 | components/session/mark.c | on_result
+= une clé absente journalisée en erreur (t_restore_journal : sans marque, aucune ligne `* mark`)
+-         if (k.failed) bsk_journal_mark(BSK_MARK_LOAD_ER, r->key, NULL);
++         bsk_journal_mark(BSK_MARK_LOAD_ER, r->key, NULL);
+
+# ── ticket #680 : l'ordre d'émission, celui du dépôt ; un message accroché après une émission retenue part après elle
+#    (components/txn/txn.c), le défaut R-01 de l'audit du 2026-10-23 ──
+
+@ test_session_script | components/txn/txn.c | bsk_txn_attach
+= le code d'avant le ticket #680 : le message accroché après le 0x1C retenu part devant lui, dans ce 0x04 (t_txn_after_held)
+-     x.att_late = x.n_held > 0;
++     x.att_late = false;
+
+@ test_session_script | components/txn/txn.c | bsk_txn_attach
+= un message accroché sans émission retenue reporté quand même (t_txn_after_held : accroché avant le 0x1C, dans ce 0x04)
+-     x.att_late = x.n_held > 0;
++     x.att_late = true;
+
+@ test_session_script | components/txn/txn.c | pair_due
+= le 0x04 porte le message accroché après l'émission retenue (t_txn_after_held : le 0x1C avant lui)
+-         uint16_t att = x.att_late ? 0 : x.att_len;
++         uint16_t att = x.att_len;
+
+@ test_session_script | components/txn/txn.c | pair_due
+= le message reporté retiré par le 0x04 qui ne le portait pas (t_txn_after_held : la paire suivante le porte)
+-             if (att) x.att_len = 0;
++             x.att_len = 0;
+
+@ test_session_script | components/txn/txn.c | pair_due
+= le 0x04 raté noté comme report du message qu'il ne portait pas (t_txn_after_held : rien de noté)
+-         } else if (tried && att) {
++         } else if (tried && x.att_len) {
+
+@ test_session_script | components/txn/txn.c | pair_end
+= le message reporté jamais porté par la paire suivante (t_txn_after_held)
+-     x.att_late = false;
++     (void)0;
+
+@ test_session_script | components/txn/txn.c | bsk_txn_loop
+= la boucle arrêtée entre les deux garde le report : la première paire relancée ne porte pas le message (t_txn_after_held)
+-     x.att_late = false;
++     (void)0;
+
+# ── la reprise : la position de reprise (ticket #674) ──
+
+@ test_session_script | components/session/restore.c | restore_init
+= une mise sous tension relit la position gardée (t_resume_reboot : K telle quelle, warm faux, la marque)
+-     if (warm && s.keep->sum == sum_of(s.keep) && s.keep->dir <= BSK_APPROACH_DECREASING) return;
++     if ((warm || 1) && s.keep->sum == sum_of(s.keep) && s.keep->dir <= BSK_APPROACH_DECREASING) return;
+
+@ test_session_script | components/session/restore.c | restore_init
+= une position sans sa somme relue (t_resume_reboot : 18001, une écriture interrompue)
+-     if (warm && s.keep->sum == sum_of(s.keep) && s.keep->dir <= BSK_APPROACH_DECREASING) return;
++     if (warm && s.keep->dir <= BSK_APPROACH_DECREASING) return;
+
+@ test_session_script | components/session/restore.c | restore_init
+= un sens hors de bsk_approach_t relu (t_resume_reboot : sa somme juste, le sens 3)
+-     if (warm && s.keep->sum == sum_of(s.keep) && s.keep->dir <= BSK_APPROACH_DECREASING) return;
++     if (warm && s.keep->sum == sum_of(s.keep)) return;
+
+@ test_session_script | components/session/restore.c | restore_drop
+= la position jamais effacée (t_resume_cold : D2, la marque ; t_resume_reboot : K effacée)
+- void restore_drop(void) { memset(s.keep, 0, sizeof *s.keep); }
++ void restore_drop(void) { (void)s.keep; }
+
+@ test_session_script | components/session/restore.c | restore_note
+= la clé vidée (le 0x05 arrêté le premier dans la perte) efface la position (t_resume_ring : la marque visée)
+-     if (!k[0] || !l->have06) return;
++     if (!l->have06) return;
+
+@ test_session_script | components/session/restore.c | restore_note
+= le 0x06 arrêté : sa position oubliée (0) tenue pour lue (t_resume_ring : skip=limit au lieu de 18000)
+-     if (!k[0] || !l->have06) return;
++     if (!k[0]) return;
+
+@ test_session_script | components/session/restore.c | restore_note
+= la position lue à l'arrêt remplacée (t_resume_ring : 0, hors des bornes, au lieu de 18000)
+-     n.pos = l->pos;
++     n.pos = 0;
+
+@ test_session_script | components/session/restore.c | restore_note
+= le sens du dernier changement oublié à l'arrêt (t_resume_ring : en décroissant, 18200 au lieu de 17800)
+-     n.dir = mark_dir();
++     n.dir = BSK_APPROACH_UNKNOWN;
+
+@ test_session_script | components/session/restore.c | restore_note
+= la cible en vol ignorée (t_resume_move : 18000, la position lue, au lieu de 17000)
+-     if (motion_aim(&to, &from)) {
++     if (0 && motion_aim(&to, &from)) {
+
+@ test_session_script | components/session/restore.c | restore_note
+= le sens du déplacement en vol ignoré, celui de la bague gardé (t_resume_move : le dépassement, 16800 puis 17000)
+-         if (to != from) n.dir = to > from ? BSK_APPROACH_INCREASING : BSK_APPROACH_DECREASING;
++         (void)0;
+
+@ test_session_script | components/session/restore.c | restore_note
+= le sens du déplacement en vol inversé (t_resume_move : le dépassement)
+-         if (to != from) n.dir = to > from ? BSK_APPROACH_INCREASING : BSK_APPROACH_DECREASING;
++         if (to != from) n.dir = to < from ? BSK_APPROACH_INCREASING : BSK_APPROACH_DECREASING;
+
+@ test_session_script | components/session/restore.c | restore_note
+= la position tenue sans sa somme (t_resume_reboot : K tenue, sa somme ; relue warm)
+-     n.sum = sum_of(&n);
++     n.sum = 0;
+
+@ test_session_script | components/session/restore.c | last_get
+= la position de reprise d'une autre clé visée (t_resume_other : un autre objectif, une autre focale)
+-     if (!k[0] || strcmp(k, s.keep->key)) return false;
++     if (!k[0]) return false;
+
+@ test_session_script | components/session/restore.c | restore_plan
+= la position de reprise jamais visée (t_resume_ring : la marque)
+-     s.last = last_get(&m);
++     s.last = last_get(&m) && 0;
+
+@ test_session_script | components/session/restore.c | restore_skip
+= la position de reprise hors des bornes journalisée comme la marque (t_resume_other : skip=limit pos=18000)
+-     else bsk_journal_restore_skip("limit", s.last, &s.m);
++     else bsk_journal_restore_skip("limit", false, &s.m);
+
+@ test_session_script | components/session/restore.c | restore_start
+= le retour à la position de reprise journalisé comme à la marque (t_resume_ring : pos=18000)
+-     bsk_journal_restore(&s.m, s.last, s.x, s.via == s.m.position ? -1 : s.via);
++     bsk_journal_restore(&s.m, false, s.x, s.via == s.m.position ? -1 : s.via);
+
+@ test_session_script | components/session/motion.c | motion_aim
+= une cible rendue sans commande en vol (t_resume_ring : la cible d'avant, 0, au lieu de 18000)
+-     if (!m.busy) return false;
++     if (0) return false;
+
+@ test_session_script | components/session/session.c | to_off
+= D2 retombé : la position gardée, visée au démarrage suivant (t_resume_cold : la marque)
+-     restore_drop();
+-     enter(SESSION_OFF);
++     enter(SESSION_OFF);
+
+@ test_session_script | components/session/session.c | session_attach
+= CMD_ATTACH : la position gardée, visée (t_resume_cold : la marque)
+-     restore_drop();
++     (void)0;
+
+@ test_session_script | components/session/session.c | bsk_session_step
+= la position de reprise jamais tenue (t_resume_ring)
+-     if (s.state == SESSION_READY) restore_note();
++     (void)0;
+
+@ test_session135 | components/session/session.c | bsk_session_step
+= la position tenue hors de READY : l'init de la reprise (son homing, 16384) la remplace (t_restore_recovery : 25000)
+-     if (s.state == SESSION_READY) restore_note();
++     restore_note();
+
+@ test_session_script | components/session/session.c | bsk_session_init
+= la mémoire donnée ignorée (t_resume_reboot : K jamais tenue)
+-     restore_init(p->keep, p->warm);
++     restore_init(NULL, p->warm);
+
+@ test_session_script | components/session/session.c | bsk_session_params_default
+= chaque démarrage de la SESSION tenu pour une reprise (le banc suivant hérite de la position du précédent)
+-     p->warm = false;
++     p->warm = true;
+
+@ test_journal | components/journal/journal.c | bsk_journal_restore
+= * restore direct : la position de reprise écrite mark= (t_lines : pos=21000)
+-                    last ? "pos" : "mark", (long)m->position, DIR[m->approach_dir], (long)x);
++                    last ? "mark" : "mark", (long)m->position, DIR[m->approach_dir], (long)x);
+
+@ test_journal | components/journal/journal.c | bsk_journal_restore
+= * restore avec dépassement : la position de reprise écrite mark= (t_lines : pos=21000 … via=20800)
+-                    last ? "pos" : "mark", (long)m->position, DIR[m->approach_dir], (long)x, (long)via);
++                    last ? "mark" : "mark", (long)m->position, DIR[m->approach_dir], (long)x, (long)via);
+
+@ test_journal | components/journal/journal.c | bsk_journal_restore_skip
+= * restore skip=limit : la position de reprise écrite mark= (t_lines : skip=limit pos=31000)
+-     if (m) transition(t, "* restore %llu skip=%s %s=%ld", (unsigned long long)(t / 1000), why, last ? "pos" : "mark",
++     if (m) transition(t, "* restore %llu skip=%s %s=%ld", (unsigned long long)(t / 1000), why, last ? "mark" : "mark",
+
+@ test_host | components/host/host.c | power
+= p1 en READY dépose CMD_ATTACH : le démarrage relancé sur des alimentations établies (t_ready_commands, t_refusals)
+-         if (st->session_state != SESSION_OFF && st->session_state != SESSION_FAULT) {
++         if (0) {
+
+@ test_host | components/host/host.c | power
+= p1 sans effet en READY seul : un démarrage ou une reprise en cours relancés (t_state_commands, chaque état de SEQ_STATES)
+-         if (st->session_state != SESSION_OFF && st->session_state != SESSION_FAULT) {
++         if (st->session_state == SESSION_READY) {
+
+@ test_host | components/host/host.c | power
+= p1 sans effet en FAULT : le réarmement perdu (t_state_commands, p1 en FAULT : CMD_ATTACH)
+-         if (st->session_state != SESSION_OFF && st->session_state != SESSION_FAULT) {
++         if (st->session_state != SESSION_OFF) {
+
+@ test_host | components/host/host.c | power
+= p1 sans effet en OFF : le maintien de p0 jamais levé, D2 absent sans démarrage à l'insertion (t_state_commands)
+-         if (st->session_state != SESSION_OFF && st->session_state != SESSION_FAULT) {
++         if (st->session_state != SESSION_FAULT) {
+
+# ── ticket #689 : un délai qui suit une action de la carte compté depuis l'instant réel de l'action (session.c, settle),
+#    test_session_script, t_lag_audit, t_lag_steps, t_lag_edge_in_step, t_lag_home, t_lag_waits ──
+
+@ test_session_script | components/session/session.c | bsk_session_step
+= l'instant réel du pas jamais retenu : les délais comptés sur l'heure historique (t_lag_audit : lignes 0 µs après le rail moteur)
+-     s.real = now_us;
++     s.real = 0;
+
+@ test_session_script | components/session/session.c | bsk_session_step
+= l'heure historique avancée à l'instant réel au début du pas : une échéance jugée avant un événement plus ancien (t_lag_waits : LENS_CS lue après l'échéance de sa levée, never_high)
+-     s.real = now_us;
++     s.real = s.now = now_us;
+
+@ test_session_script | components/session/session.c | acted
+= l'instant de l'action pris sur l'heure historique seule (t_lag_audit, chaque délai échu au pas en retard)
+- return s.now > s.real ? s.now : s.real;
++ return s.now;
+
+@ test_session_script | components/session/session.c | acted
+= l'instant de l'action pris au début du pas, avant un événement daté pendant lui (t_lag_edge_in_step : BODY_CS rabaissée 2,9 ms après LENS_CS haute)
+- return s.now > s.real ? s.now : s.real;
++ return s.real;
+
+@ test_session_script | components/session/session.c | settle
+= les délais minimaux comptés sur l'heure historique, comme avant le ticket #689 (t_lag_audit)
+-     s.due = acted() + (uint64_t)ms * MS;
++     s.due = s.now + (uint64_t)ms * MS;
+
+@ test_session_script | components/session/session.c | to_powering
+= les 50 ms après le rail logique comptées sur l'heure historique (t_lag_steps : rail moteur 0 µs après le rail logique)
+-     settle(S_RAIL_LOGIC, RAIL_MS);
++     wait_for(S_RAIL_LOGIC, RAIL_MS);
+
+@ test_session_script | components/session/session.c | on_due
+= les 50 ms après le rail moteur comptées sur l'heure historique (t_lag_audit : lignes 0 µs après le rail moteur)
+-         settle(S_RAIL_MOTOR, RAIL_MS);
++         wait_for(S_RAIL_MOTOR, RAIL_MS);
+
+@ test_session_script | components/session/session.c | on_due
+= les 15 ms de BODY_CS basse comptées sur l'heure historique (t_lag_steps : BODY_CS haute 0 µs après les lignes)
+-         settle(S_HS_LOW, HS_LOW_MS);
++         wait_for(S_HS_LOW, HS_LOW_MS);
+
+@ test_session_script | components/session/session.c | advance
+= les 3 ms de BODY_CS haute tenue comptées sur l'heure historique (t_lag_steps : le Sony, BODY_CS rabaissée 0 µs après sa levée)
+-             settle(S_HS_HOLD, HS_HOLD_MS);
++             wait_for(S_HS_HOLD, HS_HOLD_MS);
+
+@ test_session_script | components/session/session.c | to_homing
+= les 100 ms après le 0x1C comptées sur l'heure historique (t_lag_home : 0x10 08 0 µs après le 0x1C)
+-     settle(S_HOME_PAUSE, AF_STOP_MS);
++     wait_for(S_HOME_PAUSE, AF_STOP_MS);
+
+@ test_session_script | components/session/session.c | on_due
+= BODY_CS levée datée de l'heure historique : lens_cs_up_us compte le retard du pas (t_lag_steps : le 135, 1100)
+-         s.hs_body_up = acted();
++         s.hs_body_up = s.now;
+
+@ test_session_script | components/session/session.c | advance
+= LENS_CS vue haute avant BODY_CS levée : la mesure déborde (t_lag_steps : le Sony, lens_cs_up_us=0)
+-             s.hs_up_us = s.now > s.hs_body_up ? s.now - s.hs_body_up : 0;
++             s.hs_up_us = s.now - s.hs_body_up;
+
+# ── ticket #691 : les fenêtres de la poignée de main comptées depuis le mouvement réel de BODY_CS, une commande à son
+#    instant réel (session.c, settle, bsk_session_real), test_session_script, t_lag_hs_up, t_lag_hs_down, t_lag_attach ──
+
+@ test_session_script | components/session/session.c | on_due
+= la fenêtre de la levée de LENS_CS comptée sur l'heure historique (t_lag_hs_up : BODY_CS levée et rabaissée au même pas en retard, never_high)
+-         settle(S_HS_UP, s.p.handshake_ms);
++         wait_for(S_HS_UP, s.p.handshake_ms);
+
+@ test_session_script | components/session/session.c | on_due
+= la fenêtre de la retombée de LENS_CS comptée sur l'heure historique (t_lag_hs_down : stuck_high au pas en retard qui rabaisse BODY_CS)
+-         settle(S_HS_DOWN, s.p.handshake_ms);
++         wait_for(S_HS_DOWN, s.p.handshake_ms);
+
+@ test_session_script | components/session/session.c | bsk_session_real
+= l'instant de la commande remis au début du dernier pas (t_lag_attach : rail moteur 10 ms après le rail logique)
+- s.real = now_us;
++ (void)now_us;
+
+@ test_host | components/host/host.c | letter
+= x : une ligne « x… » servie comme x (t_states, t_boot : x0, xa, « x » suivi d'une espace -> er nocap)
+-         if (l[1]) break;
+-         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)(h.clock() / 1000));
++         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)(h.clock() / 1000));
+
+@ test_host | components/host/host.c | letter
+= x : le temps en µs au lieu de ms (t_boot : panic 1, task_wdt 73412)
+-         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)(h.clock() / 1000));
++         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)h.clock());
+
+@ test_host | components/host/host.c | letter
+= x : le temps arrondi au lieu de tronqué (t_boot : 999 µs -> 0, 1999 µs -> 1)
+-         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)(h.clock() / 1000));
++         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)((h.clock() + 500) / 1000));
+
+@ test_host | components/host/host.c | letter
+= x : le temps sur 32 bits, revenu à 0 au bout de 49,7 jours comme un redémarrage (t_boot : brownout 4294967296)
+-         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)(h.clock() / 1000));
++         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)(uint32_t)(h.clock() / 1000));
+
+@ test_host | components/host/host.c | letter
+= x : une cause écrite dans le code, pas celle de bsk_host_init (t_boot : chacun des dix jetons)
+-         snprintf(out, cap, "%s %llu", h.reset, (unsigned long long)(h.clock() / 1000));
++         snprintf(out, cap, "%s %llu", "poweron", (unsigned long long)(h.clock() / 1000));
+
+# ── la fenêtre d'écoute : la réception ouverte lignes pilotées seulement (bsk_phy.h, bsk_phy_lines) ──
+
+@ test_phy | sim/phy_sim.c | from_lens
+= un octet reçu lignes au repos va au flux (t_rx_window : la réponse au 0x07 perdue lignes au repos ; le début d'avant pris dans la trame d'après)
+-         if (!heard()) return;
++         (void)heard();
+
+@ test_session135 | sim/phy_sim.c | from_lens
+= un octet reçu lignes au repos va au flux (t_rx_window : aucun événement de réception, aucune ligne * rx, en OFF après p0, après un retrait, rails en cours d'établissement)
+-         if (!heard()) return;
++         (void)heard();
+
+@ test_phy | sim/phy_sim.c | phy_sim_bus_error
+= une E_BUS rapportée lignes au repos (t_rx_window : l'E_BUS non rapportée)
+-     if (!heard()) return;
++     (void)heard();
+
+@ test_session135 | sim/phy_sim.c | phy_sim_bus_error
+= une E_BUS rapportée lignes au repos (t_rx_window : aucune ligne * rx err=bus)
+-     if (!heard()) return;
++     (void)heard();
+
+@ test_phy | sim/phy_sim.c | bsk_phy_lines
+= les lignes relâchées sans vider la réception (t_rx_window : 100 ms après, rien n'est rendu)
+-         rx_clear(&g.rx);
++         (void)0;
+
+@ test_phy | sim/phy_sim.c | cut
+= la coupure de la retombée sans vider la réception (t_rx_window : D2 retombé, l'absence seule)
+-     rx_clear(&g.rx);
++     (void)0;
+
+@ test_phy | components/phy/phy_common.c | rx_clear
+= le début de trame en attente gardé (t_rx_window : 100 ms après les lignes relâchées, rien n'est rendu)
+-     r->n = 0;
++     (void)0;
+
+@ test_phy | components/phy/phy_common.c | rx_clear
+= les octets écartés pas encore rapportés gardés (t_rx_window : 100 ms après les lignes relâchées, rien n'est rendu)
+-     r->junk.n = r->junk.len = 0;
++     r->junk.len = 0;
+
+@ test_session135 | sim/phy_sim.c | d2_expire
+= la présence par la file : la file débordée derrière la retombée la perd (t_xdetect_full : OFF, à l'instant de la coupure)
+-     if (pres_expire(&g.pres, !g.d2_pin, g.now)) cut();
++     if (pres_expire(&g.pres, !g.d2_pin, g.now)) cut();
++     { bsk_phy_event_t e; if (pres_next(&g.pres, UINT64_MAX, &e)) push_event(&e); }
+
+# ── lens_rx ne publie que des valeurs valides : l'ouverture, la bague, la plage du 0x08, les bornes du 0x06 ──
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_frame
+= A1 : l'ouverture relue hors du domaine publiée telle quelle (t_aperture_domain, « relue 0x0DFF : inconnue », la LED)
+-         pub.ap = ap_code(f->msg[1], f->msg[2]);
++         pub.ap = (uint16_t)(f->msg[1] | f->msg[2] << 8);
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_frame
+= A1 : l'ouverture de la bague hors du domaine prise comme consigne (t_ring_domain, « pas prise »)
+-         pub.ap_ring = f->msg[20] & 0x01 ? ap_code(f->msg[18], f->msg[19]) : 0;
++         pub.ap_ring = f->msg[20] & 0x01 ? (uint16_t)(f->msg[18] | f->msg[19] << 8) : 0;
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_frame
+= A3 : la plage du 0x08 inversée retenue (t_aperture_inverted, « 0x1900 / 0x11BF : pas de plage »)
+-             if (!pub.ap_min || pub.ap_min > pub.ap_max) {
++             if (!pub.ap_min) {
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_frame
+= A3 : une plage du 0x08 d'un seul code refusée (t_aperture_inverted, « 0x1400 / 0x1400 : une plage »)
+-             if (!pub.ap_min || pub.ap_min > pub.ap_max) {
++             if (!pub.ap_min || pub.ap_min >= pub.ap_max) {
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_frame
+= A3 : le minimum de la plage inconnu (0) retenu (t_aperture_inverted, « plage 0x0000-0x11BF »)
+-             if (!pub.ap_min || pub.ap_min > pub.ap_max) {
++             if (pub.ap_min > pub.ap_max) {
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_frame
+= A2 : des bornes inversées après la marge publiées connues (t_limits_invalid, « r -> er link limits »)
+-         pub.lim = pub.fmin <= pub.fmax;
++         pub.lim = true;
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_frame
+= A2 : un intervalle d'un seul pas refusé (t_limits_invalid, « 100 / 110 : 105-105 »)
+-         pub.lim = pub.fmin <= pub.fmax;
++         pub.lim = pub.fmin < pub.fmax;
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_frame
+= A2 : des bornes invalides publiées telles quelles (t_limits_invalid, « bornes 0 / 0 »)
+-         if (!pub.lim) pub.fmin = pub.fmax = 0;
++         if (0) pub.fmin = pub.fmax = 0;
+
+@ test_session_script | components/session/lens_rx.c | lens_rx_stale
+= A2 : le 0x06 arrêté, les bornes à 0 restées connues (t_limits_invalid, « 0x06 arrêté : r -> er link limits »)
+-         pub.have06 = pub.lim = false;
++         pub.have06 = false;
+
+@ test_session_script | components/session/session.c | bsk_session_status
+= A2 : des bornes invalides publiées valides avec la position (t_limits_invalid, « r -> er link limits »)
+-     st->limits_valid = l->lim;
++     st->limits_valid = l->have06;
+
+@ test_session_script | components/host/host.c | letter
+= A2 : r rend des bornes invalides parce que la position est valide (t_limits_invalid, « r -> er link limits »)
+-         else if (!st->limits_valid) put(out, cap, "er link limits");
++         else if (!st->position_valid) put(out, cap, "er link limits");
+
+@ test_session_script | components/session/motion.c | motion_admit
+= A2 : une cible 0 admise dans des bornes invalides, publiées 0 et 0 (t_limits_invalid, « f0 -> er range limits »)
+-     return l->lim && target >= l->fmin && target <= l->fmax;
++     return l->have06 && target >= l->fmin && target <= l->fmax;
+
+@ test_session_script | components/session/mark.c | mark_set
+= A2 : une marque 0 posée dans des bornes invalides, publiées 0 et 0 (t_limits_invalid, « CMD_SET_MARK 0 : E_LIMIT »)
+-     if (!l->lim) return E_LIMIT;
++     if (!l->have06) return E_LIMIT;
+
+# ── q entre le 0x03 et le 0x04 : l'accusé final au départ du 0x1C retenu (B2 de l'audit des autorités) ──
+
+@ test_session_script | components/txn/txn.c | bsk_txn_send
+= un message retenu dit parti, sans place : q fini au dépôt (t_txn_held_end : place 0 ; t_stop_held : pas fini avant le 0x04)
+-         x.last = (uint8_t)(x.n_held - 1);
++         x.last = BSK_TXN_SENT;
+
+@ test_session_script | components/txn/txn.c | bsk_txn_send
+= la place d'un message retenu gardée pour le suivant, parti (t_txn_held_end : hors de l'intervalle de nouveau, aucune place)
+-     x.last = BSK_TXN_SENT;
+-     if (between()) {
++     if (between()) {
+
+@ test_session_script | components/txn/txn.c | release
+= l'échec d'un message retenu rendu à personne, comme avant (t_txn_held_end : E_BUS ; t_stop_held : q raté, ACK_FAILED)
+-         x.held[k].out = emit(1, x.held[k].msg, x.held[k].len);
+-         if (x.held[k].out == E_OK) seq_advance();
++         if (emit(1, x.held[k].msg, x.held[k].len) == E_OK) seq_advance();
++         x.held[k].out = E_OK;
+
+@ test_session_script | components/txn/txn.c | release
+= l'échec d'émission d'une requête retenue perdu : WAIT jusqu'à son échéance (t_txn_held_end : FAILED, E_BUS, à son départ)
+-             request_out(x.held[k].msg, x.held[k].len, x.held[k].timeout_ms, now_us);
++             (void)emit(2, x.held[k].msg, x.held[k].len);
++             seq_advance();
++             x.req_held = false;
++             x.deadline = now_us + (uint64_t)x.held[k].timeout_ms * 1000u;
+
+@ test_session_script | components/txn/txn.c | bsk_txn_held_end
+= l'issue lue avant le départ (t_txn_held_end : en attente jusqu'au 0x04 ; t_stop_held : pas fini à W + 10099 µs)
+-     if (place < x.n_held) return false;
++     if (place < x.n_held && 0) return false;
+
+@ test_session_script | components/txn/txn.c | bsk_txn_loop
+= la boucle arrêtée laisse aux retenus l'issue d'avant (t_txn_held_end : E_ABORTED ; t_stop_held_host : er link aborted)
+-     for (uint8_t k = 0; k < x.n_held; k++) x.held[k].out = E_ABORTED;
++     (void)0;
+
+@ test_session_script | components/session/motion.c | motion_q
+= le 0x1C retenu accusé au dépôt, comme avant (t_stop_held : q pas fini avant le 0x04)
+-     if (e == E_OK && drive_stop_held(&k)) {
++     if (e == E_OK && drive_stop_held(&k) && 0) {
+
+@ test_session_script | components/session/motion.c | motion_q_end
+= l'accusé final rendu à chaque pas (t_stop_held : un seul accusé final)
+-         m.q_held[k] = false;
++         (void)0;
+
+@ test_session_script | components/session/motion.c | motion_forget
+= q retenu jamais fini quand la boucle s'arrête avant le 0x04 (t_stop_held_host : er link aborted)
+-     motion_q_end(0);
++     (void)0;
+
+@ test_session_script | components/session/session.c | advance
+= q retenu jamais fini au départ de son 0x1C (t_stop_held : ACK_COMPLETED à W + 10100 µs)
+-     motion_q_end(s.now);
++     (void)0;
+
+@ test_session_script | components/session/motion.c | q_sent
+= la surveillance rallumée au départ du 0x1C retenu derrière un 0x1D déjà parti, l'arrêt confirmé pendant la retenue : le 0x1C renvoyé après lui (t_stop_held, accusé 1C pendant la retenue : aucun 0x1C après le 0x1D)
+-     if (!motion_moving() || m.wait) {
++     if (1) {
+
+@ test_session_script | components/host/host.c | final
+= q retenu répond ok au dépôt (t_stop_held_host : BSK_HOST_LATER, puis er link bus)
+-     if (h.pend_last.result == ACK_ACCEPTED) later(h.pend_seq, h.pend_op);
++     if (h.pend_last.result == ACK_ACCEPTED) put(out, cap, "ok");
+
+@ test_session_script | components/host/host.c | bsk_host_line
+= q retenu rendu sans réponse, une fin de ligne seule (t_stop_held_host : BSK_HOST_LATER)
+-         if (h.lt_wait) return BSK_HOST_LATER;
++         ;
+
+@ test_session_script | components/host/host.c | bsk_host_later
+= q rendu comme CUSTOM, avec des données (t_stop_held_host : ok)
+-     if (h.lt_op != CMD_LENS_CUSTOM) return "\n";
++     ;
+
+@ test_session_script | components/session/motion.c | motion_stop
+= l'abandon du retour à la marque pas surveillé (t_restore_rekey_stop : à l'abandon, puis à 1,5 et 3 s)
+-     stop_watch(e == E_OK ? 1 : 0, now);
++     stop_watch(0, now);
+
+# ── ticket #714 : les transitions hors du plafond, sous leur propre compte (test_journal, t_transition_cap) ──
+
+@ test_journal | components/journal/journal.c
+= 31 transitions par seconde au lieu de 30 (t_transition_cap : la 31e perdue)
+- #define TR_PER_S 30u
++ #define TR_PER_S 31u
+
+@ test_journal | components/journal/journal.c | admit_tr
+= les transitions sans borne (t_transition_cap : la 31e et la 32e perdues)
+-     if (j.win_tr >= TR_PER_S) {
++     if (0) {
+
+@ test_journal | components/journal/journal.c | admit_tr
+= une transition tue n'est pas comptée dans dropped (t_transition_cap)
+-         j.dropped++;
+-         return false;
++         return false;
+
+@ test_journal | components/journal/journal.c | admit_tr
+= une transition prend une place du plafond (t_transition_cap : 30 lignes du plafond après elle)
+-     j.win_tr++;
++     j.win_tr++;
++     j.win_n++;
+
+@ test_journal | components/journal/journal.c | window
+= le compte des transitions ne repart pas à la fenêtre suivante (t_transition_cap : la seconde suivante)
+-         j.win_n = j.win_rx = j.win_tr = 0;
++         j.win_n = j.win_rx = 0;
+
+@ test_journal | components/journal/journal.c | transition
+= éteint : les transitions sortent quand même (t_off_by_default)
+-     if (!j.on || !admit_tr(t_us)) return;
++     if (!admit_tr(t_us)) return;
+
+@ test_journal | components/journal/journal.c | bsk_journal_session
+= `* session` sous le plafond (t_transition_cap)
+-         transition(t, "* session %llu %s", (unsigned long long)(t / 1000), bsk_state_name(state));
++         line(false, t, "* session %llu %s", (unsigned long long)(t / 1000), bsk_state_name(state));
+
+@ test_journal | components/journal/journal.c | bsk_journal_session
+= `* session <t> fault` sous le plafond (t_transition_cap)
+-         transition(t, "* session %llu %s %s",
++         line(false, t, "* session %llu %s %s",
+
+@ test_journal | components/journal/journal.c | bsk_journal_motion
+= `* motion` sous le plafond (t_transition_cap)
+-     transition(t, "* motion %llu %s", (unsigned long long)(t / 1000), bsk_motion_name(state));
++     line(false, t, "* motion %llu %s", (unsigned long long)(t / 1000), bsk_motion_name(state));
+
+@ test_journal | components/journal/journal.c | bsk_journal_restore
+= `* restore … path=direct` sous le plafond (t_transition_cap)
+-         transition(t, "* restore %llu %s=%ld dir=%s x=%ld path=direct",
++         line(false, t, "* restore %llu %s=%ld dir=%s x=%ld path=direct",
+
+@ test_journal | components/journal/journal.c | bsk_journal_restore
+= `* restore … path=overshoot` sous le plafond (t_transition_cap)
+-         transition(t, "* restore %llu %s=%ld dir=%s x=%ld path=overshoot via=%ld",
++         line(false, t, "* restore %llu %s=%ld dir=%s x=%ld path=overshoot via=%ld",
+
+@ test_journal | components/journal/journal.c | bsk_journal_restore_skip
+= `* restore … skip=` avec la marque sous le plafond (t_transition_cap)
+-     if (m) transition(t, "* restore %llu skip=%s %s=%ld",
++     if (m) line(false, t, "* restore %llu skip=%s %s=%ld",
+
+@ test_journal | components/journal/journal.c | bsk_journal_restore_skip
+= `* restore … skip=` sans marque sous le plafond (t_transition_cap)
+-     else transition(t, "* restore %llu skip=%s", (unsigned long long)(t / 1000), why);
++     else line(false, t, "* restore %llu skip=%s", (unsigned long long)(t / 1000), why);
+
+@ test_journal | components/journal/journal.c | bsk_journal_restore_end
+= `* restore … end=` sous le plafond (t_transition_cap)
+-     transition(t, "* restore %llu end=%s", (unsigned long long)(t / 1000), why);
++     line(false, t, "* restore %llu end=%s", (unsigned long long)(t / 1000), why);
+
+# ── la marque annoncée une fois rangée (ticket #747) : mark.c, cmd.c, session.c, la couche HOTE ; le magasin de la carte
+#    joué sur l'hôte (test_store) ──
+
+@ test_session_script | components/session/mark.c | on_result
+= une écriture ratée publiée et comptée comme rangée (t_mark_store_fail)
+-     if (r->ok) stored(r->key);
++     if (1) stored(r->key);
+
+@ test_session_script | components/session/mark.c | mark_written
+= l'écriture toujours dite rangée : `ok` à une écriture ratée (t_mark_store_fail)
+-     *ok = w.ok;
++     *ok = true;
+
+@ test_session_script | components/session/mark.c | write
+= le geste compté au dépôt, avant que l'écriture ne soit rangée (t_mark_stored, mark_sets pendant l'attente)
+-     w.op = op;
++     w.op = op;
++     sets += op == BSK_STORE_PUT;
+
+@ test_session_script | components/session/mark.c | mark_set
+= une pose déposée pendant l'écriture d'un autre geste, son échéance passée (t_mark_deadline, js -> er busy)
+-     if (w.wait || !write(BSK_STORE_PUT, &m)) return E_BUSY;
++     if (!write(BSK_STORE_PUT, &m)) return E_BUSY;
+
+@ test_session_script | components/session/mark.c | mark_clear
+= un effacement déposé pendant l'écriture d'un autre geste (t_mark_deadline, CMD_CLEAR_MARK E_BUSY)
+-     if (w.wait || !write(BSK_STORE_DEL, &none)) return E_BUSY;
++     if (!write(BSK_STORE_DEL, &none)) return E_BUSY;
+
+@ test_session_script | components/session/mark.c | stored
+= la marque rangée sous une clé quittée publiée sous la courante (t_mark_stored, 134 mm)
+-     if (strcmp(key, k.key)) return;
++     if (0) return;
+
+@ test_session_script | components/session/cmd.c | cmd_mark_poll
+= l'accusé du geste après son échéance, au pas suivant (t_mark_deadline, ACK_FAILED à 2 s)
+-     if (!mk.wait || (!mark_written(&ok) && now < mk.due)) return;
++     if (!mk.wait || (!mark_written(&ok) && now <= mk.due)) return;
+
+@ test_session_script | components/session/cmd.c | mark_fly
+= l'échéance du magasin à 4 s, au-delà des 3 s du driver (t_mark_deadline)
+-     mk.due = session_now() + (uint64_t)BSK_STORE_WRITE_MS * 1000u;
++     mk.due = session_now() + (uint64_t)BSK_STORE_WRITE_MS * 2000u;
+
+@ test_session_script | components/session/cmd.c | cmd_button
+= l'appui long accusé comme une commande de l'hôte, sans sa ligne `* btn` (t_mark_stored)
+-             mark_fly(true, 0);
++             mark_fly(false, 0);
+
+@ test_session_script | components/session/session.c | bsk_session_step
+= le résultat du magasin jamais lu par la boîte : aucun geste retenu ne finit (t_mark_stored)
+-     cmd_mark_poll(s.now);
++     (void)s.now;
+
+@ test_session_script | components/session/session.c | bsk_session_next
+= l'échéance du geste de marque hors du prochain instant : l'accusé au premier pas d'après (t_mark_deadline, à 2 s)
+-     if (cmd_mark_due() < d) d = cmd_mark_due();
++     (void)cmd_mark_due();
+
+@ test_host | components/host/host.c | mark_line
+= `js`, `jx` : `ok` dès l'acceptation, avant l'écriture (t_mark_later)
+-         if (a.result == ACK_ACCEPTED) final(out, cap);
++         if (a.result == ACK_ACCEPTED) put(out, cap, "ok");
+
+@ test_host | components/host/host.c | refusal
+= l'échec d'écriture rendu sous un autre code (t_mark_later, er store)
+-     case E_STORE: put(out, cap, "er store"); break;
++     case E_STORE: put(out, cap, "er link store"); break;
+
+@ test_store | components/store/store.c | get
+= une clé absente lue comme une erreur (t_get : l'espace absent, la clé absente)
+-     r->err = e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND;
++     r->err = e != ESP_OK;
+
+@ test_store | components/store/store.c | get
+= la NVS en panne lue comme une absence (t_get : NOT_INITIALIZED)
+-     r->err = e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND;
++     r->err = e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND && e != ESP_ERR_NVS_NOT_INITIALIZED;
+
+@ test_store | components/store/store.c | del
+= l'effacement d'une clé absente dit raté (t_put_del)
+-     return e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;
++     return e == ESP_OK;
+
+@ test_store | components/store/store.c | bsk_store_init
+= une NVS d'une autre version jamais effacée : en panne au lieu d'effacée (t_init)
+-     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
++     if (e == ESP_ERR_NVS_NO_FREE_PAGES) {
+
+@ test_store | components/store/store.c | bsk_store_init
+= une réinit en échec après l'effacement dite effacée, saine (t_init)
+-     if (e != ESP_OK) state = BSK_STORE_NVS_BROKEN;
++     if (e != ESP_OK && state == BSK_STORE_NVS_OK) state = BSK_STORE_NVS_BROKEN;
+
+@ test_host135 | components/session/session.c | bsk_session_status
+= le maintien de CMD_DETACH pas publié : t -> power_off=0 et b -> er nolens après un CMD_DETACH hors HOTE, comme avant le ticket (t_hold_session)
+-     st->held = s.held;
++     st->held = false;
+
+# ── une seule admission des gotos, consultée par le goto direct et par le retour (B3 de l'audit des autorités) ──
+@ test_session135 | components/session/motion.c | motion_command
+= B3 : le goto direct saute l'admission commune, une cible hors des bornes émise (t_goto_limit)
+-     if (!motion_admit(target)) {
++     if (0) {
+
+@ test_session135 | components/session/restore.c | restore_plan
+= B3 : le retour saute l'admission commune, la marque hors des bornes visée quand même (t_restore_none : 13000, RESTORING et un 0x1D)
+-     if (!motion_admit(m.position)) return false;
++     (void)0;
+
+# ── un seul « en mouvement », publié par MOUVEMENT ; une seule échelle des tiers, confrontée cran par cran à une liste
+#    écrite à la main (B4 de l'audit des autorités) ──
+@ test_host135 | components/session/session.c | bsk_session_status
+= B4 : le mouvement pas publié, e -> n pendant un goto (t_goto)
+-     st->moving = motion_moving();
++     st->moving = false;
+
+@ test_host135 | components/session/session.c | bsk_session_status
+= B4 : un mouvement publié à l'arrêt, e -> y en READY au repos (t_boot)
+-     st->moving = motion_moving();
++     st->moving = true;
+
+@ test_host | components/host/host.c | letter
+= B4 : HOTE refait le mouvement depuis l'état de MOUVEMENT, MOVING seul, au lieu du fait publié (t_ready_reads : COMMANDED)
+-             put(out, cap, ready ? (st->moving ? "y" : "n") : in_sequence(st) ? "y" : "n");
++             put(out, cap, ready ? (st->motion_state == MOTION_MOVING ? "y" : "n") : in_sequence(st) ? "y" : "n");
+
+@ test_session_script | components/session/ring.c
+= B4 : f/1,0, le premier cran de la bague, faux d'un code (t_thirds : FF FF)
+- {0x1000, 0x1046,
++ {0x1001, 0x1046,
+
+@ test_session_script | components/session/ring.c
+= B4 : f/45, le dernier cran de la bague, faux d'un code (t_thirds : le 33e tiers)
+- 0x1AA5, 0x1AFC};
++ 0x1AA5, 0x1AFD};
+
+@ test_session_script | components/host/host.c
+= B4 : f/1,2 pris pour f/1,3 dans l'échelle de HOTE (t_thirds : la sonde 0x10A7)
+- {10, 11, 12, 14,
++ {10, 11, 13, 14,
+
+@ test_session_script | components/host/host.c
+= B4 : f/4,5 absent de l'échelle de HOTE, f/6 à sa place (t_thirds : la sonde 0x144E, f/4,45, ni cran ni f/4,5)
+- 40, 45, 50,
++ 40, 60, 50,
+
+@ test_session_script | components/host/host.c
+= B4 : f/45, le dernier cran de l'échelle de HOTE, pris pour f/46 (t_thirds : la sonde 0x1AFD)
+- 400, 450};
++ 400, 460};
+
+@ test_session_script | components/session/session.c | on_due
+= #674 : la perte pas prise en RESTORING vers la position de reprise (t_resume_restoring_loss : STALLED, READY)
+-     case S_WATCH:
+-         if (s.now < s.t05 + lost_us()) {
++     case S_WATCH:
++         if (s.state == SESSION_RESTORING) { s.due = UINT64_MAX; break; }
++         if (s.now < s.t05 + lost_us()) {
+
+@ test_session_script | components/session/session.c | on_due
+= #674 : une perte en RESTORING efface la position de reprise (t_resume_restoring_loss : la reprise vise la marque, 20000)
+-         motion_leave(E_LOST);
++         if (s.state == SESSION_RESTORING) restore_drop();
++         motion_leave(E_LOST);
+
+@ test_session_script | components/session/session.c | bsk_session_step
+= #674 : la position de reprise tenue en RESTORING, la cible du dépassement en vol (t_resume_restoring_loss : K changée)
+-     if (s.state == SESSION_READY) restore_note();
++     if (s.state == SESSION_READY || s.state == SESSION_RESTORING) restore_note();
+
+@ test_session_script | components/session/session.c | to_recovering
+= #689 : l'attente du nouvel essai comptée depuis le pas qui lit l'échec (t_lag_wait_dues : POWERING 200 ms plus tard)
+-     wait_for(S_REC_WAIT, s.p.retry_wait_ms);
++     settle(S_REC_WAIT, s.p.retry_wait_ms);
+
+@ test_session_script | components/session/session.c | boot_end
+= #689 : la lecture de la marque attendue depuis le pas qui lit la fin du démarrage (t_lag_wait_dues : READY 200 ms plus tard)
+- wait_for(S_MARK, MARK_WAIT_MS);
++ settle(S_MARK, MARK_WAIT_MS);
+
+@ test_session_script | components/session/session.c | probe
+= #689 : la sonde comptée depuis le pas qui lit l'échéance du premier 0x05 (t_lag_wait_dues : RECOVERING 200 ms plus tard)
+-     wait_for(S_PROBE05, s.p.probe05_ms);
++     settle(S_PROBE05, s.p.probe05_ms);
+
+@ test_session_script | components/session/session.c | on_init
+= #689 : le premier 0x05 attendu depuis le pas qui lit la réponse au 0x0A (t_lag_wait_dues : RECOVERING 200 ms plus tard)
+-         wait_for(S_FIRST05, s.p.first05_ms);
++         settle(S_FIRST05, s.p.first05_ms);
+
+@ test_session_script | components/session/session.c | on_reply
+= #689 : l'immobilité du homing attendue depuis le pas qui lit la réponse au 0x10 08 (t_lag_wait_dues : RECOVERING 200 ms plus tard)
+-         wait_for(S_STILL, s.p.still_ms);
++         settle(S_STILL, s.p.still_ms);
+
+# ── #680 : le bit AF sur 30 paires, le goto déposé entre le 0x03 et le 0x04 (t_txn_goto_between) ; bsk_txn_n03
+
+@ test_session_script | components/session/drive.c | paired
+= #680 : le 0x03 parti avant le dépôt décompte le bit AF (t_txn_goto_between : 29 paires, dans ce 0x04, reporté, redéposé)
+-     if (d.af_left && bsk_txn_n03() != d.from) af_hold((uint8_t)(d.af_left - 1));
++     if (d.af_left) af_hold((uint8_t)(d.af_left - 1));
+
+@ test_session_script | components/session/drive.c | drive_goto
+= #680 : le nombre de 0x03 partis pas relevé au dépôt (t_txn_goto_between : 29 paires)
+-     d.from = bsk_txn_n03();
++     (void)0;
+
+@ test_session_script | components/txn/txn.c | pair_due
+= #680 : les 0x03 échus jamais comptés, le bit AF jamais décompté (t_txn_goto : 30 paires)
+-         x.n03++;
++         (void)0;
+
+# ── #590 : la prise de la carte relue tant qu'un front arrive pendant elle (fault_settle, components/phy/phy_common.h ;
+#    t_fault_settle) ; la mise en événements d'une prise écrite une fois (fault_events, components/phy/phy_common.c)
+
+@ test_phy | components/phy/phy_common.h | fault_settle
+= #590 : le fantôme, un front vu dans le niveau puis compté par la prise que son statut relance (t_fault_settle : 2 prises)
+-     while (again(rail));
++     while (0 && again(rail));
+
+@ test_phy | components/phy/phy_common.h | fault_settle
+= #590 : le niveau lu avant un front venu pendant la prise, jamais relu (t_fault_settle : actif, retombé entre les relectures)
+-     do active = level(rail);
+-     while (again(rail));
++     active = level(rail);
++     while (again(rail));
+
+@ test_phy | sim/phy_sim.c | phy_sim_rail_fault
+= #590 : le second changement d'une prise jamais mis en file (t_rail_fault : l'activation brève, activé puis retombé)
+-     for (uint8_t i = 0; i < n; i++) push_event(&e[i]);
++     for (uint8_t i = 0; i < n && i < 1; i++) push_event(&e[i]);
+
+# ── #734 : le geste de la bague borné (ring.c, t_ring_bound)
+
+@ test_session_script | components/session/ring.c | aperture
+= #734 : le geste jamais clos par sa borne (t_ring_bound : une seule ligne, frames=4100)
+-         if (r.frames == GESTURE_N) gesture_end();
++         (void)0;
+
+@ test_session_script | components/session/ring.c | aperture
+= #734 : le geste clos un 0x05 après sa borne (t_ring_bound : frames=4096 attendu)
+-         if (r.frames == GESTURE_N) gesture_end();
++         if (r.frames > GESTURE_N) gesture_end();
+
+@ test_session_script | components/session/ring.c | aperture
+= #734 : le reste de la somme gardé à la pause quand la borne a clos le geste (t_ring_bound_rest : un tiers au +1 d'après)
+-         if (r.gesture) gesture_end();
+-         r.accum = 0;
++         if (r.gesture) {
++             gesture_end();
++             r.accum = 0;
++         }
+
+# ── #734 : le seq de l'hôte jamais BSK_SEQ_BOARD (host.c, t_seq_wrap)
+
+@ test_host | components/host/host.c | deposit
+= #734 : le seq de l'hôte reboucle sur BSK_SEQ_BOARD (t_seq_wrap : la commande suivante sous 0, prise pour le bouton)
+-     if (++h.seq == BSK_SEQ_BOARD) ++h.seq;
++     ++h.seq;
+
+# ── #734 : la génération du journal sur 32 bits (journal.c, t_gen_wide)
+
+@ test_journal | components/journal/journal.c | put_raw
+= #734 : la génération d'une ligne rangée sur 8 bits (t_gen_wide : 512 LOG OFF, l'ancienne génération)
+-     for (unsigned k = 0; k < 4; k++, h = (h + 1) % RING) j.ring[h] = (uint8_t)(g >> 8 * k);
++     for (unsigned k = 0; k < 4; k++, h = (h + 1) % RING) j.ring[h] = (uint8_t)(k ? 0 : g);
+
+@ test_journal | components/journal/journal.c | bsk_journal_take
+= #734 : la génération d'une ligne relue sur 8 bits (t_gen_wide : 512 LOG OFF, l'ancienne génération)
+-     for (unsigned k = 0; k < 4; k++, t = (t + 1) % RING) *gen |= (uint32_t)j.ring[t] << 8 * k;
++     for (unsigned k = 0; k < 4; k++, t = (t + 1) % RING) *gen |= (uint32_t)(k ? 0 : j.ring[t]) << 8 * k;
+
+@ test_journal | components/journal/journal.c | bsk_journal_lost
+= #734 : la génération d'une perte rangée sur 8 bits (t_gen_wide : 512 LOG OFF, la perte sous l'ancienne génération)
+-         w = (uint64_t)g << 32 | (k < LOST_N ? k + 1 : k);
++         w = (uint64_t)(uint8_t)g << 32 | (k < LOST_N ? k + 1 : k);
+
+@ test_journal | components/journal/journal.c | lost_line
+= #734 : la génération d'une perte relue sur 8 bits (t_gen_wide : 512 LOG OFF, la perte sous l'ancienne génération)
+-     *gen = (uint32_t)(v >> 32);
++     *gen = (uint8_t)(v >> 32);
+
+# ── #783 : une réponse qui n'est pas celle de la requête en cours ne la termine pas (answers, components/txn/txn.c) ;
+#    CMD_LENS_CUSTOM refusée après une échéance, jusqu'à la coupure des rails (components/session/cmd.c, session.c) ──
+
+@ test_session_script | components/txn/txn.c | answers
+= #783 : la sous-commande d'une 0x40 de 2 octets lue au-delà de la trame (t_txn_answers : 'P' FA dans le tampon, WAIT)
+-         return f->len >= 3 && r[1] == x.q[1] && r[2] == x.q[2];
++         return r[1] == x.q[1] && r[2] == x.q[2];
+
+@ test_session_script | components/txn/txn.c | answers
+= #783 : un 0x0B plus long que la requête pris pour son écho (t_txn_answers : 0B 60 00 00, WAIT)
+-         return f->len == x.q_len && !memcmp(r, x.q, x.q_len);
++         return !memcmp(r, x.q, x.q_len);
+
+@ test_session_script | components/txn/txn.c | answers
+= #783 : le 0x0B jugé sur sa longueur seule (t_init_not_echo : 0B 42 00 termine le 0B 60 00)
+-         return f->len == x.q_len && !memcmp(r, x.q, x.q_len);
++         return f->len == x.q_len;
+
+@ test_session_script | components/txn/txn.c | answers
+= #783 : un 0x0A plus long que la requête pris pour sa réponse (t_txn_answers : l'écho et un octet nul de plus, WAIT)
+-         if (f->len > x.q_len) return false;
++         (void)0;
+
+@ test_session_script | components/txn/txn.c | answers
+= #783 : un 0x0A qui porte un bit hors de la requête pris pour sa réponse (t_init_not_echo : la boucle part à 1 ms)
+-             if (r[i] & ~x.q[i]) return false;
++             if (0) return false;
+
+@ test_session_script | components/txn/txn.c | answers
+= #783 : le 0x0A jugé comme un écho, la requête masquée refusée (t_txn_answers : 0A FF 03 … 00, DONE)
+-             if (r[i] & ~x.q[i]) return false;
++             if (r[i] != x.q[i]) return false;
+
+@ test_session_script | components/session/cmd.c | custom_cmd
+= #783 : CMD_LENS_CUSTOM servie le canal désynchronisé (t_custom_late : la deuxième lecture refusée, E_DESYNC)
+-     if (cu.desync) {
++     if (0) {
+
+@ test_session_script | components/session/cmd.c | custom_cmd
+= #783 : le refus du canal désynchronisé rendu sous une autre raison (t_custom_late : E_DESYNC)
+-         reject(c, E_DESYNC);
++         reject(c, E_BUSY);
+
+@ test_session_script | components/session/cmd.c | cmd_custom_poll
+= #783 : l'échéance d'un CUSTOM ne désynchronise pas le canal (t_custom_late : la deuxième lecture refusée)
+-         if (bsk_txn_error() == E_TIMEOUT) cu.desync = true;
++         (void)0;
+
+@ test_session_script | components/session/cmd.c | cmd_forget
+= #783 : l'oubli de la session, la reprise comprise, lève le refus (t_custom_desync_kept : refusée après la reprise)
+-     cu.wait = false;
++     cu.wait = cu.desync = false;
+
+@ test_session_script | components/session/session.c | to_off
+= #783 : la coupure des rails ne lève pas le refus (t_custom_desync_lifted : servie après D2, après p0 puis p1)
+-     cmd_rails_cut();
++     (void)0;
+
+@ test_session_script | components/session/cmd.c | cmd_init
+= #783 : le démarrage de la carte ne lève pas le refus (t_custom_desync_kept : la lecture du banc qui suit t_custom_late)
+-     memset(&cu, 0, sizeof cu);
++     (void)0;
+
+@ test_session_script | components/session/cmd.c | cmd_forget
+= #789 : un CUSTOM émis, en vol à la perte, ne désynchronise pas le canal (t_custom_lost : la suivante refusée après la reprise)
+-     if (cu.wait && bsk_txn_state() == TXN_WAIT) cu.desync = true;
++     (void)0;
+
+@ test_session_script | components/session/cmd.c | cmd_forget
+= #789 : l'oubli sans CUSTOM en vol désynchronise quand même (t_custom_forget_free : servie après b en READY ; l'init passe par l'oubli, le premier CUSTOM de t_custom tombe aussi)
+-     if (cu.wait && bsk_txn_state() == TXN_WAIT) cu.desync = true;
++     cu.desync = true;
+
+@ test_session_script | components/session/cmd.c | cmd_forget
+= #789 : un CUSTOM retenu jusqu'au 0x04, jamais émis, désynchronise à la perte (t_custom_held_lost : servie après la reprise)
+-     if (cu.wait && bsk_txn_state() == TXN_WAIT) cu.desync = true;
++     if (cu.wait) cu.desync = true;
+
+@ test_session_script | components/session/cmd.c | cmd_init
+= #789 : bsk_session_init garde le CUSTOM en vol d'un banc, que son oubli désynchronise (t_custom_boot_free : servie au banc nouveau)
+-     memset(&cu, 0, sizeof cu);
++     cu.desync = false;
+
+@ test_session_script | components/session/session.c | to_off
+= #789 : la coupure des rails avant l'oubli, qui désynchronise ensuite (t_custom_d2_free : servie après l'objectif rebranché)
+-     forget();
+-     lines_rest();
+-     bsk_phy_rail(BSK_RAIL_MOTOR, false);
+-     bsk_phy_rail(BSK_RAIL_LOGIC, false);
+-     cmd_rails_cut();
++     cmd_rails_cut();
++     forget();
++     lines_rest();
++     bsk_phy_rail(BSK_RAIL_MOTOR, false);
++     bsk_phy_rail(BSK_RAIL_LOGIC, false);
+
+# ── ticket #787 : un goto déposé pendant la surveillance de l'arrêt attend sa fin pour émettre son 0x1D
+#    (components/session/motion.c : mv_start, stop_end, q_sent, motion) ──
+
+@ test_stop_goto135 | components/session/motion.c | mv_start
+= le 0x1D part sans attendre la fin de l'arrêt : le 135 le reprend avec le 0x1C, ou avant la fin de l'arrêt, le goto finit hors de sa cible (le balayage, (b))
+-     if (m.stop_sends) m.wait = true;
++     if (0) m.wait = true;
+
+@ test_session_script | components/session/motion.c | stop_end
+= l'arrêt fini, le goto qui attendait ne part jamais (t_stop_goto_order : aucun 0x1D)
+-     if (m.wait) mv_send(now);
++     (void)0;
+
+@ test_session_script | components/session/motion.c | stop_expire
+= le 0x1C abandonné, le goto qui attend reste suspendu sans fin (t_stop_held, un goto après q : le 0x1D à W + 4 526 586 µs)
+-         stop_end(now);
++         stop_watch(0, now);
+
+@ test_stop_goto135 | components/session/motion.c | motion_frame
+= le goto qui attend lit les trames de l'arrêt : l'accusé 1D 00 du goto arrêté, dans le 0x06 de l'accusé 1C, le dit arrivé hors de sa cible (le balayage, M+ et M-)
+-     if (motion_moving() && !m.wait) mv_frame(type, lens_rx()->ack1d, now);
++     if (motion_moving()) mv_frame(type, lens_rx()->ack1d, now);
+
+@ test_session_script | components/session/motion.c | motion
+= un goto ABORTED par q pendant son attente part quand même à la fin de l'arrêt (t_stop_wait_q : aucun 0x1D)
+-     m.wait = m.wait && st == MOTION_COMMANDED;
++     (void)0;
+
+@ test_session_script | components/session/motion.c | q_sent
+= le 0x1C retenu derrière lequel un goto attend : la surveillance n'est pas reprise à son départ, ni éteinte s'il rate (t_stop_held : renvoyé 1,5 s après son départ ; raté, le 0x1D à la paire suivante)
+-     if (!motion_moving() || m.wait) {
++     if (!motion_moving()) {

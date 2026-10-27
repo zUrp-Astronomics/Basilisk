@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: captain <captain@lcars.local>
 Date: Mon, 19 Oct 2026 18:54:56 +0200
-Subject: [PATCH 6/8] Pinefeat CEF: log a position that can't be read once, not
+Subject: [PATCH 6/9] Pinefeat CEF: log a position that can't be read once, not
  at each refresh
 
 Without a lens, `e` reports the focuser still and `f` answers `nc`:

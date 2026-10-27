@@ -1,35 +1,23 @@
 # Sony E-mount interoperability
 
-**Date** : 2026-10-08
-**Dernière révision** : 2026-10-08
-**Statut** : actif — index of `7_Docs/E-Mount/` (ticket #544)
-**Référencé par** : `protocol.md`, `samyang.md`, `tamron.md`, `traces.md`, `provenance.md`
-**Dérivé de** : the documents of this folder
+A body-side reference for projects that need to power, identify and drive an E-mount lens. It combines original captures, public prior work and explicitly labelled static analysis. It is an interface reference, not an implementation of a proprietary lens or a claim of universal compatibility.
 
-How a Sony E-mount camera body talks to its lens, seen from the body: the ten contacts, the
-frames, the session, every message and what decides the lens's answers, for Sony, Samyang and
-Tamron lenses. With this folder alone, one should be able to rewrite the body-side firmware of
-this project (`4_Firmware/`) and the fake lenses it tests against, without opening a lens
-firmware.
+## Read in this order
 
-What the project adds to the public work (`protocol.md` § 10): bench captures of real lenses
-taken with our own board, the code that drives them, and what each maker does with each common
-message.
+1. [Evidence and scope](provenance.md): what is observed, inferred or simulated, and what this edition omits.
+2. [Common protocol](protocol.md): contacts, handshake, frames, message layouts, encodings and disagreements.
+3. [Samyang](samyang.md): AF 135 behavior, model differences and the restricted Custom interface.
+4. [Tamron](tamron.md): admission rules, phase changes, motion and limits of the static evidence.
+5. [Capture guide](traces.md): original logs and their historical context. [Capture manifest](traces/manifest.json).
 
-## Reading order
+Offsets start after a message's type byte; lengths include that byte. Keep source and model/version scope with any fact reused elsewhere. Numerical section IDs in the brand references remain available for the firmware's comments.
 
-1. `protocol.md`: the common reference. Read it first; the other files use its conventions.
-2. `samyang.md`: what the body sees of Samyang lenses, beyond `protocol.md`.
-3. `tamron.md`: what the body sees of Tamron lenses, beyond `protocol.md`.
-4. `traces.md`: how to read the bench captures the documents cite.
-5. `provenance.md`: where each fact comes from, and what is not published.
+## Guide de lecture français
 
-## `traces/`
+Cette référence technique reste en anglais pour être réutilisable hors de Basilisk. Le [manuel FR](../MANUEL.md) couvre la réalisation et l'usage. Commencer ici par la provenance : les captures réelles, le code du contrôleur et les analyses de firmwares n'ont pas la même portée. Le simulateur n'ajoute pas une preuve matérielle.
 
-The bench captures cited as `` `traces/<file>` line <n> ``: eleven journals of our board facing a
-Sony FE 24-105 mm F4 G OSS or a Samyang AF 135 F1.8 FE, published as they were exported.
-`traces.md` describes each one.
+Le protocole commun donne contacts, trames, tailles et champs ; les deux suppléments expliquent les différences utiles au contrôleur. Les conclusions d'interopérabilité sont conservées, les détails internes de calibration et de programmation usine sont écartés. Les onze captures publiées restent intactes pour préserver leur valeur de preuve.
 
 ## Licence
 
-This folder follows the licences of the repository: see § License of the root `README.md`.
+See the repository [licence and third-party notices](../../README.md#license). Attribution of earlier work remains in [Prior art](protocol.md#10-prior-art).
